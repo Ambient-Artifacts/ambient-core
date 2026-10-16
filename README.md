@@ -17,7 +17,7 @@
 
 Agents are only as good as their context. Every agent in a company should know what the other agents and the people did and decided, and a company wiki only works if something keeps it current. Ambient does both: it turns what happens at work into wiki pages (people, projects, topics, decisions), keeps them up to date with Claude, and serves them to any AI app over MCP.
 
-This repository is Ambient's server: the MCP gateway, the personal and team wikis, the Claude Code plugin and the routine runner. The iPhone and Mac apps that record meetings are separate.
+This repository is Ambient's server: the MCP gateway, the personal and team wikis, the Claude Code plugin and the runner for loops. The iPhone and Mac apps that record meetings are separate.
 
 ## ✨ Features
 
@@ -26,7 +26,7 @@ This repository is Ambient's server: the MCP gateway, the personal and team wiki
 - **Team wikis in git.** Each team's wiki is a git repository on the team's own server: plain markdown with front matter, one commit per change. Connect your own GitHub or GitLab repo and the wiki stays in step with it, both ways.
 - **Work sessions become notes.** The [Claude Code plugin](integrations/claude-code) sends finished sessions; the gateway cuts them down, strips anything that looks like a secret, and Claude writes a short note. Folder rules route sessions to a team after a 30-minute hold.
 - **Wikis that keep themselves current.** Every night Claude folds the day's notes into the living pages (people, projects, topics), files decisions and writes an overview. It also checks for broken links, orphans and stale pages.
-- **Routines.** Prompts that Claude Code runs on a schedule on your own machines, with secrets, run history and live progress, managed from any AI app.
+- **Loops.** Prompts that Claude Code runs on a schedule on your own machines, with secrets, run history and live progress, managed from any AI app. (In the code and the MCP tools they're still called routines: `list_routines`, `create_routine`.)
 - **Search that understands German and English**: SQLite FTS5 with umlaut folding and trigram matching.
 
 ## 📦 Deploy Ambient
@@ -54,7 +54,7 @@ Then add `https://ambient.example.com/mcp` as a connector in Claude (Settings �
 | Personal wikis (encrypted at rest) and team wikis (git) | ✓ | ✓ |
 | Your own GitHub/GitLab repo as the wiki | ✓ | ✓ |
 | Work-session notes, nightly upkeep, overviews | ✓, included | ✓, with your Anthropic API key |
-| Routines | ✓ | ✓ |
+| Loops | ✓ | ✓ |
 | iPhone and Mac apps: recording, on-device transcription | ✓ | ✓, "Use your own server" at sign-in |
 | Sign-in | Apple, Microsoft; anyone can sign up | Apple; only people you add or allow |
 | Push notifications | ✓ | – |
@@ -80,12 +80,12 @@ Claude Code ───▶    └──signed 60 s tokens──▶ team server (gi
 
 | Path | What |
 |---|---|
-| `gateway/` | Sign-in (OAuth 2.1 via `oidc-provider`, DPoP-bound app tokens), MCP, encrypted personal sync, work sessions, routines, the admin CLI |
+| `gateway/` | Sign-in (OAuth 2.1 via `oidc-provider`, DPoP-bound app tokens), MCP, encrypted personal sync, work sessions, loops (`routines/` in the code), the admin CLI |
 | `team/` | A team's server: gateway-signed inbox and query API, ingest into a git-backed wiki, nightly consolidation with Claude |
 | `control/` | Convex functions and schema: the control plane. Every call carries a service secret; clients never talk to Convex directly |
 | `wiki/` | The wiki store: SQLite FTS5 search, indexes, git |
 | `spec/` | Shared contracts: zod schemas, JSON Schema export for the Swift apps, fixture wikis |
-| `runner/` | `ambient-runner.mjs`: runs routines on a user's computer with systemd and `claude -p`. One file, no dependencies |
+| `runner/` | `ambient-runner.mjs`: runs loops on a user's computer with systemd and `claude -p`. One file, no dependencies |
 | `integrations/claude-code/` | The Claude Code plugin |
 | `ops/` | `docker/` for self-hosting; the rest is how we run Ambient Cloud on Hetzner ([runbook](ops/README.md)) |
 
