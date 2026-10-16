@@ -1,0 +1,23 @@
+{
+  "name": "@brain/control",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./api": "./convex/_generated/api.js",
+    "./server": "./convex/_generated/server.js"
+  },
+  "scripts": {
+    "codegen": "convex codegen",
+    "dev": "convex dev",
+    "deploy": "convex deploy"
+  },
+  "dependencies": {
+    "convex": "^1.46.0"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "convex-test": "^0.0.60"
+  }
+}

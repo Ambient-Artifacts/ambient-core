@@ -1,0 +1,21 @@
+[Unit]
+Description=Ambient daily heartbeat (posts even when all is green)
+After=network-online.target
+Wants=network-online.target
+# No OnFailure: this job is the alerting; it exits 1 while problems are open.
+
+[Service]
+Type=oneshot
+User=brain
+Group=brain
+WorkingDirectory=/opt/brain/app
+EnvironmentFile=/etc/brain/gateway.env
+EnvironmentFile=-/etc/brain/alert.env
+StateDirectory=brain-health
+Environment=BRAIN_HEALTH_STATE=/var/lib/brain-health/state.json
+ExecStart=/usr/bin/node --import tsx gateway/src/worker/cli.ts health --daily
+TimeoutStartSec=5min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

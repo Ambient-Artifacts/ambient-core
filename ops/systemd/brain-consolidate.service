@@ -1,0 +1,17 @@
+[Unit]
+Description=Brain nightly consolidation (living pages from new Team notes)
+OnFailure=brain-notify@%n.service
+
+[Service]
+Type=oneshot
+User=brain
+Group=brain
+WorkingDirectory=/opt/brain/app
+EnvironmentFile=/etc/brain/team.env
+ExecStart=/usr/bin/node --import tsx team/src/cli.ts consolidate
+TimeoutStartSec=45min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/brain

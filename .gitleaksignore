@@ -1,0 +1,4 @@
+# Made-up secrets in tests that check secrets are removed from work sessions (not real keys).
+680e9617b6066b6fb8a62e5ad9f33c6098b9d86a:gateway/test/sessions-condense.test.ts:jwt:78
+680e9617b6066b6fb8a62e5ad9f33c6098b9d86a:gateway/test/sessions-condense.test.ts:stripe-access-token:73
+06aecbe94b02d01a8c32cd1aa1e534ff8b5b57e2:gateway/test/app.test.ts:generic-api-key:40

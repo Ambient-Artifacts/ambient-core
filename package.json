@@ -1,0 +1,28 @@
+{
+  "name": "brain-platform",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "spec",
+    "wiki",
+    "control",
+    "team",
+    "gateway"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p spec && tsc -p wiki && tsc -p control && tsc -p team && tsc -p gateway && tsc -p eval",
+    "schemas": "npm run export-json-schema -w @brain/spec",
+    "eval": "tsx eval/run.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
+  }
+}

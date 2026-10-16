@@ -1,0 +1,9 @@
+[Unit]
+Description=Check hourly whose morning it is for the open action items push
+
+[Timer]
+OnCalendar=*:05
+Persistent=true
+
+[Install]
+WantedBy=timers.target

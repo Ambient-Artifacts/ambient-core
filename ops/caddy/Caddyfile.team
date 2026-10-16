@@ -1,0 +1,11 @@
+# Team VM: only the gateway may call the team API (JWT-checked as well).
+__BRAIN_HOST__ {
+	@gateway remote_ip __BRAIN_GATEWAY_IP__
+	handle @gateway {
+		reverse_proxy 127.0.0.1:8090
+	}
+	handle {
+		respond "Forbidden" 403
+	}
+	header -Server
+}

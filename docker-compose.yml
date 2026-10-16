@@ -1,0 +1,173 @@
+# A self-hosted Ambient server on one machine: Convex (the database), the gateway (sign-in, MCP,
+# encrypted personal wikis), one team server (a team wiki in git) and their scheduled jobs, with
+# Caddy for HTTPS. First start: ops/docker/init.sh. Guide: docs/self-hosting.md.
+# Settings come from .env (see .env.example); each service only gets the ones it needs.
+name: ambient
+
+x-platform: &platform
+  image: ${AMBIENT_IMAGE:-ambient-platform:local}
+  build: .
+  restart: unless-stopped
+
+x-gateway-env: &gateway-env
+  BRAIN_ORIGIN: ${BRAIN_ORIGIN}
+  CONVEX_URL: http://convex:3210
+  BRAIN_SIGNING_JWKS: ${BRAIN_SIGNING_JWKS}
+  BRAIN_COOKIE_KEYS: ${BRAIN_COOKIE_KEYS}
+  BRAIN_MASTER_KEY_ID: ${BRAIN_MASTER_KEY_ID:-mk1}
+  BRAIN_MASTER_KEY: ${BRAIN_MASTER_KEY}
+  BRAIN_SERVICE_SECRET: ${BRAIN_SERVICE_SECRET}
+  # The Ambient apps (App Store) sign in here with Apple: their bundle id. "none" turns it off.
+  BRAIN_APPLE_AUDIENCES: ${BRAIN_APPLE_AUDIENCES:-si.ambientartifacts.brain}
+  BRAIN_MICROSOFT_CLIENT_IDS: ${BRAIN_MICROSOFT_CLIENT_IDS:-}
+  # Who the apps may sign up: "none" means only people added with `admin user add` (matched by
+  # the email Apple confirms); or list emails and domains ("@acme.com"); "open" lets anyone in.
+  BRAIN_SIGNUPS: ${BRAIN_SIGNUPS:-none}
+  # The sign-in page for AI apps also says the admin CLI hands out codes (`admin connect-code`).
+  BRAIN_ADMIN_CODES: "true"
+  # Optional: Claude writes work-session notes and keeps personal wikis current (opt-in per user).
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  BRAIN_SESSION_MODEL: ${BRAIN_SESSION_MODEL:-}
+  BRAIN_CONSOLIDATE_MODEL: ${BRAIN_CONSOLIDATE_MODEL:-}
+  BRAIN_ALERT_WEBHOOK: ${BRAIN_ALERT_WEBHOOK:-}
+  TZ: ${TZ:-UTC}
+
+x-team-env: &team-env
+  BRAIN_SERVER_ID: team-1
+  BRAIN_GATEWAY_ISSUER: ${BRAIN_ORIGIN}
+  # The gateway's signing keys, fetched over Docker's network instead of the public URL.
+  BRAIN_GATEWAY_JWKS: http://gateway:8080/oauth/jwks
+  # The team wiki's nightly upkeep. Without a key, notes still land; nothing is consolidated.
+  ANTHROPIC_API_KEY: ${TEAM_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}
+  BRAIN_CONSOLIDATE_MODEL: ${BRAIN_CONSOLIDATE_MODEL:-}
+  BRAIN_CONSOLIDATE_AT: ${BRAIN_CONSOLIDATE_AT:-02:00}
+  TZ: ${TZ:-UTC}
+
+services:
+  convex:
+    image: ${CONVEX_BACKEND_IMAGE:-ghcr.io/convex/convex-backend:latest}
+    restart: unless-stopped
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    volumes:
+      - convex-data:/convex/data
+    environment:
+      INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-convex-self-hosted}
+      CONVEX_CLOUD_ORIGIN: http://convex:3210
+      CONVEX_SITE_ORIGIN: http://convex:3211
+      # Convex's anonymous usage ping from self-hosted backends: off unless you turn it on.
+      DISABLE_BEACON: ${CONVEX_DISABLE_BEACON:-true}
+      DOCUMENT_RETENTION_DELAY: ${CONVEX_DOCUMENT_RETENTION_DELAY:-172800}
+    ports:
+      # This machine only: for the Convex dashboard (--profile dashboard) and `npx convex`.
+      - "127.0.0.1:${CONVEX_PORT:-3210}:3210"
+    healthcheck:
+      test: curl -f http://localhost:3210/version
+      interval: 5s
+      start_period: 10s
+
+  # Deploys the Convex functions and registers the team server; runs on every `up`, then exits.
+  setup:
+    <<: *platform
+    restart: "no"
+    command: ["node", "ops/docker/setup.mjs"]
+    environment:
+      CONVEX_SELF_HOSTED_URL: http://convex:3210
+      CONVEX_SELF_HOSTED_ADMIN_KEY: ${CONVEX_SELF_HOSTED_ADMIN_KEY:-}
+      BRAIN_SERVICE_SECRET: ${BRAIN_SERVICE_SECRET}
+      BRAIN_TEAM_SERVERS: team-1=http://team:8090
+    depends_on:
+      convex:
+        condition: service_healthy
+
+  gateway:
+    <<: *platform
+    command: ["node", "--import", "tsx", "gateway/src/server.ts"]
+    environment:
+      <<: *gateway-env
+      PORT: "8080"
+      # Caddy (or your own proxy) on Docker's network: believe its X-Forwarded-For.
+      BRAIN_TRUST_PROXY: loopback, uniquelocal
+    ports:
+      # This machine only: for your own reverse proxy, or to try it without a domain.
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      start_period: 20s
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+
+  # Work-session notes, personal upkeep and repo sync, health checks (ops/docker/jobs.mjs).
+  jobs:
+    <<: *platform
+    command: ["node", "ops/docker/jobs.mjs", "gateway"]
+    environment:
+      <<: *gateway-env
+      BRAIN_HEALTH_GATEWAY_URL: http://gateway:8080
+    volumes:
+      - jobs-state:/var/lib/brain-health
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  # One team's wiki. It waits in the pool until `admin team create` gives it a team, then
+  # restarts as that team's server. Only the gateway can reach it.
+  team:
+    <<: *platform
+    command: ["node", "--import", "tsx", "team/src/server.ts"]
+    environment:
+      <<: *team-env
+      PORT: "8090"
+    volumes:
+      - team-data:/data
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+
+  team-jobs:
+    <<: *platform
+    command: ["node", "ops/docker/jobs.mjs", "team"]
+    environment: *team-env
+    volumes:
+      - team-data:/data
+    depends_on:
+      - team
+
+  caddy:
+    image: caddy:2
+    profiles: ["caddy"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      BRAIN_DOMAIN: ${BRAIN_DOMAIN}
+    volumes:
+      - ./ops/docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - gateway
+
+  # Convex's dashboard on http://127.0.0.1:6791 (sign in with CONVEX_SELF_HOSTED_ADMIN_KEY).
+  dashboard:
+    image: ${CONVEX_DASHBOARD_IMAGE:-ghcr.io/convex/convex-dashboard:latest}
+    profiles: ["dashboard"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-6791}:6791"
+    environment:
+      NEXT_PUBLIC_DEPLOYMENT_URL: http://127.0.0.1:${CONVEX_PORT:-3210}
+    depends_on:
+      convex:
+        condition: service_healthy
+
+volumes:
+  convex-data:
+  team-data:
+  jobs-state:
+  caddy-data:
+  caddy-config:

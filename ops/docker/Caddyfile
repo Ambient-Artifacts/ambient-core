@@ -1,0 +1,10 @@
+# HTTPS in front of the gateway, with a certificate from Let's Encrypt for BRAIN_DOMAIN.
+# The team servers and Convex stay on Docker's internal network.
+{$BRAIN_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy gateway:8080
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

@@ -1,0 +1,22 @@
+[Unit]
+Description=Brain team server (inbox + query API)
+After=network-online.target
+Wants=network-online.target
+OnFailure=brain-notify@%n.service
+
+[Service]
+User=brain
+Group=brain
+WorkingDirectory=/opt/brain/app
+EnvironmentFile=/etc/brain/team.env
+ExecStart=/usr/bin/node --import tsx team/src/server.ts
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/brain
+
+[Install]
+WantedBy=multi-user.target

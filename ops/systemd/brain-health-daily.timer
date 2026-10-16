@@ -1,0 +1,9 @@
+[Unit]
+Description=Ambient daily heartbeat
+
+[Timer]
+OnCalendar=*-*-* 08:25:00 Europe/Berlin
+Persistent=true
+
+[Install]
+WantedBy=timers.target

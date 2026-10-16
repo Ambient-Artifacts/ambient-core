@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.local.json
+.data/
+coverage/
+.env.local
+eval/out/

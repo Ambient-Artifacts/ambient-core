@@ -1,0 +1,22 @@
+{
+  "model": "claude-sonnet-5-5",
+  "at": "2026-10-15T13:24:49.716Z",
+  "summary": {
+    "general": {
+      "score": 10,
+      "of": 10,
+      "recall": 1,
+      "precision": 1,
+      "looked": 10,
+      "abstainedRight": 2
+    },
+    "personal": {
+      "score": 10,
+      "of": 10,
+      "recall": 1,
+      "precision": 1,
+      "looked": 10,
+      "abstainedRight": 2
+    }
+  }
+}

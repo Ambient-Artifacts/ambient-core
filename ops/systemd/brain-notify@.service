@@ -1,0 +1,7 @@
+[Unit]
+Description=Alert on failure of %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/brain/alert.env
+ExecStart=/opt/brain/app/ops/notify.sh %i

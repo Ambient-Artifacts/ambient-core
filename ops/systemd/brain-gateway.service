@@ -1,0 +1,22 @@
+[Unit]
+Description=Brain gateway (sign-in, OAuth, MCP, sync)
+After=network-online.target
+Wants=network-online.target
+OnFailure=brain-notify@%n.service
+
+[Service]
+User=brain
+Group=brain
+WorkingDirectory=/opt/brain/app
+EnvironmentFile=/etc/brain/gateway.env
+ExecStart=/usr/bin/node --import tsx gateway/src/server.ts
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/brain
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+{
+  "name": "ambient",
+  "owner": {
+    "name": "Ambient Artifacts"
+  },
+  "description": "Ambient's plugin for Claude Code: what Ambient knows in Claude's context, and your sessions as notes in your Ambient wiki.",
+  "plugins": [
+    {
+      "name": "ambient",
+      "source": "./integrations/claude-code",
+      "description": "Claude knows who you are and gets the pages of people and projects you mention; sessions become notes in your Ambient wiki; plus Ambient's MCP tools."
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.base.json",
+  "include": ["convex", "test"],
+  "exclude": ["convex/_generated"]
+}

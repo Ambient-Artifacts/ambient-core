@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the Ambient health check every 30 minutes
+
+[Timer]
+OnCalendar=*:5/30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

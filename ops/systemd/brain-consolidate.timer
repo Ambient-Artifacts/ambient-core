@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Brain consolidation nightly
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

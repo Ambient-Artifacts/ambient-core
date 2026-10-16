@@ -1,0 +1,20 @@
+[Unit]
+Description=Ambient personal upkeep (Claude keeps living pages and the overview current)
+After=network-online.target
+Wants=network-online.target
+OnFailure=brain-notify@%n.service
+
+[Service]
+Type=oneshot
+User=brain
+Group=brain
+WorkingDirectory=/opt/brain/app
+EnvironmentFile=/etc/brain/gateway.env
+# ANTHROPIC_API_KEY for personal upkeep; without it the job does nothing.
+EnvironmentFile=-/etc/brain/personal.env
+ExecStart=/usr/bin/node --import tsx gateway/src/worker/cli.ts personal
+TimeoutStartSec=30min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

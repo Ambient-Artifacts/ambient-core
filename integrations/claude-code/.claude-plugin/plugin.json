@@ -1,0 +1,84 @@
+{
+  "name": "ambient",
+  "displayName": "Ambient",
+  "version": "0.2.0",
+  "description": "Claude starts each session knowing who you are and what's new in your Ambient wikis, gets the page of anyone or anything you mention, and each session becomes a short note in your wiki (and your team's, for folders you choose).",
+  "author": {
+    "name": "Ambient Artifacts"
+  },
+  "homepage": "https://ambientartifacts.si",
+  "userConfig": {
+    "token": {
+      "type": "string",
+      "title": "Ambient token",
+      "description": "From the Ambient app: Settings → Work sessions → Create a token for Claude Code.",
+      "sensitive": true,
+      "required": true
+    },
+    "server": {
+      "type": "string",
+      "title": "Ambient server",
+      "description": "Leave as is unless your company runs its own Ambient.",
+      "default": "https://mcp.ambientartifacts.si"
+    },
+    "context": {
+      "type": "string",
+      "title": "What Ambient knows, in context",
+      "description": "on: each session starts with who you are and what's new, and the pages of people and projects you mention are added. off: Claude looks in Ambient only when it decides to.",
+      "default": "on"
+    }
+  },
+  "mcpServers": {
+    "ambient": {
+      "type": "http",
+      "url": "${user_config.server}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.token}"
+      }
+    }
+  },
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/capture.sh end",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/capture.sh catch-up",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/context.sh start",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/context.sh prompt",
+            "timeout": 6
+          }
+        ]
+      }
+    ]
+  }
+}

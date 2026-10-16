@@ -1,0 +1,25 @@
+name: Idea or feature request
+description: A problem Ambient could solve better.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you'd like it to work. Optional; the problem matters most.
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where you'd use it
+      multiple: true
+      options:
+        - Self-hosted
+        - Ambient Cloud
+        - Both

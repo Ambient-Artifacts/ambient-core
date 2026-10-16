@@ -1,0 +1,218 @@
+// Personal wikis in the user's own git repo. The encrypted copy in Convex stays the
+// server's working store (MCP, upkeep, the phone's sync); the repo is kept in step with it
+// in both directions by a three-way sync against what both sides last agreed on:
+//   only Ambient changed a file → write it to the repo
+//   only the repo changed it    → import it (the phone pulls it like any server write)
+//   both changed it             → living pages merge (mergeLiving), other files: Ambient wins
+// Generated files (index.md, _index.md, AGENTS.md) are rebuilt on every sync, never imported.
+// Every sync works in a throwaway shallow clone; nothing stays on disk.
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, sep } from "node:path";
+import { mergeLiving } from "@brain/spec";
+import { agentsDoc, attention, checkRepoUrl, checkout, commitAndPush, GitError, remoteInfo, indexFilesIn, renderIndexFiles, WikiStore, type GitOptions, type RemoteRepo } from "@brain/wiki";
+import { api, type Control } from "../control.ts";
+import { PERSONAL_PATH, type PersonalStore } from "../personal.ts";
+
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+const LIVING = /^wiki\/(people|orgs|projects|topics)\//;
+/** Marker that tells us a non-empty repo is an Ambient wiki (safe to write into). */
+const MARKER = "This wiki is written by Ambient";
+
+interface SyncState {
+  /** path → hash both sides last agreed on. */
+  base: Record<string, string>;
+  commit: string | null;
+}
+
+export interface RepoStatus {
+  url: string;
+  branch: string;
+  status: "ok" | "error";
+  lastSyncAt: number | null;
+  lastError: string | null;
+}
+
+export interface RepoSyncResult {
+  exported: number;
+  imported: number;
+  merged: number;
+  commit: string | null;
+}
+
+export class PersonalRepos {
+  constructor(
+    private control: Control,
+    private personal: PersonalStore,
+    private opts: GitOptions = {},
+  ) {}
+
+  async status(uid: string): Promise<RepoStatus | null> {
+    const r = await this.control.q(api.repos.get, { uid: uid as never });
+    return r ? { url: r.url, branch: r.branch, status: r.status, lastSyncAt: r.lastSyncAt ?? null, lastError: r.lastError ?? null } : null;
+  }
+
+  /** Check the repo and token, store them, and push the wiki for the first time. */
+  async connect(uid: string, rawUrl: string, token: string): Promise<RepoStatus> {
+    const url = await checkRepoUrl(rawUrl, this.opts);
+    if (!token.trim()) throw new GitError("Add an access token for the repo.", "auth");
+    const remote: RemoteRepo = { url, token: token.trim() };
+    const info = await remoteInfo(remote, this.opts);
+    if (!info.empty) await this.assertOurs(remote);
+    const sealed = await this.personal.seal(uid, "repo:token", remote.token);
+    await this.control.m(api.repos.connect, { uid: uid as never, url, branch: info.branch, tokenIv: sealed.iv, tokenCt: sealed.ciphertext, now: Date.now() });
+    await this.sync(uid);
+    return (await this.status(uid))!;
+  }
+
+  async disconnect(uid: string): Promise<void> {
+    await this.control.m(api.repos.disconnect, { uid: uid as never });
+  }
+
+  /** Sync every connected user (the worker, every 15 minutes). One failure doesn't stop the rest. */
+  async syncAll(): Promise<{ uid: string; ok: boolean; result?: RepoSyncResult; error?: string }[]> {
+    const out = [];
+    for (const r of await this.control.q(api.repos.connected, {})) {
+      try {
+        out.push({ uid: r.uid, ok: true, result: await this.sync(r.uid) });
+      } catch (err) {
+        out.push({ uid: r.uid, ok: false, error: (err as Error).message });
+      }
+    }
+    return out;
+  }
+
+  /** One three-way sync. Retries once if the repo moved while we were pushing. */
+  async sync(uid: string): Promise<RepoSyncResult> {
+    try {
+      return await this.syncOnce(uid).catch((err) => {
+        if (err instanceof GitError && err.code === "conflict") return this.syncOnce(uid);
+        throw err;
+      });
+    } catch (err) {
+      await this.control.m(api.repos.record, { uid: uid as never, ok: false, error: (err as Error).message, now: Date.now() });
+      throw err;
+    }
+  }
+
+  private async syncOnce(uid: string): Promise<RepoSyncResult> {
+    const rec = await this.control.q(api.repos.get, { uid: uid as never });
+    if (!rec) throw new GitError("No repo connected.");
+    const remote: RemoteRepo = { url: rec.url, token: await this.personal.open(uid, "repo:token", rec.tokenIv, rec.tokenCt) };
+    const state: SyncState = rec.stateCt ? JSON.parse(await this.personal.open(uid, "repo:state", rec.stateIv!, rec.stateCt)) : { base: {}, commit: null };
+
+    const dir = await mkdtemp(join(tmpdir(), "ambient-repo-"));
+    try {
+      const { branch } = await checkout(remote, dir, this.opts);
+      const inRepo = await readRepo(dir);
+      const store = new Map((await this.personal.pages(uid)).pages.map((p) => [p.path, p.content]));
+
+      const imports: { path: string; content: string }[] = [];
+      const writes = new Map<string, string>();
+      const deletes = new Set<string>();
+      const base: Record<string, string> = {};
+      let merged = 0;
+      const allowed = (path: string) => PERSONAL_PATH.test(path) && !path.includes("..");
+      for (const path of new Set([...inRepo.keys(), ...store.keys(), ...Object.keys(state.base)])) {
+        const r = inRepo.get(path);
+        const s = store.get(path);
+        const b = state.base[path];
+        const rh = r === undefined ? undefined : sha(r);
+        const shash = s === undefined ? undefined : sha(s);
+        if (rh === shash) {
+          if (rh !== undefined) base[path] = rh;
+          continue;
+        }
+        const repoChanged = rh !== b;
+        const storeChanged = shash !== b;
+        if (!repoChanged) {
+          // Only Ambient changed it: write it out, or remove it if Ambient deleted it.
+          if (s === undefined) deletes.add(path);
+          else {
+            writes.set(path, s);
+            base[path] = shash!;
+          }
+        } else if (!storeChanged) {
+          // Only the repo changed it. Edits come in; a deletion there is undone (AGENTS.md says so).
+          if (r === undefined) {
+            writes.set(path, s!);
+            base[path] = shash!;
+          } else if (allowed(path)) {
+            imports.push({ path, content: r });
+            base[path] = rh!;
+          }
+        } else if (r !== undefined && s !== undefined) {
+          // Both changed. Living pages: the repo's head plus both timelines; otherwise Ambient wins.
+          const m = LIVING.test(path) ? mergeLiving(r, s) : s;
+          writes.set(path, m);
+          if (m !== s && allowed(path)) imports.push({ path, content: m });
+          base[path] = sha(m);
+          merged++;
+        } else if (s !== undefined) {
+          writes.set(path, s);
+          base[path] = shash!;
+        } else if (r !== undefined && allowed(path)) {
+          imports.push({ path, content: r });
+          base[path] = rh!;
+        }
+      }
+
+      // Generated files: indexes over the wiki as it will be after this sync, and AGENTS.md.
+      const wikiAfter = new WikiStore("personal");
+      for (const [p, t] of store) if (p.startsWith("wiki/")) wikiAfter.upsert(p, t);
+      for (const i of imports) if (i.path.startsWith("wiki/")) wikiAfter.upsert(i.path, i.content);
+      for (const [p, t] of writes) if (p.startsWith("wiki/")) wikiAfter.upsert(p, t);
+      const generated = new Map<string, string>([["AGENTS.md", agentsDoc({ kind: "personal", name: "Ambient wiki", prefix: "wiki/" })]]);
+      for (const [p, t] of renderIndexFiles(wikiAfter.entries(), "Ambient wiki", attention(wikiAfter.lint()))) generated.set(`wiki/${p}`, t);
+
+      for (const [p, t] of [...writes, ...generated]) {
+        await mkdir(dirname(join(dir, p)), { recursive: true });
+        await writeFile(join(dir, p), t);
+      }
+      for (const p of deletes) await rm(join(dir, p), { force: true });
+      // A folder whose pages all moved or went keeps no index of nothing.
+      for (const p of await indexFilesIn(join(dir, "wiki"))) if (!generated.has(`wiki/${p}`)) await rm(join(dir, "wiki", p), { force: true });
+      const commit = await commitAndPush(dir, remote, branch, `Ambient: sync (${writes.size + deletes.size} out, ${imports.length} in)`, this.opts);
+      if (imports.length) await this.personal.serverWrite(uid, imports);
+
+      const sealed = await this.personal.seal(uid, "repo:state", JSON.stringify({ base, commit: commit ?? state.commit } satisfies SyncState));
+      await this.control.m(api.repos.record, { uid: uid as never, ok: true, stateIv: sealed.iv, stateCt: sealed.ciphertext, now: Date.now() });
+      return { exported: writes.size + deletes.size, imported: imports.length, merged, commit };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** A non-empty repo must already be an Ambient wiki; we never write into someone's other repo. */
+  private async assertOurs(remote: RemoteRepo): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), "ambient-check-"));
+    try {
+      await checkout(remote, dir, this.opts);
+      const agents = existsSync(join(dir, "AGENTS.md")) ? await readFile(join(dir, "AGENTS.md"), "utf8") : "";
+      if (!agents.includes(MARKER)) throw new GitError("This repo already has other content. Use a new, empty repo.", "not_empty");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+}
+
+/** The repo's wiki pages and transcripts (generated files excluded), path → text. */
+async function readRepo(dir: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const walk = async (d: string): Promise<void> => {
+    for (const e of await readdir(d, { withFileTypes: true }).catch(() => [])) {
+      if (e.name.startsWith(".")) continue;
+      const p = join(d, e.name);
+      if (e.isDirectory()) await walk(p);
+      else if (e.name.endsWith(".md")) {
+        const rel = relative(dir, p).split(sep).join("/");
+        const generated = rel === "AGENTS.md" || rel === "wiki/index.md" || rel === "wiki/log.md" || e.name === "_index.md";
+        if (!generated && (rel.startsWith("wiki/") || rel.startsWith("raw/"))) out.set(rel, await readFile(p, "utf8"));
+      }
+    }
+  };
+  await walk(dir);
+  return out;
+}

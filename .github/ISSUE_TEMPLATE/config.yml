@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Ambient-Artifacts/ambient-core/security/advisories/new
+    about: Privately, please. See SECURITY.md.
+  - name: Ambient Cloud account or billing
+    url: https://ambientartifacts.si
+    about: Questions about your Ambient Cloud account go to the team, not to GitHub issues.

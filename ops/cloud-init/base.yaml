@@ -1,0 +1,47 @@
+#cloud-config
+# Base image for every Brain VM (core and team servers): Node 24, git, Caddy,
+# automatic security updates, a locked-down firewall and an unprivileged
+# `brain` user. Role-specific config comes from ops/deploy.sh.
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - curl
+  - ca-certificates
+  - gnupg
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+  - unattended-upgrades
+  - ufw
+  - rsync
+  # Fallback for native npm modules (better-sqlite3) when no prebuilt binary fits (e.g. Arm).
+  - build-essential
+  - python3
+users:
+  - default
+  - name: brain
+    system: true
+    shell: /usr/sbin/nologin
+    homedir: /srv/brain
+    no_create_home: true
+write_files:
+  - path: /etc/apt/apt.conf.d/52brain-unattended
+    content: |
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+runcmd:
+  - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+  - apt-get install -y nodejs
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update && apt-get install -y caddy
+  - mkdir -p /opt/brain /etc/brain /srv/brain
+  - chown -R brain:brain /srv/brain
+  - chmod 750 /etc/brain && chown root:brain /etc/brain
+  - ufw default deny incoming
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+  - systemctl enable --now unattended-upgrades

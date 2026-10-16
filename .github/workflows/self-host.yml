@@ -1,0 +1,102 @@
+# The self-hosting guide, run for real: build the image, start the Docker Compose stack with
+# ops/docker/init.sh, make an account and a team with the admin CLI, and use them over MCP.
+name: Self-host
+
+on:
+  push:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-compose.yml
+      - .env.example
+      - ops/docker/**
+      - ops/gen-secrets.mjs
+      - control/**
+      - gateway/**
+      - team/**
+      - .github/workflows/self-host.yml
+      - docs/self-hosting.md
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-compose.yml
+      - .env.example
+      - ops/docker/**
+      - ops/gen-secrets.mjs
+      - control/**
+      - gateway/**
+      - team/**
+      - .github/workflows/self-host.yml
+      - docs/self-hosting.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-host-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: init.sh --local
+        run: ops/docker/init.sh --local
+
+      - name: init.sh again keeps .env and the data
+        run: |
+          before=$(sha256sum .env)
+          ops/docker/init.sh --local
+          test "$before" = "$(sha256sum .env)"
+
+      - name: Account, team and tokens with the admin CLI
+        run: |
+          admin() { docker compose exec -T gateway admin "$@"; }
+          admin user add ada@example.com --name "Ada Lovelace"
+          admin connect-code ada@example.com | grep -E '[A-Z2-9]{4}-[A-Z2-9]{4}'
+          admin token ada@example.com --claude-code | head -1 > personal.token
+          admin team create "Analytical Engines" --owner ada@example.com
+          admin token ada@example.com --team analytical-engines | head -1 > team.token
+          admin list
+
+      - name: A second team from docs/self-hosting.md, "More teams"
+        run: |
+          awk '/^### More teams/{f=1} f&&/^```yaml/{p=1;next} p&&/^```/{exit} p' docs/self-hosting.md > docker-compose.override.yml
+          cat docker-compose.override.yml
+          docker compose up -d
+          docker compose exec -T gateway admin server add team-2 http://team-2:8090
+          docker compose exec -T gateway admin team create "Difference Engines" --owner ada@example.com | tee created.txt
+          grep -q 'on team-2' created.txt
+
+      - name: MCP over HTTP
+        run: |
+          rpc() {
+            curl -fsS -X POST "http://127.0.0.1:8080$1" -H "Authorization: Bearer $(cat "$2")" \
+              -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d "$3"
+          }
+          rpc /mcp personal.token '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | grep -q '"save_note"'
+          rpc /mcp personal.token '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"save_note","arguments":{"title":"Compose check","content":"Saved through the self-hosted stack."}}}' | grep -q 'Saved'
+          rpc /mcp personal.token '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"self-hosted stack"}}}' | grep -q 'Compose check'
+          rpc /t/analytical-engines/mcp team.token '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"index","arguments":{}}}' | grep -q '"result"'
+          rpc /mcp personal.token '{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}' >/dev/null
+          curl -fsS http://127.0.0.1:8080/runner/ambient-runner.mjs | grep -q 'const DEFAULT_SERVER = "http://localhost:8080"'
+          # The App Store apps can sign in here ("Use your own server"): Apple sign-in is on.
+          curl -fsS http://127.0.0.1:8080/v1/app/config | grep -q '"appleSignIn":true'
+          curl -fsS http://127.0.0.1:8080/health | grep -q '"service":"brain-gateway"'
+
+      - name: The jobs and the team server are running
+        run: |
+          sleep 20
+          docker compose logs jobs | grep -q '\[sessions\]'
+          docker compose logs team | grep -q 'claimed by Analytical Engines'
+          docker compose logs team-jobs | grep -q 'consolidate at'
+          docker compose ps
+
+      - name: Logs
+        if: always()
+        run: docker compose logs --no-color --tail 200

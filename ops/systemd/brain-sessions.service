@@ -1,0 +1,18 @@
+[Unit]
+Description=Ambient work sessions (summaries of Claude Code sessions, team copies after the hold)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=brain
+Group=brain
+WorkingDirectory=/opt/brain/app
+EnvironmentFile=/etc/brain/gateway.env
+EnvironmentFile=-/etc/brain/personal.env
+ExecStart=/usr/bin/node --import tsx gateway/src/worker/cli.ts sessions
+TimeoutStartSec=10min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
