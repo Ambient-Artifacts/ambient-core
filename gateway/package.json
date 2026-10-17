@@ -19,7 +19,7 @@
     "jose": "^6.2.12",
     "oauth4webapi": "3.8.8",
     "oidc-provider": "^9.12.2",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@brain/team": "*",
