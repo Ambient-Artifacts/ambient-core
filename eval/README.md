@@ -33,10 +33,12 @@ EVAL_MODEL=claude-haiku-5-5 npm run eval:consolidation
 
 **The gate** (exit 1, also in CI on changes to the consolidation, decision and overview steps, `.github/workflows/eval.yml`): the total may not fall more than 10 points below `consolidation/baseline.json`, about one case in a small category, since answers vary from run to run. A change that closes a gap records a new baseline in the same pull request.
 
-**Known gaps.** The baseline (69% on 2026-10-17, Claude Haiku 4.5) fails these on purpose, so they stay in sight until they're fixed:
+**Known gaps.** The baseline (93% on 2026-10-17, Claude Haiku 4.5; the runs that day scored 91 to 95%) still fails these now and then:
 
-1. **Work notes name no companies.** Notes from AI apps (`log_work`, agent sessions) arrive with `orgs: []` and `topics: []`, and consolidation only writes the pages a note's front matter lists, so the competitor gets no page (e2, f5).
-2. **Decisions in prose aren't filed.** Decision pages come only from a "## Decisions" section; the work note that drops PayPal from the launch says so in its text and gets none (d2).
-3. **Updated pages lose their timeline line.** On a page that already has a timeline, the model names the new note the way that timeline links notes (`2026-10-14-datacore-status-call-m1n2o3` instead of `notes/2026-10/…`), or files the new fact under an older note, and the applier drops the entry: the page changes with no record of why, and the old go-live leaves no trace (e4 to e6, s1; the "dropped timeline" lines in the output).
-4. **A new page can end up with no timeline at all.** When its entry is dropped as in 3, the page exists with nothing saying which note it came from (link validity).
-5. **A passing mention can still land.** Jonas, who only sat in on the trade fair meeting, got it on his page in two of three runs (u1).
+1. **A passing mention can still land.** Someone who only sat in on a meeting sometimes gets it on their page (u1, about half the runs).
+2. **A correction can lose the old value.** The timeline line for a moved date sometimes states only the new one (s1, about one run in three).
+
+**Closed on 2026-10-17** (the baseline was 69% before, with the corrected link rule):
+- **Work notes named no companies.** Notes from AI apps arrived with `orgs: []`, so a note about a competitor never reached an org page (e2, f5). Now one structured call finds the organizations and topics of a work note that names none (`findEntities` in `team/src/consolidate.ts`), and `log_work` and the session summarizer record organizations themselves.
+- **Decisions in prose weren't filed.** A work note without a "## Decisions" section gives its summary and "Worked on" lines to the decision step as prose, which files only decisions clearly made there (d2). Precision held: no extra decisions in any run.
+- **Updated pages lost their timeline line.** The applier matched only the exact note ref and dropped entries naming the note by its file name, so a page changed with nothing saying why (e4 to e6, s1). It now reads the names the model uses (`noteFor`), and the prompt says each fact goes under the note that says it.

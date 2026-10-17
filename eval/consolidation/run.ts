@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Usage } from "../../team/src/consolidate.ts";
-import { AnthropicDecisionFiler, AnthropicOverviewWriter, AnthropicUpdater, DEFAULT_MODEL } from "../../team/src/anthropic.ts";
+import { AnthropicDecisionFiler, AnthropicEntityFinder, AnthropicOverviewWriter, AnthropicUpdater, DEFAULT_MODEL } from "../../team/src/anthropic.ts";
 import { runNight, score, summarize, written, type Summary } from "./harness.ts";
 import { judge, type Judged } from "./judge.ts";
 
@@ -47,6 +47,7 @@ async function main() {
   const night = await runNight({
     pages: new AnthropicUpdater(key, MODEL),
     decisions: new AnthropicDecisionFiler(key, MODEL),
+    finder: new AnthropicEntityFinder(key, MODEL),
     overview: new AnthropicOverviewWriter(key, MODEL),
   });
   try {

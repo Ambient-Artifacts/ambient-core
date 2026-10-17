@@ -90,6 +90,8 @@ describe("a night with stub steps", () => {
   const decisionsStub: DecisionFiler = {
     model: "stub",
     async file(input) {
+      // A stub can't tell a decision from other prose: it files nothing from a work note's prose.
+      if (input.note.prose) return { decisions: { decisions: [] }, usage };
       return { decisions: { decisions: input.note.decisions.map((d) => ({ significant: true, title: d.slice(0, 60), statement: d, affects: [], supersedes: null })) }, usage };
     },
   };
@@ -105,7 +107,8 @@ describe("a night with stub steps", () => {
     try {
       expect(night.result.status).toBe("ok");
       // Ten pages are named in the batch's front matter; one note has a Decisions section.
-      expect([night.tally.pages.calls, night.tally.decisions.calls, night.tally.overview.calls]).toEqual([10, 1, 1]);
+      // Decisions: the note with a "## Decisions" section, and the two work notes without one (as prose).
+      expect([night.tally.pages.calls, night.tally.decisions.calls, night.tally.overview.calls]).toEqual([10, 3, 1]);
       const results = score(night.before, night.after);
       const summary = summarize(results);
       expect(Object.fromEntries(Object.entries(summary.categories).map(([c, s]) => [c, s.of]))).toEqual({
@@ -134,7 +137,7 @@ describe("a night with stub steps", () => {
     }
   });
 
-  it("reports timeline entries that name a note by its file name, which the job drops", async () => {
+  it("keeps a timeline entry that names the run's note by its file name, and adds no repeats", async () => {
     // What Haiku 4.5 did on 2026-10-17 on pages that already had a timeline: it named the notes
     // the way the page's timeline links them, and repeated the existing lines.
     const byFileName: PageUpdater = {
@@ -148,10 +151,11 @@ describe("a night with stub steps", () => {
     };
     const night = await runNight({ pages: byFileName, decisions: decisionsStub, overview: overviewStub });
     try {
-      expect(night.dropped.filter((d) => d.page === "projects/erp-umstieg")).toEqual([
-        { page: "projects/erp-umstieg", note: "2026-10-14-datacore-status-call-m1n2o3", date: "2026-10-14", fact: "Datacore status call" },
-      ]);
-      expect(byId(score(night.before, night.after), "e4")).toMatchObject({ pass: false, detail: `projects/erp-umstieg updated, but no timeline line links ${NOTES.datacore}` });
+      // Until 2026-10-17 the applier matched only the exact ref and dropped this entry (noteFor).
+      expect(night.dropped.filter((d) => d.page === "projects/erp-umstieg")).toEqual([]);
+      expect(byId(score(night.before, night.after), "e4")).toMatchObject({ pass: true });
+      // The repeated lines name older notes: they aren't added again.
+      expect(night.after.get("projects/erp-umstieg")).not.toContain("Repeated.");
     } finally {
       rmSync(night.root, { recursive: true, force: true });
     }

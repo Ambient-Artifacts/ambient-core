@@ -4,7 +4,7 @@ import { cpSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:f
 import { tmpdir } from "node:os";
 import { join, posix, relative, sep } from "node:path";
 import { parsePage, splitCompiled, type JobResult } from "@brain/spec";
-import { consolidate, markConsolidated, type PageUpdater, type Usage } from "../../team/src/consolidate.ts";
+import { consolidate, markConsolidated, noteFor, type EntityFinder, type EntityFinderInput, type PageUpdater, type Usage } from "../../team/src/consolidate.ts";
 import type { DecisionFiler } from "../../team/src/decisions.ts";
 import { headParts } from "../../team/src/head.ts";
 import type { OverviewWriter } from "../../team/src/overview.ts";
@@ -37,8 +37,10 @@ export interface Steps {
   pages: PageUpdater;
   decisions: DecisionFiler;
   overview: OverviewWriter;
+  /** Organizations and topics for work notes that name none (consolidate's `finder`). */
+  finder?: EntityFinder;
 }
-export type Step = keyof Steps;
+export type Step = "pages" | "decisions" | "overview" | "finder";
 
 export interface Tally {
   model: string;
@@ -62,7 +64,7 @@ export interface Dropped {
 function counted(steps: Steps): { steps: Steps; tally: Record<Step, Tally>; dropped: Dropped[] } {
   const dropped: Dropped[] = [];
   const tally = Object.fromEntries(
-    (["pages", "decisions", "overview"] as const).map((s) => [s, { model: steps[s].model, calls: 0, usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }]),
+    (["pages", "decisions", "overview", "finder"] as const).map((s) => [s, { model: steps[s]?.model ?? steps.pages.model, calls: 0, usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }]),
   ) as Record<Step, Tally>;
   const add = (s: Step, u: Usage) => {
     tally[s].calls++;
@@ -79,14 +81,15 @@ function counted(steps: Steps): { steps: Steps; tally: Record<Step, Tally>; drop
         update: async (input) => {
           const r = await steps.pages.update(input);
           add("pages", r.usage);
-          const given = new Set(input.evidence.map((e) => e.note));
+          // As the applier reads a note's name (noteFor): only entries it can't place are dropped.
+          const given = new Map(input.evidence.map((e) => [e.note, e.note]));
           const stem = (s: string) => s.split("/").pop()!.replace(/\.md$/, "");
           const repeats = (t: { note: string; date: string }) =>
             (input.existing?.timelineTail ?? []).some((l) => l.startsWith(`- ${t.date}:`) && links(l, input.ref).some((r) => stem(r) === stem(t.note)));
           const entries = (r.update as { timeline?: { note?: unknown; date?: unknown; fact?: unknown }[] } | null)?.timeline ?? [];
           for (const e of Array.isArray(entries) ? entries : []) {
             const t = { page: input.ref, note: String(e.note), date: String(e.date), fact: String(e.fact) };
-            if (!given.has(t.note) && !repeats(t)) dropped.push(t);
+            if (!noteFor(t.note, given) && !repeats(t)) dropped.push(t);
           }
           return r;
         },
@@ -107,6 +110,18 @@ function counted(steps: Steps): { steps: Steps; tally: Record<Step, Tally>; drop
           return r;
         },
       },
+      ...(steps.finder
+        ? {
+            finder: {
+              model: steps.finder.model,
+              find: async (input: EntityFinderInput) => {
+                const r = await steps.finder!.find(input);
+                add("finder", r.usage);
+                return r;
+              },
+            },
+          }
+        : {}),
     },
   };
 }
@@ -137,7 +152,7 @@ export async function runNight(steps: Steps): Promise<Night> {
   const before = pages(dir);
   const wiki = await TeamWiki.open(dir, TEAM.id, TEAM.name);
   const c = counted(steps);
-  const result = await consolidate(wiki, c.steps.pages, { outDir, version: "eval", decisions: c.steps.decisions, overview: c.steps.overview });
+  const result = await consolidate(wiki, c.steps.pages, { outDir, version: "eval", decisions: c.steps.decisions, overview: c.steps.overview, finder: c.steps.finder });
   return { root, before, after: pages(dir), result, tally: c.tally, dropped: c.dropped };
 }
 

@@ -8,7 +8,8 @@ import type { Page, WikiStore } from "@brain/wiki";
 import type { Usage } from "./consolidate.ts";
 
 export interface DecisionInput {
-  note: { ref: string; title: string; date: string; decisions: string[]; links: string[] };
+  /** `prose`: the lines are what a work note says, not decisions (AnthropicDecisionFiler finds any). */
+  note: { ref: string; title: string; date: string; decisions: string[]; links: string[]; prose?: boolean };
   existing: { ref: string; title: string; summary: string }[];
 }
 
@@ -33,11 +34,21 @@ export interface DecisionFiler {
 const LINK_FIELDS = ["people", "orgs", "projects", "topics"] as const;
 const clean = (s: string, n: number) => s.replace(/\s+/g, " ").trim().slice(0, n);
 
-/** The note's decision bullets and the pages it links, or null when it records no decisions. */
+/**
+ * The note's decision bullets and the pages it links, or null when it records no decisions. A
+ * work note from an AI app without a "## Decisions" section may still state one in what it says
+ * it did ("dropped PayPal from the launch"): its summary and "Worked on" lines go in as prose, for
+ * the filer to find decisions in, or none.
+ */
 export function decisionInput(note: Page, store: WikiStore): DecisionInput | null {
-  const decisions = section(note.body, "Decisions")
+  let decisions = section(note.body, "Decisions")
     .map((l) => l.replace(/^\s*-\s*/, "").trim())
     .filter((l) => l && l !== "(none)");
+  let prose = false;
+  if (decisions.length === 0 && note.frontmatter.kind === "session" && !/^##\s+Decisions\b/m.test(note.body)) {
+    decisions = [note.summary, ...section(note.body, "Worked on").map((l) => l.replace(/^\s*-\s*/, "").trim())].filter(Boolean).slice(0, 12);
+    prose = true;
+  }
   if (decisions.length === 0) return null;
   const fm = note.frontmatter;
   const links = [...new Set(LINK_FIELDS.flatMap((k) => (Array.isArray(fm[k]) ? (fm[k] as unknown[]).map(String) : [])))];
@@ -47,7 +58,7 @@ export function decisionInput(note: Page, store: WikiStore): DecisionInput | nul
     .sort((a, b) => b.ref.localeCompare(a.ref))
     .slice(0, 30)
     .map((d) => ({ ref: d.ref, title: d.title, summary: d.summary }));
-  return { note: { ref: note.ref, title: note.title, date: note.sortDate.slice(0, 10), decisions, links }, existing };
+  return { note: { ref: note.ref, title: note.title, date: note.sortDate.slice(0, 10), decisions, links, ...(prose ? { prose: true } : {}) }, existing };
 }
 
 /** Pages to write for one note: new decision pages plus any decision they supersede. */
