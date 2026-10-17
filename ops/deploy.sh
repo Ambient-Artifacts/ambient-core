@@ -14,6 +14,9 @@ rev=$(git -C "$root" rev-parse --short HEAD)
 git -C "$root" diff --quiet HEAD -- || echo "note: uncommitted changes are not deployed" >&2
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
+# mktemp makes the folder 0700, and rsync -a gives /opt/brain/app the stage folder's own mode: the
+# services (user brain) then can't enter their working directory and fail with status 200/CHDIR.
+chmod 755 "$stage"
 git -C "$root" archive HEAD | tar -x -C "$stage"
 rsync -az --delete --chown=root:root \
   --exclude node_modules --exclude '.env*' --exclude 'control/.convex' \
