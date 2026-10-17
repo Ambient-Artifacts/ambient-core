@@ -97,7 +97,12 @@ function isInjected(text: string): boolean {
   return /^\s*<(system-reminder|command-|local-command|task-notification|user-prompt-submit-hook|bash-)/.test(text);
 }
 
-export function parseClaudeCode(jsonl: string): ParsedSession {
+/**
+ * Reads a Claude Code transcript a line at a time, keeping only what the note needs: an upload is
+ * streamed through it, so tool output and images (most of a transcript's size) are never all in
+ * memory at once.
+ */
+export function claudeCodeReader(): { line: (raw: string) => void; done: () => ParsedSession } {
   const out: ParsedSession = {
     sessionId: null,
     startedAt: null,
@@ -119,13 +124,13 @@ export function parseClaudeCode(jsonl: string): ParsedSession {
   const prs = new Set<string>();
   const commits = new Map<string, string>();
 
-  for (const raw of jsonl.split("\n")) {
-    if (!raw.trim()) continue;
+  const line = (raw: string): void => {
+    if (!raw.trim()) return;
     let o: Line;
     try {
       o = JSON.parse(raw) as Line;
     } catch {
-      continue;
+      return;
     }
     out.sessionId ??= o.sessionId ?? null;
     if (o.timestamp) {
@@ -142,7 +147,7 @@ export function parseClaudeCode(jsonl: string): ParsedSession {
     }
     // Subagents' own turns, and the summary that replaces history after compaction (the
     // history itself is still earlier in the file).
-    if (o.isSidechain || o.isCompactSummary || !o.message) continue;
+    if (o.isSidechain || o.isCompactSummary || !o.message) return;
     const at = o.timestamp ?? null;
     const content = o.message.content;
 
@@ -188,13 +193,22 @@ export function parseClaudeCode(jsonl: string): ParsedSession {
         }
       }
     }
-  }
+  };
 
-  out.interactive = out.humanPrompts > 0 || (!sawOrigin && plainPrompts > 0 && INTERACTIVE_ENTRYPOINTS.has(out.entrypoint ?? ""));
-  out.edited = [...edited];
-  out.prs = [...prs];
-  out.commits = [...commits].map(([sha, message]) => ({ sha: sha.slice(0, 12), message }));
-  return out;
+  const done = (): ParsedSession => {
+    out.interactive = out.humanPrompts > 0 || (!sawOrigin && plainPrompts > 0 && INTERACTIVE_ENTRYPOINTS.has(out.entrypoint ?? ""));
+    out.edited = [...edited];
+    out.prs = [...prs];
+    out.commits = [...commits].map(([sha, message]) => ({ sha: sha.slice(0, 12), message }));
+    return out;
+  };
+  return { line, done };
+}
+
+export function parseClaudeCode(jsonl: string): ParsedSession {
+  const reader = claudeCodeReader();
+  for (const raw of jsonl.split("\n")) reader.line(raw);
+  return reader.done();
 }
 
 /**
@@ -363,37 +377,71 @@ function isFolderPattern(p: string): boolean {
   return p.startsWith("/") || p.startsWith("~");
 }
 
-function patternRegex(pattern: string): RegExp {
-  const body = pattern
-    .trim()
-    .replace(/\/+$/, "")
-    .split(/(\*\*|\*)/)
-    .map((part) => (part === "**" ? ".*" : part === "*" ? "[^/]*" : part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")))
-    .join("");
-  return new RegExp(`^${body}(?:/.*)?$`, "i");
+/**
+ * A rule's glob as a matcher: `**` is anything, `*` anything but "/", the rest is literal (any
+ * case), and the path may go on below what matched ("/…"). Not a regex: a rule like
+ * `/**a**a**a**a**b` made the regex engine backtrack for minutes on one short path, on the
+ * gateway's only thread. This walks the pattern once over the path (time path × pattern).
+ */
+function globMatcher(pattern: string, budget: MatchBudget): { test: (path: string) => boolean } {
+  const tokens: (string | "*" | "**")[] = [];
+  for (const part of pattern.trim().replace(/\/+$/, "").split(/(\*\*|\*)/)) {
+    if (part === "**" || part === "*") tokens.push(part);
+    else tokens.push(...part.toLowerCase().split(""));
+  }
+  return {
+    test(raw: string): boolean {
+      const path = raw.toLowerCase();
+      const n = path.length;
+      // Rules and paths are the user's own (50 rules, 500 files a block, 50 blocks an upload): the
+      // work for one upload has a ceiling, past which nothing more matches.
+      const cost = tokens.length * (n + 1);
+      if (cost > budget.left) return false;
+      budget.left -= cost;
+      // at[i]: the tokens so far can match path[0, i).
+      let at = new Array<boolean>(n + 1).fill(false);
+      at[0] = true;
+      for (const t of tokens) {
+        const next = new Array<boolean>(n + 1).fill(false);
+        if (t === "**" || t === "*") {
+          for (let i = 0; i <= n; i++) next[i] = at[i]! || (i > 0 && next[i - 1]! && (t === "**" || path[i - 1] !== "/"));
+        } else {
+          for (let i = 0; i < n; i++) if (at[i] && path[i] === t) next[i + 1] = true;
+        }
+        at = next;
+      }
+      return at[n]! || at.some((ok, i) => ok && path[i] === "/");
+    },
+  };
 }
 
+/** How much matching (pattern × path characters) one upload or one lookup may do. */
+export interface MatchBudget {
+  left: number;
+}
+export const matchBudget = (): MatchBudget => ({ left: 20_000_000 });
+
 /** Does a rule cover this session: its folder (or most of its edits), or its repo? */
-export function ruleMatches(rule: SessionRule, place: SessionPlace): boolean {
+export function ruleMatches(rule: SessionRule, place: SessionPlace, budget: MatchBudget = matchBudget()): boolean {
   const pattern = rule.match.trim();
   if (!pattern) return false;
   if (isFolderPattern(pattern)) {
     // Compare absolute paths when the home folder is known: rules and paths may each be `~/…` or absolute.
     const home = place.home?.replace(/\/+$/, "");
     const expand = (p: string) => (home && (p === "~" || p.startsWith("~/")) ? `${home}${p.slice(1)}` : p);
-    const re = patternRegex(expand(pattern));
+    const re = globMatcher(expand(pattern), budget);
     if (place.cwd && re.test(expand(place.cwd))) return true;
     const hits = place.files.filter((f) => re.test(expand(f))).length;
     return place.files.length > 0 && hits * 2 >= place.files.length;
   }
   const repo = normalizeRemote(`https://${pattern.replace(/^[a-z]+:\/\//i, "")}`) ?? pattern.toLowerCase();
-  return place.repo !== null && patternRegex(repo).test(place.repo);
+  return place.repo !== null && globMatcher(repo, budget).test(place.repo);
 }
 
 /** The first rule that covers the session and names a team the user is in. */
-export function pickTeam<T extends { slug: string }>(rules: SessionRule[], place: SessionPlace, teams: T[]): T | null {
+export function pickTeam<T extends { slug: string }>(rules: SessionRule[], place: SessionPlace, teams: T[], budget: MatchBudget = matchBudget()): T | null {
   for (const rule of rules) {
-    if (!ruleMatches(rule, place)) continue;
+    if (!ruleMatches(rule, place, budget)) continue;
     const team = teams.find((t) => t.slug === rule.team);
     if (team) return team;
   }

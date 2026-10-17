@@ -135,6 +135,25 @@ describe("scrubbing secrets", () => {
 describe("which team a session goes to", () => {
   const teams = [{ slug: "ambient-artifacts" }, { slug: "acme" }];
 
+  it("matches globs without regex backtracking: a hostile rule on a long path stays fast", () => {
+    const rule = { match: "/" + "**a".repeat(12) + "**b", team: "acme" };
+    const started = performance.now();
+    expect(ruleMatches(rule, { cwd: "/" + "a".repeat(40), repo: null, files: [] })).toBe(false);
+    expect(ruleMatches(rule, { cwd: "/" + "a".repeat(40) + "b/src", repo: null, files: [] })).toBe(true);
+    expect(performance.now() - started).toBeLessThan(500);
+    // * stays inside one folder, ** crosses them; any case; the path may go on below.
+    expect(ruleMatches({ match: "~/git/*-core", team: "acme" }, { cwd: "~/Git/Ambient-Core/gateway", repo: null, files: [] })).toBe(true);
+    expect(ruleMatches({ match: "~/git/*-core", team: "acme" }, { cwd: "~/git/x/ambient-core", repo: null, files: [] })).toBe(false);
+    expect(ruleMatches({ match: "~/git/**/core", team: "acme" }, { cwd: "~/git/x/y/core", repo: null, files: [] })).toBe(true);
+    expect(ruleMatches({ match: "~/git/core", team: "acme" }, { cwd: "~/git/core2", repo: null, files: [] })).toBe(false);
+  });
+
+  it("stops matching once an upload's matching budget is spent", () => {
+    const place = { cwd: "/srv/acme/app", repo: null, files: [] };
+    expect(ruleMatches({ match: "/srv/acme", team: "acme" }, place, { left: 10 })).toBe(false);
+    expect(ruleMatches({ match: "/srv/acme", team: "acme" }, place, { left: 1000 })).toBe(true);
+  });
+
   it("normalizes git remotes", () => {
     expect(normalizeRemote("git@github.com:Ambient-Artifacts/brain-platform.git")).toBe("github.com/ambient-artifacts/brain-platform");
     expect(normalizeRemote("https://ghp_secret@github.com/Acme/Repo.git")).toBe("github.com/acme/repo");

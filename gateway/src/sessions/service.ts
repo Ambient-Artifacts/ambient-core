@@ -15,7 +15,7 @@ import { api, type Control } from "../control.ts";
 import type { Directory, Team } from "../directory.ts";
 import type { PersonalStore } from "../personal.ts";
 import type { TeamLink } from "../teams.ts";
-import { condense, homeRelative, normalizeRemote, parseClaudeCode, pickTeam, splitBlocks, type SessionPlace, type SessionRule } from "./condense.ts";
+import { condense, homeRelative, matchBudget, normalizeRemote, parseClaudeCode, pickTeam, splitBlocks, type ParsedSession, type SessionPlace, type SessionRule } from "./condense.ts";
 
 /** How long a team copy waits, so the user can keep a session personal. */
 export const SHARE_HOLD_MS = 30 * 60_000;
@@ -49,6 +49,8 @@ interface Queued {
 export const MAX_BLOCKS = 50;
 
 export class BadUpload extends Error {}
+
+export type Received = { status: "queued" | "skipped"; reason?: string; sessionId: string; blocks?: number; queued?: number };
 
 export interface NoteSpec {
   sessionId: string;
@@ -87,15 +89,19 @@ export class SessionService {
    * A long session becomes one note per working block; a block that hasn't changed since the
    * last upload isn't queued again.
    */
-  async receive(uid: string, body: string, now = Date.now()): Promise<{ status: "queued" | "skipped"; reason?: string; sessionId: string; blocks?: number; queued?: number }> {
+  async receive(uid: string, body: string, now = Date.now()): Promise<Received> {
     const nl = body.indexOf("\n");
+    return this.receiveParsed(uid, nl < 0 ? body : body.slice(0, nl), parseClaudeCode(nl < 0 ? "" : body.slice(nl + 1)), now);
+  }
+
+  /** The same, from the hook's line and the transcript already read (the upload route streams it through claudeCodeReader). */
+  async receiveParsed(uid: string, metaLine: string, parsed: ParsedSession, now = Date.now()): Promise<Received> {
     let meta: UploadMeta;
     try {
-      meta = JSON.parse(nl < 0 ? body : body.slice(0, nl)) as UploadMeta;
+      meta = JSON.parse(metaLine) as UploadMeta;
     } catch {
       throw new BadUpload("the first line must be the hook's JSON input");
     }
-    const parsed = parseClaudeCode(nl < 0 ? "" : body.slice(nl + 1));
     const sessionId = String(meta.session_id ?? parsed.sessionId ?? "");
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(sessionId)) throw new BadUpload("missing or malformed session id");
     if (!parsed.interactive) return { status: "skipped", reason: "nobody typed in this session (a scheduled or scripted run)", sessionId };
@@ -104,6 +110,7 @@ export class SessionService {
     const tool = TOOL_NAMES[meta.ambient?.tool ?? "claude-code"] ?? "Claude Code";
     const blocks = splitBlocks(parsed);
     let route: { rules: SessionRule[]; teams: Team[] } | null = null;
+    const budget = matchBudget();
     let queued = 0;
     // A block per gap of an hour or more: a made-up transcript can have tens of thousands, each a
     // seal and a queued row. A real one has a handful; past the cap, the latest are kept.
@@ -125,7 +132,7 @@ export class SessionService {
         // (a rule added since) is written again, for the team.
         if (known.share || !known.path) continue;
         route ??= await this.routing(uid);
-        if (!pickTeam(route.rules, place, route.teams)) continue;
+        if (!pickTeam(route.rules, place, route.teams, budget)) continue;
       }
       const item: Queued = {
         v: 1,
