@@ -92,17 +92,23 @@ export const DecisionFrontmatter = z.object({
 });
 export type DecisionFrontmatter = z.infer<typeof DecisionFrontmatter>;
 
+/**
+ * A note's id as the apps (a ULID) and the gateway (base36 time + hex) make it. Letters, digits,
+ * "-" and "_" only: the team server names the note's raw transcript after it.
+ */
+export const NoteId = z.string().regex(/^[0-9A-Za-z_-]{10,64}$/, "letters, digits, - and _ only (10 to 64)");
+
 /** Phone → gateway → team VPS payload for one Team-scoped recording. */
 export const TeamNoteV1 = z.object({
   schema: z.literal("brain.team-note/v1"),
-  note_id: z.string().min(10),
+  note_id: NoteId,
   team_id: z.string().min(1),
   recorded_by: z.string().min(1),
   /** Display name of the recorder, filled in by the gateway from the account. */
   recorded_by_name: z.string().max(80).optional(),
   recorded_at: isoDateTime,
   duration_s: z.number().int().nonnegative(),
-  language: z.string().min(2),
+  language: z.string().min(2).max(35),
   kind: NoteKind,
   consent: z.object({
     mode: ConsentMode.exclude(["unknown"]),
@@ -115,12 +121,12 @@ export const TeamNoteV1 = z.object({
   transcript: z
     .object({
       segments: z
-        .array(z.object({ t0: z.number(), t1: z.number(), text: z.string(), speaker: z.string().max(80).optional() }))
+        .array(z.object({ t0: z.number(), t1: z.number(), text: z.string().max(20_000), speaker: z.string().max(80).optional() }))
         .max(20_000),
     })
     .nullable(),
-  participants_hint: z.array(z.string()).max(50).default([]),
-  client: z.object({ app: z.string(), transcriber: z.string(), compiler: z.string() }),
+  participants_hint: z.array(z.string().max(120)).max(50).default([]),
+  client: z.object({ app: z.string().max(200), transcriber: z.string().max(200), compiler: z.string().max(200) }),
 });
 export type TeamNoteV1 = z.infer<typeof TeamNoteV1>;
 

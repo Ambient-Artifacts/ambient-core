@@ -22,6 +22,8 @@ export interface HealthDeps {
   now?: number;
   /** systemd state of a unit, or null where there is no systemd (tests). */
   unit?: (name: string) => Promise<{ result: string; lastRunAt: number | null } | null>;
+  /** A team server's health token (TeamLink, purpose "health"): only with it does /health say more than "ok". */
+  teamToken?: (team: { id: string; slug: string }) => Promise<string>;
 }
 
 const HOUR = 3_600_000;
@@ -43,7 +45,8 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
   const revisions = new Revisions(d.control);
   for (const team of await d.control.q(api.teams.active, {})) {
     try {
-      const r = await get(`${team.serverUrl}/health`, { signal: AbortSignal.timeout(10_000) });
+      const headers: Record<string, string> = d.teamToken ? { authorization: `Bearer ${await d.teamToken({ id: String(team.id), slug: team.slug })}` } : {};
+      const r = await get(`${team.serverUrl}/health`, { headers, signal: AbortSignal.timeout(10_000) });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const h = (await r.json()) as {
         pages: number;

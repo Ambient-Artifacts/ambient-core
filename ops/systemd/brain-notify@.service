@@ -3,5 +3,10 @@ Description=Alert on failure of %i
 
 [Service]
 Type=oneshot
+# Reads the failed unit's journal and posts it; needs nothing more.
+User=brain
+Group=brain
+SupplementaryGroups=systemd-journal
+NoNewPrivileges=true
 EnvironmentFile=-/etc/brain/alert.env
 ExecStart=/opt/brain/app/ops/notify.sh %i

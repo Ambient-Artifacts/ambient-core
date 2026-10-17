@@ -198,7 +198,11 @@ export class PersonalRepos {
   }
 }
 
-/** The repo's wiki pages and transcripts (generated files excluded), path → text. */
+/**
+ * The repo's wiki pages and transcripts (generated files excluded), path → text. Regular files
+ * only: a symlink (git checks them out as plain files, but never trust that alone) would read a
+ * file of the gateway's own into the user's wiki.
+ */
 async function readRepo(dir: string): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   const walk = async (d: string): Promise<void> => {
@@ -206,7 +210,7 @@ async function readRepo(dir: string): Promise<Map<string, string>> {
       if (e.name.startsWith(".")) continue;
       const p = join(d, e.name);
       if (e.isDirectory()) await walk(p);
-      else if (e.name.endsWith(".md")) {
+      else if (e.isFile() && e.name.endsWith(".md")) {
         const rel = relative(dir, p).split(sep).join("/");
         const generated = rel === "AGENTS.md" || rel === "wiki/index.md" || rel === "wiki/log.md" || e.name === "_index.md";
         if (!generated && (rel.startsWith("wiki/") || rel.startsWith("raw/"))) out.set(rel, await readFile(p, "utf8"));

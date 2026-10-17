@@ -172,8 +172,8 @@ docker compose up -d
 A wiki can live in a repository you own (GitHub, GitLab, Bitbucket, Azure DevOps; `https://` only). Ambient keeps both sides in step: edits made in the repo come back. Give it a token that can push to that one repo, piped in on stdin so it stays out of your shell history:
 
 ```sh
-docker compose exec -T gateway admin repo you@example.com https://github.com/you/wiki.git < token.txt
-docker compose exec -T gateway admin team repo acme https://github.com/acme/wiki.git < token.txt
+docker compose exec -T gateway admin repo you@example.com https://github.com/you/wiki.git < ~/repo-token.txt
+docker compose exec -T gateway admin team repo acme https://github.com/acme/wiki.git < ~/repo-token.txt
 ```
 
 The repo must be empty, or already an Ambient wiki. A personal wiki syncs every 15 minutes; a team wiki pushes after every change and pulls before every write.
@@ -211,12 +211,14 @@ Three things hold state. Back up all three, and keep `.env` somewhere separate f
 A consistent copy, with a short stop:
 
 ```sh
+mkdir -p -m 700 ~/ambient-backups   # outside the checkout: never inside it, where an image build or a commit could pick it up
 docker compose stop
 for v in convex-data team-data; do
-  docker run --rm -v ambient_$v:/v:ro -v "$PWD":/backup alpine tar czf /backup/$v-$(date +%F).tgz -C /v .
+  docker run --rm -v ambient_$v:/v:ro -v ~/ambient-backups:/backup alpine sh -c "umask 077; tar czf /backup/$v-$(date +%F).tgz -C /v ."
 done
 docker compose up -d
 ```
+A `convex-data` archive is as good as the Convex admin key (it holds the instance secret the key is made from): keep it as carefully as `.env`.
 
 To restore, recreate the volumes from those archives (the same `docker run`, with `tar xzf` into an empty volume) on a checkout with the same `.env`. A team wiki connected to your own repo also has a full copy there. Convex can export its data without stopping, too: `npx convex export` with `CONVEX_SELF_HOSTED_URL=http://127.0.0.1:3210` and the admin key.
 
@@ -267,20 +269,23 @@ services:
     extends: { file: docker-compose.yml, service: team }
     environment: { BRAIN_SERVER_ID: team-2 }
     volumes: [team-2-data:/data]
+    networks: [teams]
   team-2-jobs:
     extends: { file: docker-compose.yml, service: team-jobs }
     environment: { BRAIN_SERVER_ID: team-2 }
     volumes: [team-2-data:/data]
+    networks: [teams]
 volumes:
   team-2-data:
 ```
 
-Then `docker compose up -d` and `docker compose exec gateway admin server add team-2 http://team-2:8090`. The next `admin team create` claims it. A team server can also run on another machine. It only has to be reachable from the gateway. Start it with `node --import tsx team/src/server.ts` and the variables in [configuration.md](configuration.md#team-server), and register its URL the same way.
+Then `docker compose up -d` and `docker compose exec gateway admin server add team-2 http://team-2:8090`. The next `admin team create` claims it. A team server can also run on another machine. It only has to be reachable from the gateway: register an `https://` address (put Caddy or another proxy with TLS in front of it), and let only the gateway's address through its firewall, since notes, transcripts and the team repo's token cross that link. Start it with `node --import tsx team/src/server.ts` and the variables in [configuration.md](configuration.md#team-server), and register its URL the same way.
 
 ## Security notes
 
 - New accounts: only people you add, or whose emails `BRAIN_SIGNUPS` allows. Anyone else with the app and your server's address is turned away.
 - Only Caddy listens publicly (80 and 443). The gateway and Convex ports are bound to `127.0.0.1`, and the team server is reachable only on Docker's network.
+- Containers run without Linux capabilities and can't gain privileges (Caddy keeps only binding ports 80 and 443). Three Docker networks keep them apart: Convex is reachable from the gateway's side only, never from a team container (which runs the team's routines and connected repos); team servers from the gateway and its jobs; Caddy reaches only the gateway.
 - `.env` is written with mode 600. It holds the master key, the token signing key, and Convex's admin key, which can read and change everything in the database.
 - Personal pages are encrypted with a per-user data key before they reach Convex. Those keys are wrapped by `BRAIN_MASTER_KEY`, which only the gateway and its jobs get. Team wikis are plain git on the team server's volume, by design: they're meant to be read by the team's tools.
 - Tokens: OAuth access tokens are short-lived and bound to one MCP URL. Personal access tokens are stored as SHA-256 hashes. Team servers accept only 60-second tokens signed by the gateway.

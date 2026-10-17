@@ -6,3 +6,10 @@ dist/
 coverage/
 .env.local
 eval/out/
+# Secrets and backups must never be committed (or shipped: deploy.sh sends only tracked files).
+*.env
+.env.*
+!.env.example
+*.tgz
+token.txt
+*.token

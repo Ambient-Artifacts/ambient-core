@@ -118,6 +118,30 @@ async function token(as: AsMetadata, body: Record<string, string>) {
   return { status: res.status, json: (await res.json()) as Record<string, string> };
 }
 
+describe("disconnecting an AI app in the app", () => {
+  it("lists the connected app by name and ends its tokens at once", async () => {
+    const { as } = await discover("/mcp");
+    const clientId = await register(as);
+    const { verifier, challenge } = pkce();
+    const resource = `${s.origin}/mcp`;
+    const { callback, consentHtml } = await authorize(as, clientId, resource, lena.access_token, challenge);
+    expect(consentHtml).toContain("For <b>Lena Vogel");
+    const t = await token(as, { grant_type: "authorization_code", code: callback.searchParams.get("code")!, redirect_uri: REDIRECT, client_id: clientId, code_verifier: verifier, resource });
+    expect(t.status).toBe(200);
+
+    const listed = (await appCall(s, lena.access_token, "GET", "/v1/app/connections")).json.connections as { id: string; clientId: string; name: string }[];
+    const mine = listed.find((c) => c.clientId === clientId)!;
+    expect(mine.name).toBe("Test MCP Client");
+    const other = await signIn(s, "apple-someone-else", "Someone Else");
+    expect((await appCall(s, other.access_token, "DELETE", `/v1/app/connections/${encodeURIComponent(mine.id)}`)).status).toBe(404);
+    expect((await appCall(s, lena.access_token, "DELETE", `/v1/app/connections/${encodeURIComponent(mine.id)}`)).status).toBe(204);
+
+    expect((await token(as, { grant_type: "refresh_token", refresh_token: t.json.refresh_token!, client_id: clientId, resource })).status).toBe(400);
+    const after = (await appCall(s, lena.access_token, "GET", "/v1/app/connections")).json.connections as { clientId: string }[];
+    expect(after.map((c) => c.clientId)).not.toContain(clientId);
+  });
+});
+
 describe("OAuth for the personal /mcp resource", () => {
   it("runs discovery → DCR → pairing code → token → MCP → refresh → revoke", async () => {
     const { as } = await discover("/mcp");
@@ -150,6 +174,16 @@ describe("OAuth for the personal /mcp resource", () => {
     const team = text(await client.callTool({ name: "brief", arguments: { about: "Bergmann", scope: "team" } }));
     expect(team).toContain("Bergmann Logistik");
     await client.close();
+
+    // The database holds nothing a token could be redeemed from: no row is keyed by the refresh
+    // token or carries it, and every payload is sealed.
+    const rows = await s.t.run(async (ctx) => ctx.db.query("oauth").collect());
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.key).not.toBe(t.json.refresh_token);
+      expect(row.payload).not.toContain(t.json.refresh_token!);
+      expect(row.payload.startsWith("v1.")).toBe(true);
+    }
 
     const r1 = await token(as, { grant_type: "refresh_token", refresh_token: t.json.refresh_token!, client_id: clientId, resource });
     expect(r1.status).toBe(200);

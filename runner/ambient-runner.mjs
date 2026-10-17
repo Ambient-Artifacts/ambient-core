@@ -10,14 +10,14 @@
 // One file, no dependencies, Node 18 or newer. The gateway serves it at /runner/ambient-runner.mjs
 // and `sync` replaces it when the gateway has a newer one.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 import { chmodSync, chownSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, release, type } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.3.1";
+const VERSION = "0.4.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -32,6 +32,11 @@ const UNIT_DIR = process.env.AMBIENT_UNIT_DIR || "/etc/systemd/system";
 const PREFIX = "ambient-routine-";
 /** A run is stopped after this long (systemd TimeoutStartSec). */
 const RUN_LIMIT = "3h";
+// Ed25519 public keys (SPKI, base64) whose signature an update must carry. The runner replaces
+// itself as root, so the gateway's word (its hash) isn't enough: whoever controlled the gateway
+// could otherwise run code as root on every connected computer. Updates are signed where the
+// runner is released (ops/sign-runner.mjs), with a key that never goes to the gateway.
+const RUNNER_KEYS = ["MCowBQYDK2VwAyEAuyLm3reOo6pWuKDgpQjUFRRVXx4FIZOc6peGpeT2WGU="];
 const SUMMARY_MAX = 4000;
 
 const log = (...a) => console.log(...a);
@@ -150,7 +155,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=${cfg.user}
+# The runner itself runs as root and holds the computer's token; it starts Claude Code as
+# ${cfg.user} (setpriv), who then can't read the token from the runner's process.
 EnvironmentFile=${CONFIG}
 EnvironmentFile=-${EXTRA}
 ExecStart=${cfg.node} ${INSTALLED} run ${r.id}
@@ -244,7 +250,25 @@ async function sync() {
   if (out.runner?.sha256) await selfUpdate(cfg, out.runner);
 }
 
-/** Replace the installed runner with the gateway's when it changed (checked against its hash). */
+/** The source as signed: the server line blanked, since each gateway writes its own address there. */
+function canonicalSource(source) {
+  return source.replace(/const DEFAULT_SERVER = "[^"]*";/, 'const DEFAULT_SERVER = "";');
+}
+
+/** Whether `signature` (base64) is one of RUNNER_KEYS' over the source. */
+function signedRelease(source, signature, keys = RUNNER_KEYS) {
+  if (typeof signature !== "string" || !signature) return false;
+  const data = Buffer.from(canonicalSource(source), "utf8");
+  return keys.some((k) => {
+    try {
+      return verify(null, data, createPublicKey({ key: Buffer.from(k, "base64"), format: "der", type: "spki" }), Buffer.from(signature, "base64"));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Replace the installed runner with the gateway's when it changed: only a signed release. */
 async function selfUpdate(cfg, latest) {
   if (!existsSync(INSTALLED)) return;
   const mine = createHash("sha256").update(readFileSync(INSTALLED)).digest("hex");
@@ -253,6 +277,12 @@ async function selfUpdate(cfg, latest) {
   if (!res?.ok) return;
   const source = await res.text();
   if (createHash("sha256").update(source).digest("hex") !== latest.sha256) return;
+  // Signed without the server line, which only names the server for `setup`: an installed runner
+  // talks to the one in its runner.env.
+  if (!signedRelease(source, latest.signature)) {
+    log(`Not updating to ${latest.version}: it isn't signed with Ambient's release key.`);
+    return;
+  }
   const tmp = `${INSTALLED}.new`;
   writeFileSync(tmp, source, { mode: 0o755 });
   if (spawnSync(process.execPath, ["--check", tmp]).status !== 0) return rmSync(tmp, { force: true });
@@ -263,8 +293,13 @@ async function selfUpdate(cfg, latest) {
 // ---- one run ----
 
 function home(user) {
-  const line = spawnSync("getent", ["passwd", user], { encoding: "utf8" }).stdout.trim();
-  return line.split(":")[5] || (user === "root" ? "/root" : `/home/${user}`);
+  return account(user).home;
+}
+
+/** A local account's uid, gid and home, from passwd. */
+function account(user) {
+  const f = spawnSync("getent", ["passwd", user], { encoding: "utf8" }).stdout.trim().split(":");
+  return { uid: Number(f[2] ?? NaN), gid: Number(f[3] ?? NaN), home: f[5] || (user === "root" ? "/root" : `/home/${user}`) };
 }
 
 function expand(folder, user) {
@@ -318,7 +353,7 @@ async function run(id) {
   }
   // `env`: the owner's secrets (a GitHub token, say). They go to Claude Code's environment only.
   const { run: runInfo, routine, env: secrets = {} } = start;
-  const user = process.env.USER || cfg.user;
+  const user = cfg.user;
   const folder = routine.folder ? expand(routine.folder, user) : cfg.folder || home(user);
   log(`Run ${runInfo.id} of "${routine.name}" (${runInfo.trigger}) in ${folder}`);
 
@@ -336,9 +371,23 @@ async function run(id) {
   }
 
   const args = ["-p", "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", systemPrompt(routine, runInfo.trigger)];
-  const child = spawn(cfg.claude, args, {
+  // As root (the runner's own units), Claude Code runs as the routine's user, with that user's
+  // groups: the token stays in this process, which that user can't read.
+  const drop = process.getuid?.() === 0 && user !== "root";
+  const as = drop ? account(user) : null;
+  if (drop && (!Number.isInteger(as.uid) || !Number.isInteger(as.gid) || spawnSync("setpriv", ["--version"]).status !== 0)) {
+    await finish({ status: "failed", summary: `Can't run as ${user} on ${hostname()}: the account or setpriv (util-linux) is missing.` });
+    process.exit(1);
+  }
+  const child = spawn(drop ? "setpriv" : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
     cwd: folder,
-    env: runEnv(cfg, { ...secrets, AMBIENT_ROUTINE_ID: routine.id, AMBIENT_ROUTINE_NAME: routine.name, AMBIENT_RUN_ID: runInfo.id }),
+    env: runEnv(cfg, {
+      ...secrets,
+      AMBIENT_ROUTINE_ID: routine.id,
+      AMBIENT_ROUTINE_NAME: routine.name,
+      AMBIENT_RUN_ID: runInfo.id,
+      ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}),
+    }),
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.stdin.end(routine.prompt);

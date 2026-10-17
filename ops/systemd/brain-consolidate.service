@@ -15,3 +15,5 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/srv/brain
+# The wiki and raw transcripts stay unreadable to other users (routines run on team VMs).
+UMask=0027

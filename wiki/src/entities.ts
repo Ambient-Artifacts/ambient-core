@@ -29,7 +29,9 @@ function entryOf(page: Page): Entry {
   const aliases = Array.isArray(page.frontmatter.aliases) ? page.frontmatter.aliases.map(String) : [];
   const title = nameKey(page.title);
   const names = new Set([title, refWords(page.ref).join(" "), ...aliases.map(nameKey)].filter(Boolean));
-  const emails = new Set((page.body.match(EMAIL) ?? []).map((e) => e.toLowerCase()));
+  // The first 20,000 characters: the regex rescans from every position where no "@" follows, so a
+  // huge page (one synced from a repo has no size cap) would slow every ingest.
+  const emails = new Set((page.body.slice(0, 20_000).match(EMAIL) ?? []).map((e) => e.toLowerCase()));
   return { page, ref: page.ref, title, words: title ? title.split(" ") : [], names, emails };
 }
 

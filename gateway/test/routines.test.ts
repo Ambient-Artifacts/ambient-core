@@ -2,7 +2,7 @@
 // the app and over MCP, and the real runner script syncing systemd units (a stand-in
 // systemctl) and running a routine (a stand-in claude that speaks stream-json).
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,6 +94,7 @@ describe("routines from the app", () => {
     const sync = await hostCall(host, "POST", "/v1/host/sync", { info });
     expect(sync.json.routines).toEqual([{ id, name: "Blog draft", onCalendar: "Wed *-*-* 08:52:00 Europe/Vienna", enabled: true, runRequested: false }]);
     expect((sync.json.runner as { sha256: string }).sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect((sync.json.runner as { signature?: string }).signature).toMatch(/^[A-Za-z0-9+/]{80,}={0,2}$/);
   });
 
   it("keep the prompt out of Convex in readable form", async () => {
@@ -173,15 +174,24 @@ describe("routines over MCP", () => {
     expect(made.isError).toBeFalsy();
     const r = (made.structuredContent as { routine: R }).routine;
     expect(text(made)).toContain("Weekdays at 07:00 (Europe/Vienna)");
+    // An AI app drafts it; it's paused until the user turns it on in the app.
+    expect(r.enabled).toBe(false);
+    expect(text(made)).toContain("an AI app can't turn it on");
+    expect((await client.callTool({ name: "run_routine", arguments: { id: r.id } })).isError).toBe(true);
+    expect((await client.callTool({ name: "update_routine", arguments: { id: r.id, enabled: true } })).isError).toBe(true);
+    expect(((await appCall(s, lena, "PATCH", `/v1/app/routines/${r.id}`, { enabled: true })).json.routine as R).enabled).toBe(true);
+    expect((await client.callTool({ name: "run_routine", arguments: { id: r.id } })).isError).toBeFalsy();
 
     const listed = text(await client.callTool({ name: "list_routines", arguments: {} }));
     expect(listed).toContain(`Inbox sweep (id: ${r.id}, personal)`);
     expect(listed).toContain("Build server (srv-test): online");
     expect(text(await client.callTool({ name: "list_routines", arguments: { id: r.id } }))).toContain("Prompt:\nSort the inbox.");
 
-    const changed = await client.callTool({ name: "update_routine", arguments: { id: r.id, prompt: "Sort and archive the inbox.", enabled: false } });
+    // A new prompt from an AI app pauses it again, until the user approves it.
+    const changed = await client.callTool({ name: "update_routine", arguments: { id: r.id, prompt: "Sort and archive the inbox." } });
     expect(text(changed)).toContain("paused");
-    expect((await client.callTool({ name: "run_routine", arguments: { id: r.id } })).isError).toBeFalsy();
+    expect(((changed.structuredContent as { routine: R }).routine).enabled).toBe(false);
+    expect((await client.callTool({ name: "run_routine", arguments: { id: r.id } })).isError).toBe(true);
     expect((await client.callTool({ name: "update_routine", arguments: { id: r.id, schedule: { every: "week", time: "07:00", timezone: "Europe/Vienna" } } })).isError).toBe(true);
 
     const row = await s.t.run(async (ctx) => (await ctx.db.query("routines").collect()).find((x) => x.name === "Inbox sweep"));
@@ -399,5 +409,25 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     expect(readdirSync(join(dir, "units")).filter((f) => f.includes(routineId))).toEqual([]);
     expect(readFileSync(join(dir, "systemctl.log"), "utf8")).toContain(`disable --now ambient-routine-${routineId}.timer`);
     expect(existsSync(join(dir, "units", `ambient-routine-${routineId}.service`))).toBe(false);
+  });
+});
+
+describe("the runner's releases", () => {
+  // As runner/ambient-runner.mjs checks an update before it replaces itself as root.
+  const source = readFileSync(RUNNER, "utf8");
+  const keys = [...source.matchAll(/const RUNNER_KEYS = \[([^\]]*)\]/g)][0]![1]!.match(/"([^"]+)"/g)!.map((k) => k.slice(1, -1));
+  const canonical = (src: string) => src.replace(/const DEFAULT_SERVER = "[^"]*";/, 'const DEFAULT_SERVER = "";');
+  const signedBy = (src: string, sig: string) =>
+    keys.some((k) => verify(null, Buffer.from(canonical(src)), createPublicKey({ key: Buffer.from(k, "base64"), format: "der", type: "spki" }), Buffer.from(sig, "base64")));
+  const sig = readFileSync(`${RUNNER}.sig`, "utf8").trim();
+
+  it("is signed: after changing the runner, run node ops/sign-runner.mjs and commit the .sig", () => {
+    expect(signedBy(source, sig)).toBe(true);
+  });
+
+  it("stays signed with another gateway's address, and not with any other change", () => {
+    const served = source.replace(/const DEFAULT_SERVER = "[^"]*";/, 'const DEFAULT_SERVER = "https://ambient.example.com";');
+    expect(signedBy(served, sig)).toBe(true);
+    expect(signedBy(source.replace("Nobody is watching this run", "Somebody is watching this run"), sig)).toBe(false);
   });
 });

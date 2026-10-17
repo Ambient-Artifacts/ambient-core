@@ -43,6 +43,8 @@ install -d -m 0700 /etc/ambient-runner
 grep '^ANTHROPIC_API_KEY=' /etc/brain/team.env > /etc/ambient-runner/extra.env
 chmod 600 /etc/ambient-runner/extra.env
 
-curl -fsSL "$origin/runner/ambient-runner.mjs" -o /tmp/ambient-runner.mjs
-node /tmp/ambient-runner.mjs setup "$code" --user routines --claude-args "$claude_args"
+runner_file=$(mktemp --suffix=.mjs)   # not a fixed name in /tmp, which another user could create first
+curl -fsSL "$origin/runner/ambient-runner.mjs" -o "$runner_file"
+node "$runner_file" setup "$code" --user routines --claude-args "$claude_args"
+rm -f "$runner_file"
 REMOTE

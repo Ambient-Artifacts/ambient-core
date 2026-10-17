@@ -1,6 +1,6 @@
 // The team wiki on disk plus its in-memory search index. Writes go to disk,
 // the index and git together, one at a time (simple in-process lock).
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { attention, LocalReader, indexFilesIn, renderIndexFiles, WikiStore } from "@brain/wiki";
@@ -73,7 +73,7 @@ export class TeamWiki {
   }
 
   read(path: string): string {
-    return readFileSync(join(this.dir, path), "utf8");
+    return readFileSync(inside(this.dir, path), "utf8");
   }
 
   /** Serialize writers: each callback runs alone and its files land in one commit. */
@@ -85,15 +85,14 @@ export class TeamWiki {
       if (this.remote?.connected && (await this.remote.pull())) this.reload();
       const touched: string[] = [];
       const put = async (path: string, text: string) => {
-        if (path.includes("..") || path.startsWith("/")) throw new Error(`bad path ${path}`);
-        await mkdir(dirname(join(this.dir, path)), { recursive: true });
-        await writeFile(join(this.dir, path), text);
+        const file = inside(this.dir, path);
+        await mkdir(dirname(file), { recursive: true });
+        await writeFile(file, text);
         this.store.upsert(path, text);
         touched.push(path);
       };
       const remove = async (path: string) => {
-        if (path.includes("..") || path.startsWith("/")) throw new Error(`bad path ${path}`);
-        await rm(join(this.dir, path), { force: true });
+        await rm(inside(this.dir, path), { force: true });
         this.store.remove(path);
         touched.push(path);
       };
@@ -116,7 +115,7 @@ export class TeamWiki {
    * The commit message's "kind: rest" becomes the line.
    */
   private async appendLog(message: string): Promise<string> {
-    const file = join(this.dir, "log.md");
+    const file = inside(this.dir, "log.md");
     const colon = message.indexOf(":");
     const kind = colon > 0 ? message.slice(0, colon).trim() : "change";
     const rest = (colon > 0 ? message.slice(colon + 1) : message).replace(/\s+/g, " ").trim();
@@ -137,7 +136,7 @@ export class TeamWiki {
     const changed: string[] = [];
     const rendered = renderIndexFiles(this.store.entries(), `${this.teamName} wiki`, attention(this.store.lint()));
     for (const [path, text] of rendered) {
-      const file = join(this.dir, path);
+      const file = inside(this.dir, path);
       if (existsSync(file) && readFileSync(file, "utf8") === text) continue;
       await mkdir(dirname(file), { recursive: true });
       await writeFile(file, text);
@@ -146,9 +145,30 @@ export class TeamWiki {
     // A folder whose pages all moved or went keeps no index of nothing.
     for (const path of await indexFilesIn(this.dir)) {
       if (rendered.has(path)) continue;
-      await rm(join(this.dir, path), { force: true });
+      await rm(inside(this.dir, path), { force: true });
       changed.push(path);
     }
     return changed;
   }
+}
+
+/**
+ * `path` inside the wiki at `dir`, or an error: not absolute, no "..", and no symlink on the way.
+ * A connected repo could commit a link pointing anywhere on the server (git checks links out as
+ * plain files, core.symlinks false, but a checkout from before that may still hold one).
+ */
+function inside(dir: string, path: string): string {
+  if (!path || path.startsWith("/") || path.includes("..") || path.includes("\\") || path.includes("\0")) throw new Error(`bad path ${path}`);
+  let at = dir;
+  for (const part of path.split("/")) {
+    at = join(at, part);
+    let link: boolean;
+    try {
+      link = lstatSync(at).isSymbolicLink();
+    } catch {
+      break; // Not there yet, so nothing below it can be a link.
+    }
+    if (link) throw new Error(`bad path ${path}`);
+  }
+  return join(dir, path);
 }

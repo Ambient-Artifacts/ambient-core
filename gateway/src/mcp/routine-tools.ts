@@ -83,6 +83,8 @@ function invalid(err: z.ZodError): string {
     .join("; ");
 }
 
+const PAUSED = "It's paused until the user turns it on in the Ambient app (Routines, then the routine, then Resume); an AI app can't turn it on.";
+
 export function registerRoutineTools(server: McpServer, principal: Principal, routines: RoutineService) {
   const actor: Actor = {
     uid: principal.uid,
@@ -144,7 +146,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     {
       title: "Create a routine",
       description:
-        "Create a routine: a prompt Claude Code runs on a schedule, unattended, with the tools and files of the computer it runs on and the owner's secrets as environment variables. Only when the user asks for one. Write the prompt as complete instructions for a run nobody watches: where to work, what to do, and what to finish with. Its last message is shown as the run's result.",
+        "Create a routine: a prompt Claude Code runs on a schedule, unattended, with the tools and files of the computer it runs on and the owner's secrets as environment variables. Only when the user asks for one. Write the prompt as complete instructions for a run nobody watches: where to work, what to do, and what to finish with. Its last message is shown as the run's result. It's created paused: it runs once the user turns it on in the Ambient app.",
       inputSchema: {
         name: z.string().min(1).max(80),
         prompt: z.string().min(1).max(20_000),
@@ -152,7 +154,6 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         ...teamArg,
         computer: z.string().max(80).optional().describe("For the user's own routines: the computer's name or id (see list_routines); defaults to the only one."),
         folder: z.string().max(500).optional().describe("Working folder on that computer, e.g. ~/blog."),
-        enabled: z.boolean().optional().describe("False to create it paused. Default true."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -160,12 +161,15 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
       guard(async () => {
         const input = RoutineInput.safeParse({ ...args, ...(onlyTeam ? { team: onlyTeam.slug } : {}) });
         if (!input.success) return error(`Check the routine: ${invalid(input.error)}.`);
-        const r = await routines.create(actor, input.data, source);
+        // An AI app drafts a routine; only the person starts it. A routine runs Claude Code unattended
+        // on their computer or the team's server, with their secrets: whatever an AI was told (by a
+        // page it read, say), turning one on stays the user's call, in the app.
+        const r = await routines.create(actor, { ...input.data, enabled: false }, source);
         const note = r.computer
-          ? ""
+          ? `\n\n${PAUSED}`
           : r.team
-            ? "\n\nThe team's server isn't set up for routines yet, so it won't run until it is."
-            : "\n\nIt has no computer yet, so it won't run: the user connects one in the Ambient app under Routines, then picks it.";
+            ? `\n\nThe team's server isn't set up for routines yet, so it won't run until it is. ${PAUSED}`
+            : `\n\nIt has no computer yet, so it won't run: the user connects one in the Ambient app under Routines, then picks it. ${PAUSED}`;
         return result(`Created:\n${routineText(r)}${note}`, { routine: r });
       }),
   );
@@ -174,7 +178,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     "update_routine",
     {
       title: "Change a routine",
-      description: "Change a routine's name, prompt, schedule, computer or folder, or pause and resume it (enabled). Only what's passed changes.",
+      description: "Change a routine's name, prompt, schedule, computer or folder, or pause it (enabled: false). Only what's passed changes. A new prompt, computer or folder pauses it until the user turns it on again in the Ambient app; only the user can turn a routine on.",
       inputSchema: {
         id: z.string().max(64),
         name: z.string().min(1).max(80).optional(),
@@ -190,8 +194,11 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
       guard(async () => {
         const patch = RoutinePatch.safeParse({ ...rest, ...(folder !== undefined ? { folder: folder.trim() === "" ? null : folder } : {}) });
         if (!patch.success) return error(`Check the change: ${invalid(patch.error)}.`);
-        const r = await routines.update(actor, id, patch.data, source);
-        return result(`Changed:\n${routineText(r)}`, { routine: r });
+        if (patch.data.enabled === true) return error(`Only the user can turn a routine on, in the Ambient app (Routines, then the routine). ${PAUSED}`);
+        // What runs, or where, changed: the user approves it again.
+        const rewrites = patch.data.prompt !== undefined || patch.data.computer !== undefined || patch.data.folder !== undefined;
+        const r = await routines.update(actor, id, rewrites ? { ...patch.data, enabled: false } : patch.data, source);
+        return result(`Changed:\n${routineText(r)}${rewrites ? `\n\n${PAUSED}` : ""}`, { routine: r });
       }),
   );
 
@@ -199,12 +206,13 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     "run_routine",
     {
       title: "Run a routine now",
-      description: "Start a routine now, outside its schedule. Its computer starts it within a minute; see the result later with list_routines and its id.",
+      description: "Start a routine now, outside its schedule. Its computer starts it within a minute; see the result later with list_routines and its id. Only routines the user has turned on.",
       inputSchema: { id: z.string().max(64) },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ id }) =>
       guard(async () => {
+        if (!(await routines.get(actor, id)).enabled) return error(`It's paused, so it can't run. ${PAUSED}`);
         const r = await routines.runNow(actor, id);
         return result(`"${r.name}" starts on ${r.team ? `${r.team.name}'s server` : (r.computer?.name ?? "its computer")} within a minute.`, { routine: r });
       }),

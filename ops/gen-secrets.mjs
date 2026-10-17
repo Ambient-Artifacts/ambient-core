@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Prints a fresh gateway env block. Store it in your password manager and on
-// the core VM at /etc/brain/gateway.env (root:brain 0640). Never commit it.
-//   node ops/gen-secrets.mjs > gateway.env
+// the core VM at /etc/brain/gateway.env (root:brain 0640). Never commit it, and
+// never write it into the checkout: write it outside, or straight to the VM:
+//   umask 077; node ops/gen-secrets.mjs > ~/ambient-gateway.env
+//   node ops/gen-secrets.mjs | ssh root@<ip> 'umask 027; cat > /etc/brain/gateway.env; chown root:brain /etc/brain/gateway.env
 //   node ops/gen-secrets.mjs --env     only the secrets, for Docker's .env (ops/docker/init.sh)
 import { randomBytes } from "node:crypto";
 import { exportJWK, generateKeyPair } from "jose";
@@ -16,7 +18,8 @@ BRAIN_MASTER_KEY=${randomBytes(32).toString("base64")}
 BRAIN_SERVICE_SECRET=${randomBytes(32).toString("hex")}`;
 
 if (process.argv.includes("--env")) {
-  console.log(secrets);
+  // Docker: the team server's secret too (BRAIN_TEAM_SECRET in docker-compose.yml).
+  console.log(`${secrets}\nTEAM_SECRET=${randomBytes(32).toString("base64url")}`);
 } else {
   console.log(`# Brain gateway secrets, generated ${new Date().toISOString()}
 ${secrets}

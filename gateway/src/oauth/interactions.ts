@@ -24,6 +24,7 @@ import type { Directory } from "../directory.ts";
 import { limiter, strikes } from "../limiter.ts";
 import { consentPage, errorPage, esc, loginPage, type LoginCodes } from "./pages.ts";
 import { APP_CLIENT_ID, appResource, parseResource } from "./provider.ts";
+import type { SignInNonces } from "../auth/signin-nonce.ts";
 
 /** How the apps sign in (verifiers), each from the gateway's config. */
 export interface AppSignIn {
@@ -34,6 +35,10 @@ export interface AppSignIn {
   codes?: LoginCodes;
   /** Who may make a new account from the apps (config.signups); absent: anyone. */
   signups?: { allow: string[] };
+  /** The nonces this server hands the apps for Apple and Microsoft sign-in. */
+  nonces: SignInNonces;
+  /** config.requireSignInNonce: a token without one of them is refused. */
+  requireNonce?: boolean;
 }
 
 /** Convex refused a new account: the server's sign-ups aren't open to this person. */
@@ -68,9 +73,9 @@ const INTERACTION_MS = 3_600_000;
 
 const SCOPE_TEXT: Record<string, string> = {
   "personal:read": "Read your personal notes and wiki",
-  "personal:write": "Save notes into your personal wiki",
+  "personal:write": "Save notes into your personal wiki, and draft loops that run only once you turn them on in the app",
   "team:read": "Read the team wikis you belong to",
-  "team:write": "Log finished work to your team's wiki (after a 30-minute hold you can undo in the app)",
+  "team:write": "Log finished work to your team's wiki (after a 30-minute hold you can undo in the app), and draft team loops that run only once someone turns them on in the app",
   "team:review": "See and act on team review items",
   offline_access: "Stay connected without signing in again",
   openid: "Know who you are",
@@ -104,7 +109,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
       }
       const client = await provider.Client.find(String(details.params.client_id));
       const clientName = String(client?.clientName ?? details.params.client_id);
-      const redirectHost = new URL(String(details.params.redirect_uri)).host;
+      const redirectHost = shownHost(String(details.params.redirect_uri));
 
       if (details.prompt.name === "login") {
         res.send(loginForm(details.uid, clientName, redirectHost));
@@ -120,11 +125,14 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         const team = await directory.teamBySlug(parsed.teamSlug);
         teamLines.push(`Only the <b>${esc(team?.name ?? parsed.teamSlug)}</b> team wiki (not your personal notes)`);
       }
+      // Whose notes: so nobody approves an app for an account that isn't theirs (a shared browser).
+      const who = details.session?.accountId ? await directory.user(details.session.accountId) : undefined;
       res.send(
         consentPage({
           uid: details.uid,
           clientName,
           redirectHost,
+          account: who ? (who.email ? `${who.name} (${who.email})` : who.name) : undefined,
           permissionsHtml: [...[...scopes].map((sc) => esc(SCOPE_TEXT[sc] ?? sc)), ...teamLines],
         }),
       );
@@ -147,7 +155,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
       const address = req.ip ?? "unknown";
       const form = async (status: number, error: string) => {
         const client = await provider.Client.find(String(details.params.client_id));
-        res.status(status).send(loginForm(details.uid, String(client?.clientName ?? details.params.client_id), new URL(String(details.params.redirect_uri)).host, error));
+        res.status(status).send(loginForm(details.uid, String(client?.clientName ?? details.params.client_id), shownHost(String(details.params.redirect_uri)), error));
       };
       // Checked before the code is even looked at: from here, the right code waits too.
       if (wrongFrom.blocked(address)) {
@@ -162,7 +170,9 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         return;
       }
       attempts.clear(details.uid);
-      await provider.interactionFinished(req, res, { login: { accountId: uid } }, { mergeWithLastSubmission: false });
+      // Not remembered: the browser keeps no sign-in once it closes, so a page that later sends it
+      // to /oauth/authorize for some other app can't skip the code and go straight to "Allow".
+      await provider.interactionFinished(req, res, { login: { accountId: uid, remember: false } }, { mergeWithLastSubmission: false });
     } catch (err) {
       next(err);
     }
@@ -232,6 +242,26 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
 
   const appJson = express.json({ limit: "32kb" });
 
+  /**
+   * Whether an Apple or Microsoft ID token may sign in here, by its nonce: one this server issued
+   * (still valid, first use), or none at all from an app from before nonces, which is taken until
+   * BRAIN_SIGNIN_NONCE=required. A nonce that isn't ours (another server's) is refused: that's a
+   * token given to some other server, replayed here. `legacy` is the old Microsoft flow's own
+   * random nonce, sent next to the token. Returns why it's refused, or null.
+   */
+  const nonceRefusal = (token: string | undefined, legacy?: string): string | null => {
+    if (token !== undefined) {
+      const check = app.nonces.check(token);
+      if (check === "ok") return null;
+      if (legacy === undefined || token !== legacy) return check;
+    }
+    return app.requireNonce ? "missing" : null;
+  };
+  const refuseNonce = (res: Response, why: string) => {
+    console.warn(`[gateway] app sign-in refused: nonce ${why}`);
+    res.status(401).json({ error: "invalid_nonce", message: why === "missing" ? "Update Ambient to sign in." : "That sign-in has expired. Try again." });
+  };
+
   router.post("/interaction/:uid/apple", appJson, async (req, res, next) => {
     try {
       if (!(await appInteraction(req, res))) return;
@@ -249,6 +279,8 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         res.status(401).json({ error: "invalid_apple_token" });
         return;
       }
+      const appleRefusal = nonceRefusal(identity.nonce);
+      if (appleRefusal) return refuseNonce(res, appleRefusal);
       let user;
       try {
         user = await control.m(api.users.upsertApple, {
@@ -296,6 +328,8 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         res.status(401).json({ error: "invalid_microsoft_token" });
         return;
       }
+      const microsoftRefusal = nonceRefusal(identity.nonce, body.data.nonce);
+      if (microsoftRefusal) return refuseNonce(res, microsoftRefusal);
       let user;
       try {
         user = await control.m(api.users.upsertMicrosoft, { microsoftId: identity.id, email: identity.email, name: identity.name ?? body.data.name, signups: app.signups, now: Date.now() });
@@ -323,4 +357,16 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
   });
 
   return router;
+}
+
+/**
+ * Where an AI app's code goes back to, as the sign-in pages show it. An https address names a host
+ * its owner proves, and http only ever goes to this computer (localhost); a native app's custom
+ * scheme (`x-app://claude.ai/…`) could claim any host, so it shows as its scheme and never gets a
+ * known app's icon or name.
+ */
+function shownHost(redirectUri: string): string {
+  const u = new URL(redirectUri);
+  const loopback = u.protocol === "http:" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname);
+  return u.protocol === "https:" || loopback ? u.host : u.protocol.replace(/:$/, "");
 }

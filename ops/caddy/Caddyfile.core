@@ -1,4 +1,10 @@
 # Core VM: the gateway. Caddy gets the TLS certificate from Let's Encrypt.
+# No admin API: on localhost:2019 any local user (a routine, on team VMs) could rewrite the proxy.
+# A new config takes a restart (deploy.sh falls back to one).
+{
+	admin off
+}
+
 __BRAIN_HOST__ {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8080

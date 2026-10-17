@@ -52,13 +52,15 @@ export function createUnclaimedApp(cfg: UnclaimedConfig): Express {
       res.status(409).json({ error: "already_claimed" });
       return;
     }
+    // Taken before the first await, so two claims at once can't both get through.
+    claimed = true;
     // A server that still holds a wiki (an earlier team's) must never hand it to a new team.
     if ((await readdir(join(cfg.dataDir, "wiki")).catch(() => [])).length) {
       console.error(`[team] refusing a claim: ${join(cfg.dataDir, "wiki")} is not empty`);
+      claimed = false;
       res.status(409).json({ error: "wiki_not_empty" });
       return;
     }
-    claimed = true;
     await mkdir(cfg.dataDir, { recursive: true });
     await writeFile(join(cfg.dataDir, "team.json"), JSON.stringify({ teamId, teamName, claimedAt: new Date().toISOString() }, null, 2));
     res.status(202).json({ ok: true });

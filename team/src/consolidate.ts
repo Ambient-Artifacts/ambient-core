@@ -190,7 +190,7 @@ function today(): string {
 function noteRefs(n: Page): string[] {
   const fm = n.frontmatter;
   const all = [fm.recorded_by, ...(["people", "orgs", "projects", "topics"] as const).flatMap((k) => (Array.isArray(fm[k]) ? fm[k] : []))];
-  return [...new Set(all.filter((r): r is string => typeof r === "string" && r.split("/")[0]! in FOLDER_TYPE))];
+  return [...new Set(all.filter((r): r is string => typeof r === "string" && Object.hasOwn(FOLDER_TYPE, r.split("/")[0]!)))];
 }
 
 function existingOf(page: Page | undefined): PageUpdateInput["existing"] {
@@ -300,7 +300,7 @@ export async function consolidatePages(run: ConsolidateRun): Promise<Consolidate
     failedNotes: new Set(),
     commit: null,
   };
-  const rewrite = (run.rewrite ?? []).filter((r) => FOLDER_TYPE[r.split("/")[0]!] && store.getByRef(r));
+  const rewrite = (run.rewrite ?? []).filter((r) => Object.hasOwn(FOLDER_TYPE, r.split("/")[0]!) && store.getByRef(r));
   if (fresh.length === 0 && rewrite.length === 0) return out;
 
   const byTarget = new Map<string, { notes: Page[]; known: boolean }>();

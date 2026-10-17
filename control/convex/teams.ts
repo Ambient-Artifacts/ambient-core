@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel.js";
-import { internalMutation, mutation, query, type QueryCtx } from "./_generated/server.js";
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
 import { role } from "./schema.js";
 
@@ -72,32 +72,28 @@ export const joinWithInvite = mutation({
     if (!invite || invite.usesLeft <= 0 || invite.expiresAt < now) return { ok: false as const, error: "invalid_code" };
     const team = await ctx.db.get(invite.teamId);
     if (!team || team.status !== "active") return { ok: false as const, error: "team_unavailable" };
+    // Someone who was removed needs an invite made after that: a code they kept, or a link still
+    // going round, doesn't bring them back.
+    const removed = await ctx.db.query("removals").withIndex("by_team_user", (q) => q.eq("teamId", team._id).eq("userId", uid)).unique();
+    if (removed && removed.at >= invite.createdAt) return { ok: false as const, error: "invalid_code" };
     const existing = await ctx.db
       .query("members")
       .withIndex("by_team_user", (q) => q.eq("teamId", team._id).eq("userId", uid))
       .unique();
     if (existing) return { ok: true as const, team: shape(team, existing) };
-    // Keep people slugs unique inside a team (two "Anna Müller"s get -2).
+    // Keep people slugs unique inside a team (two "Anna Müller"s get -2), and never hand someone
+    // a removed member's page by renaming themselves after them (their own comes back to them).
     const taken = new Set(
       (await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", team._id)).collect()).map((m) => m.peopleSlug),
     );
+    for (const r of await ctx.db.query("removals").withIndex("by_team_user", (q) => q.eq("teamId", team._id)).collect()) {
+      if (r.peopleSlug && r.userId !== uid) taken.add(r.peopleSlug);
+    }
     let slug = peopleSlug;
     for (let i = 2; taken.has(slug); i++) slug = `${peopleSlug}-${i}`;
     const memberId = await ctx.db.insert("members", { teamId: team._id, userId: uid, role: invite.role, peopleSlug: slug, joinedAt: now });
     await ctx.db.patch(invite._id, { usesLeft: invite.usesLeft - 1 });
     return { ok: true as const, team: shape(team, (await ctx.db.get(memberId))!) };
-  },
-});
-
-export const leave = mutation({
-  args: { ...secretArg, uid: v.id("users"), teamId: v.id("teams") },
-  handler: async (ctx, { secret, uid, teamId }) => {
-    assertService(secret);
-    const m = await ctx.db
-      .query("members")
-      .withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid))
-      .unique();
-    if (m) await ctx.db.delete(m._id);
   },
 });
 
@@ -186,6 +182,12 @@ export const createOwned = mutation({
     assertService(secret);
     const clean = name.trim().slice(0, 80);
     if (!clean) return { ok: false as const, error: "bad_name" };
+    // Each team takes a server from the pool for good, so one account can't empty it.
+    let owned = 0;
+    for (const m of await ctx.db.query("members").withIndex("by_user", (q) => q.eq("userId", uid)).collect()) {
+      if (m.role === "owner" && (await ctx.db.get(m.teamId))?.status === "active") owned++;
+    }
+    if (owned >= MAX_OWNED_TEAMS) return { ok: false as const, error: "too_many_teams" };
     const server = await ctx.db.query("teamServers").withIndex("by_status", (q) => q.eq("status", "free")).first();
     if (!server) return { ok: false as const, error: "no_server" };
     const base = clean.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "team";
@@ -199,6 +201,17 @@ export const createOwned = mutation({
     return { ok: true as const, team: shape(team, member ?? undefined), server: { serverId: server.serverId, url: server.url } };
   },
 });
+
+/** How many active teams one account can own (each takes a server from the pool). */
+export const MAX_OWNED_TEAMS = 3;
+
+/** Note that `userId` was taken out of `teamId` now, so older invites can't bring them back. */
+export async function recordRemoval(ctx: MutationCtx, teamId: Id<"teams">, userId: Id<"users">, peopleSlug?: string): Promise<void> {
+  const at = Date.now();
+  const prior = await ctx.db.query("removals").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", userId)).unique();
+  if (prior) await ctx.db.patch(prior._id, { at, ...(peopleSlug ? { peopleSlug } : {}) });
+  else await ctx.db.insert("removals", { teamId, userId, at, ...(peopleSlug ? { peopleSlug } : {}) });
+}
 
 /** Undo `createOwned` when the server couldn't be claimed: the team goes, the server is free again. */
 export const abandonCreate = mutation({
@@ -258,6 +271,7 @@ export const removeMemberBy = mutation({
     if (!t) return { ok: true as const };
     if (t.role === "owner" || (t.role === "admin" && m.member.role !== "owner")) return { ok: false as const, error: "forbidden" };
     await ctx.db.delete(t._id);
+    await recordRemoval(ctx, m.team._id, target, t.peopleSlug);
     return { ok: true as const };
   },
 });

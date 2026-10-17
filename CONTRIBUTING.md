@@ -63,3 +63,5 @@ By contributing, you agree that your contribution is licensed under the [MIT Lic
 ## Code of conduct
 
 Be kind and assume good intent. This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
+**Changing the runner** (`runner/ambient-runner.mjs`): computers install a new runner only when it's signed with Ambient's release key, so a maintainer signs it before it ships (`ops/sign-runner.mjs`). Until then the test "the runner's releases" fails; that's expected in a pull request that changes the runner.

@@ -10,6 +10,8 @@ export interface MicrosoftIdentity {
   id: string;
   email?: string;
   name?: string;
+  /** The token's nonce, if any (auth/signin-nonce.ts). */
+  nonce?: string;
 }
 
 export type MicrosoftVerifier = (idToken: string, nonce?: string) => Promise<MicrosoftIdentity>;
@@ -29,6 +31,6 @@ export function microsoftVerifier(clientIds: string[], jwks: string | { keys: JW
     if (nonce !== undefined && payload.nonce !== nonce) throw new Error("microsoft token nonce mismatch");
     const email = typeof payload.email === "string" && payload.email.includes("@") ? payload.email : undefined;
     const name = typeof payload.name === "string" ? payload.name : undefined;
-    return { id: `${tid}:${oid}`, email, name };
+    return { id: `${tid}:${oid}`, email, name, nonce: typeof payload.nonce === "string" ? payload.nonce : undefined };
   };
 }

@@ -9,6 +9,7 @@ import type { Doc, Id } from "./_generated/dataModel.js";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
 import { routineSchedule, runStatus } from "./schema.js";
+import { emailVouched } from "./admin.js";
 
 const MAX_ROUTINES = 50;
 const MAX_HOSTS = 10;
@@ -67,6 +68,16 @@ function runShape(r: Doc<"routineRuns">) {
     turns: r.turns ?? null,
     sessionId: r.sessionId ?? null,
   };
+}
+
+/**
+ * Whether `uid` owns or administers `teamId` right now. Read here, for every team write: the
+ * gateway's view of roles is cached for up to a minute, and an admin who was just demoted or
+ * removed mustn't change what runs on the team's server in that minute.
+ */
+async function manages(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamId: Id<"teams">): Promise<boolean> {
+  const m = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid)).unique();
+  return !!m && (m.role === "owner" || m.role === "admin");
 }
 
 /** A routine the user may see (reads) or change (writes): theirs, or one of the given teams'. */
@@ -129,6 +140,7 @@ export const create = mutation({
   },
   handler: async (ctx, { secret, uid, teamId, hostId, now, ...fields }) => {
     assertService(secret);
+    if (teamId && !(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
     const count = teamId ? (await teamRoutines(ctx, teamId)).length : (await personalRoutines(ctx, uid)).length;
     if (count >= MAX_ROUTINES) return { ok: false as const, error: "too_many_routines" };
     let host: Doc<"routineHosts"> | null = null;
@@ -162,6 +174,7 @@ export const update = mutation({
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r) return { ok: false as const, error: "no_such_routine" };
+    if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     const patch: Partial<Doc<"routines">> = { updatedAt: now, source: fields.source };
     if (fields.name !== undefined) patch.name = fields.name;
     if (fields.promptIv !== undefined && fields.promptCt !== undefined) {
@@ -190,6 +203,7 @@ export const remove = mutation({
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r) return { ok: false as const, error: "no_such_routine" };
+    if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     const runs = await ctx.db.query("routineRuns").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(KEEP_RUNS * 4);
     for (const run of runs) await ctx.db.delete(run._id);
     await ctx.db.delete(r._id);
@@ -204,6 +218,7 @@ export const requestRun = mutation({
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r) return { ok: false as const, error: "no_such_routine" };
+    if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     if (r.teamId) {
       const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
       if (!server?.tokenHash) return { ok: false as const, error: "no_team_server" };
@@ -273,7 +288,8 @@ export const staffAddHost = internalMutation({
       return { id, team: t.slug };
     }
     const want = (email ?? "").trim().toLowerCase();
-    const users = (await ctx.db.query("users").collect()).filter((u) => u.email?.toLowerCase() === want && !u.disabled);
+    // Emails someone vouches for only (see admin.ts emailVouched).
+    const users = (await ctx.db.query("users").collect()).filter((u) => emailVouched(u) && u.email?.toLowerCase() === want && !u.disabled);
     if (users.length !== 1) throw new Error(users.length ? `${users.length} users have ${email}` : `no user with ${email}`);
     const id = await ctx.db.insert("routineHosts", { userId: users[0]!._id, name, codeHash, codeExpiresAt: expiresAt, createdAt: Date.now() });
     return { id, uid: users[0]!._id };
@@ -307,6 +323,7 @@ export const setSecret = mutation({
   args: { ...secretArg, uid: v.id("users"), teamId: v.optional(v.id("teams")), name: v.string(), valueIv: v.string(), valueCt: v.string(), now: v.number() },
   handler: async (ctx, { secret, uid, teamId, name, valueIv, valueCt, now }) => {
     assertService(secret);
+    if (teamId && !(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
     const rows = await secretRows(ctx, uid, teamId);
     const existing = rows.find((r) => r.name === name);
     if (existing) {
@@ -323,6 +340,7 @@ export const removeSecret = mutation({
   args: { ...secretArg, uid: v.id("users"), teamId: v.optional(v.id("teams")), name: v.string() },
   handler: async (ctx, { secret, uid, teamId, name }) => {
     assertService(secret);
+    if (teamId && !(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
     const row = (await secretRows(ctx, uid, teamId)).find((r) => r.name === name);
     if (!row) return { ok: false as const, error: "no_such_secret" };
     await ctx.db.delete(row._id);
@@ -509,6 +527,12 @@ async function failureNotice(ctx: MutationCtx, run: Doc<"routineRuns">, r: Doc<"
   const previous = recent.find((x) => x.status !== "running");
   const news = run.trigger === "manual" || previous?.status !== "failed" || !r.failureNoticeAt || now - r.failureNoticeAt >= NOTICE_REPEAT_MS;
   if (!news) return null;
+  // A team routine's notice goes to whoever started the run only while they're still in the team.
+  if (r.teamId) {
+    const teamId = r.teamId;
+    const member = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", run.userId)).unique();
+    if (!member) return null;
+  }
   await ctx.db.patch(r._id, { failureNoticeAt: now });
   const team = r.teamId ? await ctx.db.get(r.teamId) : null;
   return { uid: run.userId, routineId: r._id, runId: run._id, name: r.name, team: team?.name ?? null };

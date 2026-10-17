@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { alerts, checkHealth } from "../src/worker/health.ts";
 import { startStack, type Stack } from "./helpers.ts";
+import { TeamLink } from "../src/teams.ts";
 
 let s: Stack;
 beforeAll(async () => {
@@ -13,7 +14,13 @@ const H = 3_600_000;
 
 describe("health check", () => {
   it("is green when the gateway and team servers answer and nothing waits", async () => {
-    const { problems, summary } = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() - 5 * 60_000 }) });
+    const link = new TeamLink(s.origin, s.config.signingKeys[0]!);
+    const { problems, summary } = await checkHealth({
+      control: s.control,
+      gatewayUrl: s.origin,
+      unit: async () => ({ result: "success", lastRunAt: Date.now() - 5 * 60_000 }),
+      teamToken: (team) => link.token(team, "health"),
+    });
     expect(problems).toEqual([]);
     expect(summary[0]).toBe("gateway ok");
     expect(summary.some((l) => l.startsWith("acme:"))).toBe(true);

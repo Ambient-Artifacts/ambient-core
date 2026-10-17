@@ -28,7 +28,8 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 | Variable | |
 |---|---|
 | `BRAIN_APPLE_AUDIENCES` | Comma-separated bundle ids accepted from Sign in with Apple. The compose file defaults to the App Store apps' `si.ambientartifacts.brain`; `none` turns Apple sign-in off. |
-| `BRAIN_SIGNUPS` | Who may make an account by signing in from the apps. Unset or `open`: anyone (Ambient Cloud). `none` (the compose default): only people added with `admin user add`, matched by the email Apple confirms. Or a list of emails and domains, e.g. `@acme.com,anna@gmail.com`. New Microsoft accounts need `open`: Microsoft doesn't vouch for emails in every tenant. |
+| `BRAIN_SIGNIN_NONCE` | `required`: Apple and Microsoft sign-ins must carry a nonce this server issued (`GET /v1/app/sign-in-nonce`), so an ID token the app gave some other server can't be replayed here. Turn it on once every app in use sends one (`BRAIN_MIN_APP_VERSION`); until then tokens without a nonce are taken, and a nonce from another server is always refused. |
+| `BRAIN_SIGNUPS` | Who may make an account by signing in from the apps. Unset or `open`: anyone (Ambient Cloud); a server you run yourself outside the compose file should set it, since unset means open (the gateway says so in its log at start). `none` (the compose default): only people added with `admin user add`, matched by the email Apple confirms. Or a list of emails and domains, e.g. `@acme.com,anna@gmail.com`. New Microsoft accounts need `open`: Microsoft doesn't vouch for emails in every tenant. |
 | `BRAIN_ADMIN_CODES` | `true`: the AI-app sign-in page also says the server's admin hands out codes (`admin connect-code`). Set in the compose file. |
 | `BRAIN_APPLE_TEAM_ID`, `BRAIN_APPLE_KEY_ID`, `BRAIN_APPLE_PRIVATE_KEY`, `BRAIN_APPLE_CLIENT_ID` | A Sign in with Apple key, to revoke a deleted account's Apple token. The private key is the `.p8` text on one line with `\n` for newlines. |
 | `BRAIN_MICROSOFT_CLIENT_IDS` | Microsoft Entra app registration ids for "Continue with Microsoft"; the first is the one the apps use. |
@@ -61,6 +62,7 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 | `PORT` | `8090` | |
 | `BRAIN_LISTEN_HOST` | `127.0.0.1` | `0.0.0.0` in the Docker image. |
 | `ANTHROPIC_API_KEY` | none | For the nightly consolidation. In Docker: `TEAM_ANTHROPIC_API_KEY`, or else `ANTHROPIC_API_KEY`. |
+| `BRAIN_TEAM_SECRET` | none | Seals the team repo's access token in `remote.json`, so a backup or copy of the data directory alone holds no usable token. Any long random string (`openssl rand -base64 32`); keep it in the env file, not the data directory. In Docker: `TEAM_SECRET`, which `init.sh` generates. A token saved before it was set is sealed the next time the server starts. |
 | `BRAIN_CONSOLIDATE_MODEL` | `claude-haiku-4-5` | |
 | `BRAIN_CONSOLIDATE_AT` | `02:00` | Docker only: when the nightly job runs, in `TZ`. |
 

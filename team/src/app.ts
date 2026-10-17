@@ -26,14 +26,37 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
   const app = express();
   app.disable("x-powered-by");
 
-  // Open to the core VM only (Caddy). The health check reads the nightly job's state from here.
-  app.get("/health", async (_req, res) => {
+  /** The gateway's token for this team and `purpose`, or null. */
+  const verified = async (req: Request, purpose: "query" | "inbox" | "repo" | "health") => {
+    const header = req.headers.authorization;
+    if (!header?.startsWith("Bearer ")) return null;
+    try {
+      const { payload } = await jwtVerify(header.slice(7), keys, {
+        issuer: cfg.gatewayIssuer,
+        audience: `team:${cfg.teamId}`,
+        typ: "brain-team+jwt",
+        algorithms: ["ES256"],
+        maxTokenAge: "120s",
+      });
+      return payload.purpose === purpose ? payload : null;
+    } catch {
+      return null;
+    }
+  };
+
+  // Up or not, for anyone. The details (the repo and its errors, the nightly job, the git head)
+  // only with the gateway's health token: Caddy keeps others out on Ambient Cloud, but a
+  // self-hosted server may not, and the details include the repo's address and git's errors.
+  app.get("/health", async (req, res) => {
+    const base = { status: "ok", service: "brain-team", version: cfg.version };
+    if (!(await verified(req, "health"))) {
+      res.json(base);
+      return;
+    }
     // Catch up with commits from other processes first, so `head` is the wiki as it is.
     await wiki.refresh().catch(() => undefined);
     res.json({
-      status: "ok",
-      service: "brain-team",
-      version: cfg.version,
+      ...base,
       pages: wiki.store.size,
       consolidate: await jobState(wiki, cfg.outDir),
       repo: wiki.remote?.status() ?? null,
@@ -43,25 +66,17 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
   });
 
   const auth = (purpose: "query" | "inbox" | "repo") => async (req: Request, res: Response, next: NextFunction) => {
-    const header = req.headers.authorization;
-    if (!header?.startsWith("Bearer ")) {
+    if (!req.headers.authorization?.startsWith("Bearer ")) {
       res.status(401).json({ error: "missing token" });
       return;
     }
-    try {
-      const { payload } = await jwtVerify(header.slice(7), keys, {
-        issuer: cfg.gatewayIssuer,
-        audience: `team:${cfg.teamId}`,
-        typ: "brain-team+jwt",
-        algorithms: ["ES256"],
-        maxTokenAge: "120s",
-      });
-      if (payload.purpose !== purpose) throw new Error("wrong purpose");
-      res.locals.token = payload;
-      next();
-    } catch {
+    const payload = await verified(req, purpose);
+    if (!payload) {
       res.status(401).json({ error: "invalid token" });
+      return;
     }
+    res.locals.token = payload;
+    next();
   };
 
   app.post("/v1/query", express.json({ limit: "64kb" }), auth("query"), async (req, res) => {

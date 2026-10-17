@@ -30,8 +30,9 @@ AI apps ─▶        same                                            ──▶ 
 
 ## 1. Secrets
 ```sh
-node ops/gen-secrets.mjs > gateway.env   # keep a copy in the password manager
+umask 077; node ops/gen-secrets.mjs > ~/ambient-gateway.env   # outside the checkout; keep a copy in the password manager
 ```
+Never write it into the checkout: anything there could be committed or copied to a VM by mistake (deploy.sh ships only what git tracks, as a second line of defence).
 **Losing `BRAIN_MASTER_KEY` makes every stored personal page unreadable.** Back it up before the first user signs in.
 
 ## 2. Core VM
@@ -62,6 +63,7 @@ ssh root@<ip> 'cat > /etc/brain/team.env' <<EOF
 BRAIN_SERVER_ID=pool-1
 BRAIN_GATEWAY_ISSUER=https://mcp.<domain>
 ANTHROPIC_API_KEY=<key with a spend limit; the server keeps it once claimed>
+BRAIN_TEAM_SECRET=<openssl rand -base64 32: seals the team repo's token in /srv/brain>
 PORT=8090
 EOF
 ssh root@<ip> 'printf "BRAIN_HOST=t-pool-1.<domain>\nBRAIN_GATEWAY_IP=<core ip>\n" > /etc/brain/host.env; chown root:brain /etc/brain/*.env; chmod 640 /etc/brain/*.env'
@@ -94,7 +96,7 @@ then the same steps with `BRAIN_TEAM_ID=<team id>` and `BRAIN_TEAM_NAME=Acme Gmb
   ops/routines-team-server.sh <team-slug> root@<team server ip>     # with CONVEX_DEPLOY_KEY; CLAUDE_ARGS overrides the run flags
   ```
   It installs Claude Code, gh, python3-pil and webp, makes git sign in to GitHub through gh (a `GH_TOKEN` secret is then all a routine needs to push), copies `ANTHROPIC_API_KEY` from `/etc/brain/team.env` to `/etc/ambient-runner/extra.env`, and connects the runner as the team's server.
-- **How:** `ambient-runner.timer` (every minute) asks the gateway for the computer's routines (`POST /v1/host/sync`) and writes one `ambient-routine-<id>.service` + `.timer` per routine (`OnCalendar` in the routine's time zone, no catch-up after downtime), removes deleted ones, and starts "Run now" requests. A run fetches the prompt and the owner's secrets (`POST /v1/host/routines/<id>/runs`), pipes the prompt to `claude -p --output-format stream-json` in the routine's folder (default `~/ambient-routines`) with the secrets as environment variables, and reports status, cost and Claude's last message (`POST /v1/host/runs/<runId>`). Runs stop after 3 hours. The runner replaces itself when the gateway serves a newer one.
+- **How:** `ambient-runner.timer` (every minute) asks the gateway for the computer's routines (`POST /v1/host/sync`) and writes one `ambient-routine-<id>.service` + `.timer` per routine (`OnCalendar` in the routine's time zone, no catch-up after downtime), removes deleted ones, and starts "Run now" requests. A run fetches the prompt and the owner's secrets (`POST /v1/host/routines/<id>/runs`), pipes the prompt to `claude -p --output-format stream-json` in the routine's folder (default `~/ambient-routines`) with the secrets as environment variables, and reports status, cost and Claude's last message (`POST /v1/host/runs/<runId>`). Runs stop after 3 hours. The runner's own units run as root and start Claude Code as the routine's user (`setpriv`), so a routine can't read the computer's token. The runner replaces itself when the gateway serves a newer one, but only one signed with a key in its `RUNNER_KEYS`: after changing `runner/ambient-runner.mjs`, sign it on the machine that holds the release key (`node ops/sign-runner.mjs`, key in `~/.brain-secrets/runner-signing-key.pem`, never on the gateway) and commit `runner/ambient-runner.mjs.sig`; a test fails until you do.
 - **On the computer:** `journalctl -u 'ambient-routine-*' -u ambient-runner`, `node /opt/ambient-runner/ambient-runner.mjs status`, and `sudo node /opt/ambient-runner/ambient-runner.mjs uninstall` to remove it all.
 
 ## 4. Connect an AI app

@@ -38,7 +38,9 @@ field() { printf '%s' "$2" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"
 get() {
   local path="$1" out="$2"
   shift 2
-  curl -sS -G --max-time 4 -o "$out" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$@" "$SERVER$path" 2>>"$DATA/context.log" || true
+  # The token goes in through a file descriptor, not curl's arguments, which every user on the
+  # machine can read (ps); printf is a shell builtin, so it never shows there either.
+  curl -sS -G --max-time 4 -o "$out" -w '%{http_code}' -H @<(printf 'Authorization: Bearer %s\n' "$TOKEN") "$@" "$SERVER$path" 2>>"$DATA/context.log" || true
 }
 
 # The names in your wikis, one "id<TAB>name" per line; refreshed when older than an hour.

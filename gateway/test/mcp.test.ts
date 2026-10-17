@@ -206,3 +206,25 @@ describe("scoping and membership", () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe("revoking a token", () => {
+  it("lists the user's tokens and stops one at once; nobody else's can be revoked", async () => {
+    const made = (await appCall(s, lenaApp, "POST", "/v1/app/pats", { label: "Leaked laptop" })).json as { token: string; id: string };
+    const listed = (await appCall(s, lenaApp, "GET", "/v1/app/pats")).json.tokens as { id: string; label: string }[];
+    expect(listed.map((t) => t.label)).toEqual(expect.arrayContaining(["Leaked laptop", "Codex", "Copilot"]));
+    expect(JSON.stringify(listed)).not.toContain(made.token);
+
+    const before = await fetch(`${s.origin}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${made.token}` }, body: rpc("tools/list") });
+    expect(before.status).toBe(200);
+
+    const other = await signIn(s, "apple-ben-pats", "Ben Koch");
+    expect((await appCall(s, other.access_token, "DELETE", `/v1/app/pats/${made.id}`)).status).toBe(404);
+    expect((await appCall(s, lenaApp, "DELETE", `/v1/app/pats/${made.id}`)).status).toBe(204);
+    expect((await appCall(s, lenaApp, "DELETE", `/v1/app/pats/${made.id}`)).status).toBe(404);
+
+    const after = await fetch(`${s.origin}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${made.token}` }, body: rpc("tools/list") });
+    expect(after.status).toBe(401);
+    const left = (await appCall(s, lenaApp, "GET", "/v1/app/pats")).json.tokens as { label: string }[];
+    expect(left.map((t) => t.label)).not.toContain("Leaked laptop");
+  });
+});

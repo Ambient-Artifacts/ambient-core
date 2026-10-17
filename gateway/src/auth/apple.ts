@@ -7,6 +7,8 @@ export interface AppleIdentity {
   email?: string;
   /** Apple confirmed the email (a "Hide My Email" relay address is confirmed too). */
   emailVerified: boolean;
+  /** The nonce the app asked Apple to sign in, if any (auth/signin-nonce.ts). */
+  nonce?: string;
 }
 
 export type AppleVerifier = (identityToken: string) => Promise<AppleIdentity>;
@@ -22,6 +24,6 @@ export function appleVerifier(bundleIds: string[], jwks: string | { keys: JWK[] 
     const email = typeof payload.email === "string" ? payload.email : undefined;
     // Apple sends these as booleans or as "true"/"false".
     const yes = (v: unknown) => v === true || v === "true";
-    return { sub: payload.sub, email, emailVerified: yes(payload.email_verified) };
+    return { sub: payload.sub, email, emailVerified: yes(payload.email_verified), nonce: typeof payload.nonce === "string" ? payload.nonce : undefined };
   };
 }

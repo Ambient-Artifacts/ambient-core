@@ -34,7 +34,7 @@ function listen(server: Server): Promise<string> {
   return new Promise((r) => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)));
 }
 
-export async function startStack(opts: { revisionPollMs?: number; streamMaxMs?: number; push?: PushSender; signups?: { allow: string[] } } = {}) {
+export async function startStack(opts: { revisionPollMs?: number; streamMaxMs?: number; push?: PushSender; signups?: { allow: string[] }; requireSignInNonce?: boolean } = {}) {
   const serviceSecret = randomBytes(24).toString("hex");
   process.env.BRAIN_SERVICE_SECRET = serviceSecret;
   const t = convexTest(schema, modules);
@@ -82,6 +82,7 @@ export async function startStack(opts: { revisionPollMs?: number; streamMaxMs?: 
     directoryTtlMs: 0,
     allowFileRepos: true,
     signups: opts.signups,
+    requireSignInNonce: opts.requireSignInNonce,
   };
 
   // Team server with a copy of the fixture team wiki.

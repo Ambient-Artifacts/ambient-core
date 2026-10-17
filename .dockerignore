@@ -13,3 +13,9 @@ docs
 *.md
 !integrations/**/*.md
 docker-compose*.yml
+# Secrets, tokens and backups never go into the image (COPY . .).
+*.env
+**/*.env
+*.tgz
+token.txt
+*.token

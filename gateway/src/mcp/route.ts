@@ -4,6 +4,7 @@ import { AuthError, type ResourceTarget, type createBearerVerifier } from "../au
 import type { RoutineService } from "../routines/service.ts";
 import { personalInstructions } from "./context.ts";
 import { buildMcpServer, type ReaderSource } from "./tools.ts";
+import { strikes } from "../limiter.ts";
 
 export const MCP_SCOPES = ["personal:read", "personal:write", "team:read", "team:write"];
 export const TEAM_MCP_SCOPES = ["team:read", "team:write"];
@@ -52,13 +53,23 @@ export function mcpRouter(deps: {
     next();
   });
 
+  // Made-up tokens cost a database lookup each: an address that keeps failing waits a minute.
+  // Only real failures count (a missing token is the normal start of an OAuth connection).
+  const failures = strikes(60, 60_000);
+
   const handle = async (req: Request, res: Response, target: ResourceTarget, resourcePath: string) => {
+    const address = req.ip ?? "unknown";
+    if (failures.blocked(address)) {
+      res.status(429).json({ error: "slow_down", error_description: "Too many failed sign-ins from here. Try again in a minute." });
+      return;
+    }
     let principal;
     try {
       const proof = req.headers.dpop;
       principal = await deps.verify(req.headers.authorization, target, { method: req.method, proof: typeof proof === "string" ? proof : undefined });
     } catch (err) {
       if (!(err instanceof AuthError)) throw err;
+      if (req.headers.authorization) failures.add(address);
       const params = [`resource_metadata="${resourceMetadataUrl(deps.origin, resourcePath)}"`];
       if (err.code !== "invalid_request") params.push(`error="${err.code}"`, `error_description="${err.message}"`);
       if (err.code === "insufficient_scope") params.push(`scope="${target.teamSlug ? TEAM_MCP_SCOPES.join(" ") : MCP_SCOPES.join(" ")}"`);
@@ -87,6 +98,11 @@ export function mcpRouter(deps: {
   );
   router.post("/t/:slug/mcp", express.json({ limit: "1mb" }), (req, res) => {
     const slug = String(req.params.slug);
+    // The slug goes into the resource URL and the WWW-Authenticate header: a team slug or nothing.
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(slug)) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
     return handle(req, res, { url: `${deps.origin}/t/${slug}/mcp`, teamSlug: slug }, `/t/${slug}/mcp`);
   });
 

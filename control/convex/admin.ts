@@ -6,6 +6,7 @@ import type { Doc, Id } from "./_generated/dataModel.js";
 import { mutation, query, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
 import { role } from "./schema.js";
+import { recordRemoval } from "./teams.js";
 
 const user = (u: Doc<"users">) => ({
   uid: u._id,
@@ -56,7 +57,15 @@ async function lookup(ctx: QueryCtx, ref: string) {
     .unique();
   if (local) return [local];
   // Accounts from the apps carry the email they signed in with (Apple's may be a relay address).
-  return (await ctx.db.query("users").collect()).filter((u) => u.email?.toLowerCase() === want);
+  // Only emails someone vouches for: Apple's, or one an admin entered. Microsoft's `email` claim is
+  // whatever the account's tenant says, so a stranger's tenant could claim anyone's address and
+  // receive their codes, tokens or team role; those accounts are found by id.
+  return (await ctx.db.query("users").collect()).filter((u) => emailVouched(u) && u.email?.toLowerCase() === want);
+}
+
+/** Whether a user's email can identify them: from Sign in with Apple, or entered by an admin. */
+export function emailVouched(u: Doc<"users">): boolean {
+  return u.appleSub !== undefined || u.localId !== undefined;
 }
 
 /** One user by id or email: `matches` > 1 when the email belongs to more than one account. */
@@ -153,6 +162,7 @@ export const removeMember = mutation({
       if (owners.length === 1) return { ok: false as const, error: "last_owner" };
     }
     await ctx.db.delete(m._id);
+    await recordRemoval(ctx, team._id, uid, m.peopleSlug);
     return { ok: true as const, removed: true };
   },
 });

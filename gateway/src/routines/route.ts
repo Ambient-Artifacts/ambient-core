@@ -4,6 +4,7 @@ import express, { type NextFunction, type Request, type RequestHandler, type Res
 import { z } from "zod";
 import type { Directory } from "../directory.ts";
 import { HostInfo, RoutineError, RoutineInput, RoutinePatch, RunProgress, RunResult, SecretName, SecretValue, type Actor, type Host, type RoutineService } from "./service.ts";
+import { limiter } from "../limiter.ts";
 
 function fail(res: Response, err: unknown) {
   if (err instanceof RoutineError) {
@@ -38,7 +39,7 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
     }
   });
 
-  r.put("/v1/app/routines/secrets/:name", d.json, d.auth, async (req, res) => {
+  r.put("/v1/app/routines/secrets/:name", d.auth, d.json, async (req, res) => {
     const name = SecretName.safeParse(req.params.name);
     if (!name.success) return badRequest(res, name.error);
     const value = SecretValue.safeParse(req.body?.value);
@@ -68,7 +69,7 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
     res.json(await d.routines.list(await actor(res)));
   });
 
-  r.post("/v1/app/routines", d.json, d.auth, async (req, res) => {
+  r.post("/v1/app/routines", d.auth, d.json, async (req, res) => {
     const body = RoutineInput.safeParse(req.body);
     if (!body.success) return badRequest(res, body.error);
     try {
@@ -78,7 +79,7 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
     }
   });
 
-  r.patch("/v1/app/routines/:id", d.json, d.auth, async (req, res) => {
+  r.patch("/v1/app/routines/:id", d.auth, d.json, async (req, res) => {
     const body = RoutinePatch.safeParse(req.body);
     if (!body.success) return badRequest(res, body.error);
     try {
@@ -117,7 +118,7 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
     }
   });
 
-  r.post("/v1/app/computers", d.json, d.auth, async (req, res) => {
+  r.post("/v1/app/computers", d.auth, d.json, async (req, res) => {
     const body = z.object({ name: z.string().trim().min(1).max(60) }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Give the computer a name." });
@@ -144,17 +145,10 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
 export function hostRouter(d: { routines: RoutineService; directory: Directory; runnerSource?: string }): Router {
   const r = express.Router();
   const json = express.json({ limit: "256kb" });
-  const hits = new Map<string, { at: number; n: number }>();
-  const allow = (key: string, perMinute: number) => {
-    const now = Date.now();
-    const h = hits.get(key);
-    if (!h || now - h.at > 60_000) {
-      hits.set(key, { at: now, n: 1 });
-      if (hits.size > 50_000) hits.clear();
-      return true;
-    }
-    return ++h.n <= perMinute;
-  };
+  // limiter() prunes only old entries: clearing the map when it filled up let anyone reset every
+  // computer's and every address's count by sending enough distinct keys.
+  const perHost = limiter(120);
+  const perSetupAddress = limiter(10);
 
   r.get("/runner/ambient-runner.mjs", (_req, res) => {
     if (!d.runnerSource) {
@@ -171,7 +165,7 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
       res.status(401).json({ error: "invalid_token", message: "This computer isn't connected anymore. Set it up again from the Ambient app." });
       return;
     }
-    if (!allow(`host:${h.id}`, 120)) {
+    if (!perHost(h.id)) {
       res.status(429).json({ error: "slow_down" });
       return;
     }
@@ -181,7 +175,7 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
   const hostOf = (res: Response) => res.locals.host as Host;
 
   r.post("/v1/host/setup", json, async (req, res) => {
-    if (!allow(`setup:${req.ip ?? "?"}`, 10)) {
+    if (!perSetupAddress(req.ip ?? "?")) {
       res.status(429).json({ error: "slow_down" });
       return;
     }

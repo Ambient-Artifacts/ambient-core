@@ -26,7 +26,7 @@ const missingKey: PageUpdater = {
 };
 
 if (cmd === "consolidate" || cmd === "rewrite") {
-  const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir));
+  const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir, {}, cfg.teamSecret));
   const updater = cfg.anthropicApiKey ? new AnthropicUpdater(cfg.anthropicApiKey, cfg.model) : missingKey;
   // `rewrite --all` or `rewrite people/anna-mueller …`: pages rewritten from their latest notes
   // (into their kind's sections), as well as the nightly run's work.
@@ -60,7 +60,7 @@ if (cmd === "consolidate" || cmd === "rewrite") {
     console.error("ANTHROPIC_API_KEY is not set");
     process.exit(1);
   }
-  const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir));
+  const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir, {}, cfg.teamSecret));
   const seeded = await seedTeam(wiki, new AnthropicResearcher(cfg.anthropicApiKey, cfg.model), { domain, outDir: cfg.outDir });
   // The first overview, from what was just written.
   const result = await consolidate(wiki, new AnthropicUpdater(cfg.anthropicApiKey, cfg.model), {

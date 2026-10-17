@@ -1,7 +1,7 @@
 // Personal wikis in the user's own git repo, end to end against local bare repos.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -48,7 +48,8 @@ afterAll(() => {
 
 describe("personal repo", () => {
   it("refuses http, private addresses and repos with other content", async () => {
-    for (const bad of ["http://github.com/x/y.git", "https://10.0.0.5/x.git", "https://127.0.0.1/x.git"]) {
+    // Also loopback and cloud metadata written as IPv6 (URL parsing turns them into ::ffff:7f00:1 etc.).
+    for (const bad of ["http://github.com/x/y.git", "https://10.0.0.5/x.git", "https://127.0.0.1/x.git", "https://[::ffff:127.0.0.1]/x.git", "https://[::ffff:169.254.169.254]/x.git", "https://[::1]/x.git"]) {
       const r = await appCall(s, token, "POST", "/v1/app/repo", { url: bad, token: "t" });
       expect(r.status, bad).toBe(400);
       expect(r.json.error).toBe("bad_url");
@@ -131,6 +132,25 @@ describe("personal repo", () => {
     const after = clone(url, "check3");
     expect(existsSync(join(after, "wiki/topics/preisstrategie.md"))).toBe(false);
     expect(existsSync(join(after, "wiki/projects/onboarding-redesign.md"))).toBe(true);
+  });
+
+  it("never follows a symlink committed to the repo out of the checkout", async () => {
+    // A link to a file of the server's own (the gateway's env file, in real life) must not land in
+    // the wiki: git checks it out as a plain file holding the link's target, and only that comes in.
+    const secret = join(tmp, "gateway.env");
+    writeFileSync(secret, "BRAIN_MASTER_KEY=top-secret-value\n");
+    const dir = clone(url, "agent3");
+    symlinkSync(secret, join(dir, "wiki/topics/leak.md"));
+    symlinkSync(tmp, join(dir, "wiki/linked-dir"));
+    sh(["add", "-A"], dir);
+    sh(["commit", "-q", "-m", "links"], dir);
+    sh(["-c", "protocol.file.allow=always", "push", "-q", "origin", "HEAD:main"], dir);
+
+    expect((await appCall(s, token, "POST", "/v1/app/repo/sync")).status).toBe(200);
+    const pulled = await appCall(s, token, "POST", "/v1/app/personal/sync", { device_id: "iphone", ops: [], since_seq: 0 });
+    const contents = (pulled.json.changes as { path: string; content: string }[]).map((c) => c.content ?? "").join("\n");
+    expect(contents).not.toContain("top-secret-value");
+    expect(readFileSync(secret, "utf8")).toBe("BRAIN_MASTER_KEY=top-secret-value\n");
   });
 
   it("disconnects", async () => {

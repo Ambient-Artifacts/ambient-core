@@ -153,12 +153,12 @@ ${o.codes === "both" ? `<p class="note"><span>No Ambient app? Ask whoever runs t
   );
 }
 
-export function consentPage(o: { uid: string; clientName: string; redirectHost: string; permissionsHtml: string[] }): string {
+export function consentPage(o: { uid: string; clientName: string; redirectHost: string; account?: string; permissionsHtml: string[] }): string {
   return layout(
     `Allow ${o.clientName}?`,
     `${pair(o.clientName, o.redirectHost)}
 <h1>Allow ${esc(o.clientName)}?</h1>
-<p class="sub">It will be able to:</p>
+<p class="sub">${o.account ? `For <b>${esc(o.account)}</b>. ` : ""}It will be able to:</p>
 <ul class="perms">${o.permissionsHtml.map((p) => `<li><span class="tick">${ICON.check}</span><span>${p}</span></li>`).join("")}</ul>
 <div class="actions">
 <form method="post" action="/interaction/${esc(o.uid)}/abort"><button class="btn secondary" type="submit">Cancel</button></form>

@@ -54,7 +54,7 @@ describe("OAuth storage", () => {
     await t.mutation(api.oauth.upsert, row("old", 1_000));
     await t.mutation(api.oauth.upsert, row("live", 9_000));
     expect(await t.mutation(internal.oauth.sweepExpired, { now: 5_000 })).toEqual({ removed: 1 });
-    expect(await t.query(api.oauth.find, { secret, model: "ReplayDetection", key: "live", now: 5_000 })).toBe("{}");
+    expect(await t.query(api.oauth.find, { secret, model: "ReplayDetection", key: "live", now: 5_000 })).toMatchObject({ payload: "{}" });
     expect(await t.mutation(internal.oauth.sweepExpired, { now: 5_000 })).toEqual({ removed: 0 });
   });
 });
@@ -124,13 +124,32 @@ describe("personal pages", () => {
 describe("oauth storage", () => {
   it("finds, consumes, expires and revokes by grant", async () => {
     const { t } = await setup();
-    await t.mutation(api.oauth.upsert, { secret, model: "AuthorizationCode", key: "k1", payload: JSON.stringify({ a: 1 }), expiresAt: 1000, grantId: "g1" });
-    expect(await t.query(api.oauth.find, { secret, model: "AuthorizationCode", key: "k1", now: 10 })).toBe('{"a":1}');
-    await t.mutation(api.oauth.consume, { secret, model: "AuthorizationCode", key: "k1", now: 5000 });
-    expect(JSON.parse((await t.query(api.oauth.find, { secret, model: "AuthorizationCode", key: "k1", now: 10 }))!)).toEqual({ a: 1, consumed: 5 });
-    expect(await t.query(api.oauth.find, { secret, model: "AuthorizationCode", key: "k1", now: 2000 })).toBeNull();
+    await t.mutation(api.oauth.upsert, { secret, model: "AuthorizationCode", key: "h1:k1", payload: "v1.sealed", expiresAt: 1000, grantId: "g1" });
+    expect(await t.query(api.oauth.find, { secret, model: "AuthorizationCode", key: "h1:k1", now: 10 })).toEqual({ key: "h1:k1", payload: "v1.sealed", consumedAt: null });
+    await t.mutation(api.oauth.consume, { secret, model: "AuthorizationCode", key: "h1:k1", now: 5000 });
+    expect(await t.query(api.oauth.find, { secret, model: "AuthorizationCode", key: "h1:k1", now: 10 })).toMatchObject({ consumedAt: 5000 });
+    expect(await t.query(api.oauth.find, { secret, model: "AuthorizationCode", key: "h1:k1", now: 2000 })).toBeNull();
     await t.mutation(api.oauth.revokeByGrantId, { secret, grantId: "g1" });
-    expect(await t.query(api.oauth.find, { secret, model: "AuthorizationCode", key: "k1", now: 10 })).toBeNull();
+    expect(await t.query(api.oauth.find, { secret, model: "AuthorizationCode", key: "h1:k1", now: 10 })).toBeNull();
+  });
+
+  it("treats a second use of a code or refresh token as reuse: the grant goes", async () => {
+    const { t } = await setup();
+    await t.mutation(api.oauth.upsert, { secret, model: "RefreshToken", key: "h1:r1", payload: "v1.x", expiresAt: 10_000, grantId: "g2" });
+    await t.mutation(api.oauth.upsert, { secret, model: "Grant", key: "h1:g2", payload: "v1.y", expiresAt: 10_000, grantId: "g2" });
+    expect(await t.mutation(api.oauth.consume, { secret, model: "RefreshToken", key: "h1:r1", now: 1 })).toEqual({ reused: false });
+    expect(await t.mutation(api.oauth.consume, { secret, model: "RefreshToken", key: "h1:r1", now: 2 })).toEqual({ reused: true });
+    expect(await t.query(api.oauth.find, { secret, model: "Grant", key: "h1:g2", now: 3 })).toBeNull();
+  });
+
+  it("still reads, consumes and replaces rows written before keys were hashed", async () => {
+    const { t } = await setup();
+    await t.mutation(api.oauth.upsert, { secret, model: "Session", key: "raw-session-id", payload: JSON.stringify({ accountId: "u1" }), expiresAt: 10_000, accountId: undefined });
+    expect(await t.query(api.oauth.find, { secret, model: "Session", key: "h1:s", legacyKey: "raw-session-id", now: 1 })).toMatchObject({ key: "raw-session-id" });
+    await t.mutation(api.oauth.upsert, { secret, model: "Session", key: "h1:s", legacyKey: "raw-session-id", payload: "v1.z", expiresAt: 10_000, accountId: "u1" });
+    expect(await t.query(api.oauth.find, { secret, model: "Session", key: "raw-session-id", now: 1 })).toBeNull();
+    expect(await t.query(api.oauth.find, { secret, model: "Session", key: "h1:s", now: 1 })).toMatchObject({ payload: "v1.z" });
+    expect((await t.mutation(api.oauth.destroyByAccount, { secret, accountId: "u1" })).removed).toBe(1);
   });
 });
 
@@ -256,5 +275,20 @@ describe("teams managed from the app", () => {
     expect(await t.mutation(api.teams.leaveBySlug, { secret, uid: ben, slug: "acme" })).toEqual({ ok: true });
     expect((await t.query(api.teams.members, { secret, uid: owner, slug: "acme" }))!.map((m) => m.name)).toEqual(["Lena Vogel"]);
     expect(await t.query(api.teams.members, { secret, uid: cara, slug: "acme" })).toBeNull();
+  });
+});
+
+describe("team routines and secrets", () => {
+  it("are changed only by someone who manages the team now, whatever the gateway passes", async () => {
+    const { t, uid } = await setup();
+    const teamId = await t.mutation(internal.teams.create, { slug: "crew", name: "Crew" });
+    await t.run(async (ctx) => ctx.db.insert("members", { teamId, userId: uid as never, role: "member", peopleSlug: "people/lena", joinedAt: 0 }));
+    const set = () => t.mutation(api.routines.setSecret, { secret, uid: uid as never, teamId, name: "TOKEN", valueIv: "iv", valueCt: "ct", now: 1 });
+    expect(await set()).toEqual({ ok: false, error: "admins_only" });
+    await t.run(async (ctx) => {
+      const m = await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).first();
+      await ctx.db.patch(m!._id, { role: "admin" });
+    });
+    expect(await set()).toEqual({ ok: true });
   });
 });
