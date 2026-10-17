@@ -35,6 +35,12 @@ export interface ParsedSession {
   marks: { at: string | null; pr?: string; commit?: { sha: string; message: string } }[];
 }
 
+/** What claudeCodeReader keeps of one transcript (see there). */
+export const KEEP_CHARS = 8_000_000;
+const LINE_COST = 64;
+const LINE_TEXT_MAX = 120_000;
+const MARKS_MAX = 2_000;
+
 const INTERACTIVE_ENTRYPOINTS = new Set(["cli", "claude-desktop", "claude-vscode", "claude-jetbrains", "remote", "web"]);
 const PR_URL = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/g;
 const COMMIT_LINE = /^\[([^\]\n]+?) ([0-9a-f]{7,40})\] ([^\n]{1,200})$/gm;
@@ -124,6 +130,32 @@ export function claudeCodeReader(): { line: (raw: string) => void; done: () => P
   const prs = new Set<string>();
   const commits = new Map<string, string>();
 
+  // What one transcript may keep, however long it is (an upload streams through here): the newest
+  // lines up to KEEP_CHARS (each costing its text plus LINE_COST, so a million tiny lines count
+  // too), each line cut at LINE_TEXT_MAX (a block's note reads 120,000 characters at most), and the
+  // newest MARKS_MAX pull requests and commits (a note names 10 and 20). The oldest go first.
+  let kept = 0;
+  let head = 0;
+  const keep = (l: SessionLine): void => {
+    const text = l.text.length > LINE_TEXT_MAX ? l.text.slice(0, LINE_TEXT_MAX) : l.text;
+    out.lines.push({ ...l, text });
+    kept += text.length + LINE_COST;
+    while (kept > KEEP_CHARS && head < out.lines.length - 1) kept -= out.lines[head++]!.text.length + LINE_COST;
+    if (head > 10_000 && head * 2 > out.lines.length) {
+      out.lines.splice(0, head);
+      head = 0;
+    }
+  };
+  const mark = (m: ParsedSession["marks"][number]): void => {
+    out.marks.push(m);
+    if (out.marks.length > MARKS_MAX * 2) out.marks.splice(0, out.marks.length - MARKS_MAX);
+  };
+  /** Keeps a dedupe set or map at its newest `max` entries. */
+  const trim = (c: Set<string> | Map<string, string>, max: number): void => {
+    if (c.size <= max * 2) return;
+    for (const k of [...c.keys()].slice(0, c.size - max)) c.delete(k);
+  };
+
   const line = (raw: string): void => {
     if (!raw.trim()) return;
     let o: Line;
@@ -143,7 +175,8 @@ export function claudeCodeReader(): { line: (raw: string) => void; done: () => P
     if ("origin" in o) sawOrigin = true;
     if (o.type === "pr-link" && o.prUrl && !prs.has(o.prUrl)) {
       prs.add(o.prUrl);
-      out.marks.push({ at: o.timestamp ?? null, pr: o.prUrl });
+      trim(prs, MARKS_MAX);
+      mark({ at: o.timestamp ?? null, pr: o.prUrl });
     }
     // Subagents' own turns, and the summary that replaces history after compaction (the
     // history itself is still earlier in the file).
@@ -160,16 +193,18 @@ export function claudeCodeReader(): { line: (raw: string) => void; done: () => P
           for (const m of text.matchAll(COMMIT_LINE)) {
             if (commits.has(m[2]!)) continue;
             commits.set(m[2]!, m[3]!.trim());
-            out.marks.push({ at, commit: { sha: m[2]!.slice(0, 12), message: m[3]!.trim() } });
+            trim(commits, MARKS_MAX);
+            mark({ at, commit: { sha: m[2]!.slice(0, 12), message: m[3]!.trim() } });
           }
           for (const m of text.matchAll(PR_URL)) {
             if (prs.has(m[0])) continue;
             prs.add(m[0]);
-            out.marks.push({ at, pr: m[0] });
+            trim(prs, MARKS_MAX);
+            mark({ at, pr: m[0] });
           }
         } else if (b.type === "text" && b.text && !o.isMeta && !isInjected(b.text)) {
           if (o.origin && !human) continue; // a notification or a hook, not a person
-          out.lines.push({ at, role: "user", text: b.text.trim(), ...(human ? { human: true } : {}) });
+          keep({ at, role: "user", text: b.text.trim(), ...(human ? { human: true } : {}) });
           if (human) out.humanPrompts++;
           else plainPrompts++;
         }
@@ -177,25 +212,31 @@ export function claudeCodeReader(): { line: (raw: string) => void; done: () => P
     } else if (o.type === "assistant" && Array.isArray(content)) {
       for (const b of content) {
         if (b.type === "text" && b.text?.trim()) {
-          out.lines.push({ at, role: "assistant", text: b.text.trim() });
+          keep({ at, role: "assistant", text: b.text.trim() });
           for (const m of b.text.matchAll(PR_URL)) {
             if (prs.has(m[0])) continue;
             prs.add(m[0]);
-            out.marks.push({ at, pr: m[0] });
+            trim(prs, MARKS_MAX);
+            mark({ at, pr: m[0] });
           }
         } else if (b.type === "tool_use" && b.name) {
           const line = toolLine(b.name, b.input ?? {});
           if (!line) continue;
-          if (line.edited) edited.add(line.edited);
+          if (line.edited) {
+            edited.add(line.edited);
+            trim(edited, 5_000);
+          }
           const last = out.lines.at(-1);
           if (last?.role === "tool" && last.text === line.text) continue;
-          out.lines.push({ at, role: "tool", text: line.text, ...(line.edited ? { file: line.edited } : {}) });
+          keep({ at, role: "tool", text: line.text, ...(line.edited ? { file: line.edited } : {}) });
         }
       }
     }
   };
 
   const done = (): ParsedSession => {
+    if (head) out.lines.splice(0, head);
+    if (out.marks.length > MARKS_MAX) out.marks.splice(0, out.marks.length - MARKS_MAX);
     out.interactive = out.humanPrompts > 0 || (!sawOrigin && plainPrompts > 0 && INTERACTIVE_ENTRYPOINTS.has(out.entrypoint ?? ""));
     out.edited = [...edited];
     out.prs = [...prs];

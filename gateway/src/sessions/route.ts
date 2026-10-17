@@ -15,6 +15,7 @@ export function sessionUploadRouter(d: { pats: PatService; directory: Directory;
   const r = express.Router();
   const allow = limiter(30);
   const perUser = inFlight(2);
+  const everyone = inFlight(UPLOADS_AT_ONCE);
 
   // The token first, from the headers alone: only then is the body read, so nobody can make the
   // gateway inflate and buffer an upload (or a gzip bomb) without a valid token.
@@ -34,17 +35,23 @@ export function sessionUploadRouter(d: { pats: PatService; directory: Directory;
       res.status(429).json({ error: "slow_down" });
       return;
     }
-    // Up to 150 MB each, held in memory while they're read and condensed: two at a time per
-    // account, a few for everyone (the plugin sends one when a session ends, and retries).
-    // Two at a time per account (the plugin sends one when a session ends, and retries). No
-    // shared cap: a few accounts trickling bodies could hold every slot (and the stream below keeps
-    // little in memory per upload).
-    const release = perUser(pat.uid);
-    if (!release) {
+    // Two at a time per account (the plugin sends one when a session ends, and retries), and
+    // UPLOADS_AT_ONCE for everyone: each keeps up to about 40 MB (claudeCodeReader's KEEP_CHARS
+    // plus its lines), and sign-ups are open. A slot is held UPLOAD_DEADLINE_MS at most, so a few
+    // accounts trickling bodies can't keep them all for long.
+    const mine = perUser(pat.uid);
+    const ours = mine && everyone("all");
+    if (!mine || !ours) {
+      mine?.();
       res.status(429).json({ error: "slow_down" });
       return;
     }
-    res.on("close", release);
+    const deadline = setTimeout(() => req.destroy(), UPLOAD_DEADLINE_MS);
+    res.on("close", () => {
+      clearTimeout(deadline);
+      mine();
+      ours();
+    });
     res.locals.uid = pat.uid;
     next();
   };
@@ -92,6 +99,9 @@ export function sessionUploadRouter(d: { pats: PatService; directory: Directory;
 
 /** An upload's inflated size limit. */
 export const MAX_UPLOAD_BYTES = 150 * 1024 * 1024;
+/** Uploads being read at once, across all accounts, and how long one may take. */
+export const UPLOADS_AT_ONCE = 24;
+export const UPLOAD_DEADLINE_MS = 180_000;
 /** Longer lines are skipped unread: a screenshot or a file's contents, never something a note uses. */
 const MAX_LINE_CHARS = 8 * 1024 * 1024;
 
