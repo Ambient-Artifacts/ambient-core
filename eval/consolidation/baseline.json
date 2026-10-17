@@ -1,0 +1,63 @@
+{
+  "model": "claude-haiku-4-5",
+  "at": "2026-10-17T09:39:57.080Z",
+  "summary": {
+    "categories": {
+      "entity recall": {
+        "passed": 3,
+        "of": 7,
+        "score": 0.42857142857142855
+      },
+      "fact recall": {
+        "passed": 5,
+        "of": 6,
+        "score": 0.8333333333333334
+      },
+      "decision recall": {
+        "passed": 1,
+        "of": 2,
+        "score": 0.5
+      },
+      "decision precision": {
+        "passed": 2,
+        "of": 2,
+        "score": 1
+      },
+      "supersession": {
+        "passed": 1,
+        "of": 2,
+        "score": 0.5
+      },
+      "untouched": {
+        "passed": 3,
+        "of": 3,
+        "score": 1
+      },
+      "link validity": {
+        "passed": 0,
+        "of": 10,
+        "score": 0
+      }
+    },
+    "total": 0.608843537414966,
+    "failed": [
+      "e2",
+      "e4",
+      "e5",
+      "e6",
+      "f5",
+      "d2",
+      "s1",
+      "l:orgs/datacore",
+      "l:orgs/steiner-bau",
+      "l:people/jonas-wirth",
+      "l:people/lea-novak",
+      "l:people/mara-huber",
+      "l:people/stefan-koller",
+      "l:people/tobias-brandl",
+      "l:projects/erp-umstieg",
+      "l:projects/shop-2027",
+      "l:topics/werkzeugtage-2027"
+    ]
+  }
+}
