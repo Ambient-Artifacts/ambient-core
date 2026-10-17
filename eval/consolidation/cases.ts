@@ -101,4 +101,8 @@ export const CASES: Case[] = [
  * the page's current truth must link the note it came from, and that note must exist; no link
  * on the page may point at a page that doesn't exist.
  */
-export const LINK_RULE = "every current-truth bullet links an existing note, and no link on the page is broken";
+/**
+ * Where a living page cites its notes: each timeline line links the note it came from (current
+ * truth carries no links by design; its evidence is the timeline below it).
+ */
+export const LINK_RULE = "every timeline line links an existing note, and no link on the page is broken";

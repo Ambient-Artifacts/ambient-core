@@ -35,13 +35,14 @@ describe("the scorer", () => {
     expect(byId(score(before, forgotten), "s1").detail).toContain("doesn't keep the old value");
   });
 
-  it("wants every current-truth bullet of a written page to cite a note that exists", () => {
+  it("wants every timeline line of a written page to cite a note that exists", () => {
     const before = start();
-    const cited = score(before, new Map(before).set(erp, living(erp, "project", [`Go-live on 2027-02-01. ${cite(erp, NOTES.datacore)}`], [moved])));
-    expect(byId(cited, `l:${erp}`)).toMatchObject({ pass: true, detail: `${erp}: 1 of 1 bullets cite a note` });
-    const bare = score(before, new Map(before).set(erp, living(erp, "project", ["Go-live on 2027-02-01.", `Owned by Mara. ${cite(erp, NOTES.datacore)}`], [moved])));
-    expect(byId(bare, `l:${erp}`)).toMatchObject({ pass: false, detail: `${erp}: 1 of 2 bullets cite a note` });
-    const invented = score(before, new Map(before).set(erp, living(erp, "project", [`Go-live on 2027-02-01. ${cite(erp, "notes/2026-10/2026-10-15-invented")}`], [moved])));
+    // Current truth carries no links by design; the timeline below it is where each fact cites its note.
+    const cited = score(before, new Map(before).set(erp, living(erp, "project", ["Go-live on 2027-02-01."], [moved])));
+    expect(byId(cited, `l:${erp}`)).toMatchObject({ pass: true, detail: `${erp}: 1 of 1 timeline lines cite a note` });
+    const bare = score(before, new Map(before).set(erp, living(erp, "project", ["Go-live on 2027-02-01."], [moved, "- 2026-10-15: Go-live confirmed."])));
+    expect(byId(bare, `l:${erp}`)).toMatchObject({ pass: false, detail: `${erp}: 1 of 2 timeline lines cite a note` });
+    const invented = score(before, new Map(before).set(erp, living(erp, "project", ["Go-live on 2027-02-01."], [`- 2026-10-15: Moved. ${cite(erp, "notes/2026-10/2026-10-15-invented")}`])));
     expect(byId(invented, `l:${erp}`).detail).toContain("broken links to notes/2026-10/2026-10-15-invented");
     // Pages the run didn't write aren't judged.
     expect(cited.filter((r) => r.category === "link validity")).toHaveLength(1);

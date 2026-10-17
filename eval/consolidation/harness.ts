@@ -277,17 +277,17 @@ function check(c: Case, before: Map<string, string>, after: Map<string, string>)
   }
 }
 
-/** One case per living page the run wrote: every bullet cites an existing note, no link is broken. */
+/** One case per living page the run wrote: every timeline line cites an existing note, no link is broken. */
 function linkResults(before: Map<string, string>, after: Map<string, string>): CaseResult[] {
   const isNote = (ref: string) => after.has(ref) && fm(after.get(ref)!).type === "note";
   return [...after.entries()]
     .filter(([ref, text]) => LIVING.test(ref) && before.get(ref) !== text)
     .map(([ref, text]) => {
-      const lines = bullets(text);
-      const cited = lines.filter((b) => links(b, ref).some(isNote)).length;
+      const lines = timeline(text);
+      const cited = lines.filter((l) => links(l, ref).some(isNote)).length;
       const broken = links(parsePage(text).body, ref).filter((r) => !after.has(r));
-      const pass = cited === lines.length && broken.length === 0;
-      const detail = `${ref}: ${cited} of ${lines.length} bullets cite a note${broken.length ? `; broken links to ${broken.join(", ")}` : ""}`;
+      const pass = lines.length > 0 && cited === lines.length && broken.length === 0;
+      const detail = `${ref}: ${cited} of ${lines.length} timeline lines cite a note${broken.length ? `; broken links to ${broken.join(", ")}` : ""}`;
       return { id: `l:${ref}`, category: "link validity" as const, pass, detail, why: LINK_RULE };
     });
 }
