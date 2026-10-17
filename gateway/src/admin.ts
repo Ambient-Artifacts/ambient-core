@@ -15,6 +15,7 @@ import { Revisions } from "./revisions.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { RoutineService } from "./routines/service.ts";
 import { TeamLink } from "./teams.ts";
+import { CodeHasher } from "./auth/codes.ts";
 
 export const ADMIN_USAGE = `Usage: admin <command>
 
@@ -30,6 +31,10 @@ Connecting AI apps and tools
   token <email> [--team <slug>] [--claude-code] [--label <label>]
       A personal access token, shown once. --claude-code adds sending work sessions (the plugin).
       --team makes a team-only token (it never reads personal notes).
+  token list <email>
+      The user's tokens: id, label, what they reach, when they were made.
+  token revoke <email> <token-id>
+      Revoke one of them (it stops working at once).
   computer-code <email> [--name <name>]
       Connect a computer that runs the user's routines (30 minutes).
 
@@ -132,11 +137,27 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
 
   if (cmd === "connect-code") {
     const u = await findUser(sub);
-    const { code, expiresAt } = await new Pairing(d.control).create(u.uid);
+    const { code, expiresAt } = await new Pairing(d.control, new CodeHasher(d.config.masterKey)).create(u.uid);
     return [
       `Sign-in code for ${u.name}: ${code.slice(0, 4)}-${code.slice(4)}  (until ${new Date(expiresAt).toISOString()}, works once)`,
       `Add ${origin}/mcp as a connector in the AI app (Claude: Settings → Connectors → Add custom connector) and type the code when it asks.`,
     ].join("\n");
+  }
+
+  if (cmd === "token" && sub === "list") {
+    const u = await findUser(words[2]);
+    const tokens = await new PatService(d.control).list(u.uid);
+    if (!tokens.length) return `${u.name} has no tokens.`;
+    return tokens
+      .map((t) => `${t.id}  ${t.label}  ${t.resourceKind === "team" ? `team ${t.teamId}` : "personal"} (${t.scopes.join(" ")})  made ${new Date(t.createdAt).toISOString().slice(0, 10)}`)
+      .join("\n");
+  }
+
+  if (cmd === "token" && sub === "revoke") {
+    const u = await findUser(words[2]);
+    const id = need(words[3], "The token's id (from `admin token list`)");
+    if (!(await new PatService(d.control).revoke(u.uid, id))) throw new AdminError(`${u.name} has no live token ${id}.`);
+    return `Revoked ${id}. It stops working at once.`;
   }
 
   if (cmd === "token") {
@@ -166,6 +187,7 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     const routines = new RoutineService({
       control: d.control,
       keys: new RoutineKeys({ control: d.control, personal, master: d.config.masterKey }),
+      codes: new CodeHasher(d.config.masterKey),
       origin,
     });
     const teams = await new Directory(d.control, 0).teamsOf(u.uid);

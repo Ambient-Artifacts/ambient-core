@@ -10,6 +10,7 @@ import { Pairing } from "../src/auth/pairing.ts";
 import { loadConfig } from "../src/config.ts";
 import { loginPage } from "../src/oauth/pages.ts";
 import { mcpClient, startStack, text, type Stack } from "./helpers.ts";
+import { CodeHasher } from "../src/auth/codes.ts";
 
 let s: Stack;
 const admin = (...args: string[]) => runAdmin(args, { config: s.config, control: s.control });
@@ -41,7 +42,7 @@ describe("admin CLI", () => {
     const code = /: ([A-Z2-9]{4}-[A-Z2-9]{4})/.exec(out)?.[1];
     expect(code).toBeDefined();
     expect(out).toContain(`${s.origin}/mcp`);
-    const pairing = new Pairing(s.control);
+    const pairing = new Pairing(s.control, new CodeHasher(s.config.masterKey));
     expect(await pairing.consume(code!)).toMatch(/.+/);
     expect(await pairing.consume(code!)).toBeNull();
     await expect(admin("connect-code", "nobody@example.com")).rejects.toThrow(/No account for nobody@example.com/);

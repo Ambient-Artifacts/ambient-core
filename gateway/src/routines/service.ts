@@ -19,6 +19,7 @@ import { sha256Hex } from "../crypto.ts";
 import type { Team } from "../directory.ts";
 import type { Notifier, PushMessage } from "../push.ts";
 import type { Owner, RoutineKeys } from "./keys.ts";
+import type { CodeHasher } from "../auth/codes.ts";
 
 export const HOST_TOKEN_PREFIX = "ambient_host_";
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
@@ -254,6 +255,8 @@ export class RoutineService {
     private d: {
       control: Control;
       keys: RoutineKeys;
+      /** Setup codes are stored keyed (auth/codes.ts). */
+      codes: CodeHasher;
       origin: string;
       runner?: { version: string; sha256: string };
       now?: () => number;
@@ -526,7 +529,7 @@ export class RoutineService {
     const out = await this.d.control.m(api.routines.addHost, {
       uid: actor.uid as never,
       name,
-      codeHash: setupCodeHash(code),
+      codeHash: this.d.codes.hash("host-setup", setupCode(code)),
       expiresAt,
       now: this.now(),
     });
@@ -549,14 +552,15 @@ export class RoutineService {
     return h ? { id: String(h.id), uid: h.uid ? String(h.uid) : null, teamId: h.teamId ? String(h.teamId) : null, name: h.name } : undefined;
   }
 
+  private claim(codeHash: string, tokenHash: string, info: HostInfo) {
+    return this.d.control.m(api.routines.claimHost, { codeHash, tokenHash, info, now: this.now() });
+  }
+
   async setup(code: string, info: HostInfo): Promise<{ token: string; computer: { id: string; name: string; team: boolean } }> {
     const token = `${HOST_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
-    const out = await this.d.control.m(api.routines.claimHost, {
-      codeHash: setupCodeHash(code),
-      tokenHash: sha256Hex(token),
-      info,
-      now: this.now(),
-    });
+    const [keyed, legacy] = this.d.codes.candidates("host-setup", setupCode(code));
+    let out = await this.claim(keyed!, sha256Hex(token), info);
+    if (!out.ok && out.error === "invalid_code") out = await this.claim(legacy!, sha256Hex(token), info);
     if (!out.ok) throw refused(out.error);
     return { token, computer: { id: String(out.host.id), name: out.host.name, team: Boolean(out.host.teamId) } };
   }
@@ -653,9 +657,7 @@ export function newSetupCode(): string {
   return `${part()}-${part()}`;
 }
 
-export function setupCodeHash(code: string): string {
-  return sha256Hex(`host-setup:${code.trim().toUpperCase()}`);
-}
+const setupCode = (code: string) => code.trim().toUpperCase();
 
 /** What the app shows to set up a computer (Linux with systemd, Node and Claude Code). */
 export function setupCommands(origin: string, code: string): string {

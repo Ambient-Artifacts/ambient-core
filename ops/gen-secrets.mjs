@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Prints a fresh gateway env block. Store it in your password manager and on
-// the core VM at /etc/brain/gateway.env (root:brain 0640). Never commit it.
-//   node ops/gen-secrets.mjs > gateway.env
+// the core VM at /etc/brain/gateway.env (root:brain 0640). Never commit it, and
+// never write it into the checkout: write it outside, or straight to the VM:
+//   umask 077; node ops/gen-secrets.mjs > ~/ambient-gateway.env
+//   node ops/gen-secrets.mjs | ssh root@<ip> 'umask 027; cat > /etc/brain/gateway.env; chown root:brain /etc/brain/gateway.env
 //   node ops/gen-secrets.mjs --env     only the secrets, for Docker's .env (ops/docker/init.sh)
 import { randomBytes } from "node:crypto";
 import { exportJWK, generateKeyPair } from "jose";

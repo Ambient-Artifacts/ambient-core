@@ -2,11 +2,17 @@
 // DevOps, Bitbucket, any git server over HTTPS). Shared by the gateway (personal repos) and
 // the team server (team repos).
 // - Only https:// URLs to public hosts (no SSRF into our own network); file:// only in tests.
+//   The host is checked again on every git call that talks to it, and git is pinned to the
+//   address that passed (http.curloptResolve), so DNS that answers differently the second time
+//   can't send it into the network; redirects aren't followed.
 // - The token never appears in the process list or in .git/config: it is passed to git as an
 //   Authorization header through GIT_CONFIG_* environment variables.
+// - Symlinks in a repo are checked out as plain files holding the link's target (core.symlinks
+//   false): a link committed to someone's repo must never make the gateway or a team server read
+//   or write a file outside the wiki (/etc/brain/*.env, for one).
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -33,26 +39,41 @@ export interface GitOptions {
 
 export const BOT_AUTHOR = { name: "Ambient Bot", email: "bot@ambient.invalid" };
 
-const PRIVATE_V4 = [/^10\./, /^127\./, /^169\.254\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /^0\./];
-const isPrivate = (ip: string) =>
-  isIP(ip) === 4 ? PRIVATE_V4.some((r) => r.test(ip)) : /^(::1|fc|fd|fe80|::ffff:(10|127|192\.168|172\.(1[6-9]|2\d|3[01]))\.)/i.test(ip) || ip === "::";
+// Addresses git must never reach: private, loopback, link-local (cloud metadata), shared, reserved,
+// multicast. BlockList also matches IPv4 written as IPv6 (`::ffff:7f00:1` is 127.0.0.1), which
+// URL parsing produces from `[::ffff:127.0.0.1]`.
+const BLOCKED = (() => {
+  const b = new BlockList();
+  for (const [net, bits] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4]] as const) b.addSubnet(net, bits, "ipv4");
+  for (const [net, bits] of [["::", 96], ["::1", 128], ["64:ff9b::", 96], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["2001:db8::", 32]] as const) b.addSubnet(net, bits, "ipv6");
+  return b;
+})();
+const isPrivate = (ip: string) => BLOCKED.check(ip, isIP(ip) === 6 ? "ipv6" : "ipv4");
 
 /** A clean https URL to a public host (or file:// in tests); credentials in the URL are refused. */
 export async function checkRepoUrl(raw: string, opts: GitOptions = {}): Promise<string> {
+  return (await resolveRepoUrl(raw, opts)).url;
+}
+
+/** checkRepoUrl, plus the public address git must use for it (none for file://). */
+async function resolveRepoUrl(raw: string, opts: GitOptions = {}): Promise<{ url: string; pin?: string }> {
   let u: URL;
   try {
     u = new URL(raw.trim());
   } catch {
     throw new GitError("That isn't a valid URL.", "bad_url");
   }
-  if (u.protocol === "file:" && opts.allowFile) return u.toString();
+  if (u.protocol === "file:" && opts.allowFile) return { url: u.toString() };
   if (u.protocol !== "https:") throw new GitError("Use the repo's https:// address.", "bad_url");
   if (u.username || u.password) throw new GitError("Put the token in the token field, not in the URL.", "bad_url");
   const host = u.hostname.replace(/^\[|\]$/g, "");
   const addrs = isIP(host) ? [host] : (await lookup(host, { all: true }).catch(() => [])).map((a) => a.address);
   if (addrs.length === 0) throw new GitError(`Can't find ${host}.`, "bad_url");
   if (addrs.some(isPrivate)) throw new GitError("That address isn't reachable from Ambient.", "bad_url");
-  return u.toString();
+  if (isIP(host)) return { url: u.toString() };
+  // curl's --resolve format: HOST:PORT:ADDRESS, IPv6 in brackets; IPv4 first when there is one.
+  const addr = addrs.find((a) => isIP(a) === 4) ?? addrs[0]!;
+  return { url: u.toString(), pin: `${host}:${u.port || "443"}:${isIP(addr) === 6 ? `[${addr}]` : addr}` };
 }
 
 /** Username for token auth over HTTPS, by host. */
@@ -70,14 +91,17 @@ function tokenUser(url: string): string {
   return "git";
 }
 
-function env(remote?: RemoteRepo, opts: GitOptions = {}): NodeJS.ProcessEnv {
+function env(remote?: RemoteRepo, opts: GitOptions = {}, pin?: string): NodeJS.ProcessEnv {
   const cfg: [string, string][] = [
     ["credential.helper", ""],
     ["protocol.file.allow", opts.allowFile ? "always" : "never"],
     ["user.name", BOT_AUTHOR.name],
     ["user.email", BOT_AUTHOR.email],
     ["init.defaultBranch", "main"],
+    ["core.symlinks", "false"],
+    ["http.followRedirects", "false"],
   ];
+  if (pin) cfg.push(["http.curloptResolve", pin]);
   if (remote?.token) {
     const basic = Buffer.from(`${tokenUser(remote.url)}:${remote.token}`).toString("base64");
     cfg.push(["http.extraHeader", `Authorization: Basic ${basic}`]);
@@ -103,9 +127,11 @@ function env(remote?: RemoteRepo, opts: GitOptions = {}): NodeJS.ProcessEnv {
 
 /** Run git. Errors are mapped to plain-language GitErrors; the token never appears in them. */
 export async function git(args: string[], o: { cwd?: string; remote?: RemoteRepo; timeoutMs?: number } & GitOptions = {}): Promise<string> {
+  // A call that talks to the remote checks its address again, now, and git connects only there.
+  const pin = o.remote ? (await resolveRepoUrl(o.remote.url, o)).pin : undefined;
   try {
     const { stdout } = await run("git", o.cwd ? ["-C", o.cwd, ...args] : args, {
-      env: env(o.remote, o),
+      env: env(o.remote, o, pin),
       timeout: o.timeoutMs ?? 120_000,
       maxBuffer: 64 * 1024 * 1024,
     });
@@ -127,10 +153,16 @@ export async function git(args: string[], o: { cwd?: string; remote?: RemoteRepo
 export async function remoteInfo(remote: RemoteRepo, opts: GitOptions = {}): Promise<{ empty: boolean; branch: string }> {
   const out = await git(["ls-remote", "--symref", remote.url, "HEAD"], { remote, timeoutMs: 30_000, ...opts });
   const sym = /^ref: refs\/heads\/(\S+)\s+HEAD/m.exec(out);
-  if (sym) return { empty: false, branch: sym[1]! };
+  if (sym) return { empty: false, branch: safeBranch(sym[1]!) };
   const any = await git(["ls-remote", "--heads", remote.url], { remote, timeoutMs: 30_000, ...opts });
   const first = /refs\/heads\/(\S+)/.exec(any);
-  return first ? { empty: false, branch: first[1]! } : { empty: true, branch: "main" };
+  return first ? { empty: false, branch: safeBranch(first[1]!) } : { empty: true, branch: "main" };
+}
+
+/** The remote names its branch, and the name goes into git's arguments: a plain name only. */
+function safeBranch(name: string): string {
+  if (!/^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$/.test(name) || name.includes("..")) throw new GitError("The repo's default branch has a name Ambient can't use.", "bad_url");
+  return name;
 }
 
 /** A shallow working copy in `dir` (created), ready to commit on `branch`. Works for empty repos. */

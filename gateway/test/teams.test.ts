@@ -89,5 +89,17 @@ describe("teams from the app", () => {
     expect((await appCall(s, owner, "DELETE", `/v1/app/teams/ambient-artifacts/members/${mayaUid}`)).status).toBe(204);
     const list = await appCall(s, owner, "GET", "/v1/app/teams/ambient-artifacts/members");
     expect((list.json.members as unknown[]).length).toBe(1);
+
+    // The code she kept (it has a use left) doesn't bring her back; a new invite does.
+    const back = await appCall(s, maya, "POST", "/v1/app/teams/join", { code });
+    expect(back.json.error).toBe("invalid_code");
+    const fresh = String((await appCall(s, owner, "POST", "/v1/app/teams/ambient-artifacts/invites", {})).json.code);
+    expect((await appCall(s, maya, "POST", "/v1/app/teams/join", { code: fresh })).json.team).toMatchObject({ slug: "ambient-artifacts", role: "member" });
+  });
+
+  it("stores invite codes keyed, never as a plain hash someone with the database could reverse", async () => {
+    const rows = await s.t.run(async (ctx) => ctx.db.query("invites").collect());
+    const made = rows.filter((r) => r.codeHash.startsWith("h1:"));
+    expect(made.length).toBeGreaterThanOrEqual(2);
   });
 });

@@ -174,9 +174,15 @@ export const checkAppConnected = mutation({
     const pats = await ctx.db.query("pats").withIndex("by_user", (q) => q.eq("userId", uid)).collect();
     let connected = pats.some((p) => !p.revokedAt);
     if (!connected) {
-      for await (const row of ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", "Grant"))) {
+      // The Ambient apps' own sign-in is a grant too ("ambient-app", gateway oauth/provider.ts).
+      const grants = await ctx.db.query("oauth").withIndex("by_model_account", (q) => q.eq("model", "Grant").eq("accountId", uid)).collect();
+      connected = grants.some((g) => g.clientId !== "ambient-app");
+    }
+    if (!connected) {
+      // Grants from before accountId had a column of its own: only those are read one by one.
+      for await (const row of ctx.db.query("oauth").withIndex("by_model_account", (q) => q.eq("model", "Grant").eq("accountId", undefined))) {
+        if (!row.payload.startsWith("{")) continue;
         try {
-          // The Ambient apps' own sign-in is a grant too ("ambient-app", gateway oauth/provider.ts).
           const grant = JSON.parse(row.payload) as { accountId?: string; clientId?: string };
           if (grant.accountId === uid && grant.clientId !== "ambient-app") {
             connected = true;

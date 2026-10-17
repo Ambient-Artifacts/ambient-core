@@ -78,11 +78,28 @@ export const findPat = query({
   },
 });
 
-export const revokePat = mutation({
-  args: { ...secretArg, uid: v.id("users"), id: v.id("pats"), now: v.number() },
-  handler: async (ctx, { secret, uid, id, now }) => {
+/** A user's live tokens, newest first: what each is for, never its hash. */
+export const listPats = query({
+  args: { ...secretArg, uid: v.id("users"), now: v.number() },
+  handler: async (ctx, { secret, uid, now }) => {
     assertService(secret);
-    const p = await ctx.db.get(id);
-    if (p && p.userId === uid) await ctx.db.patch(id, { revokedAt: now });
+    const rows = await ctx.db.query("pats").withIndex("by_user", (q) => q.eq("userId", uid)).collect();
+    return rows
+      .filter((p) => !p.revokedAt && !(p.expiresAt && p.expiresAt < now))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((p) => ({ id: p._id, label: p.label, scopes: p.scopes, resourceKind: p.resourceKind, teamId: p.teamId ?? null, createdAt: p.createdAt, expiresAt: p.expiresAt ?? null }));
+  },
+});
+
+/** Revoke one of the user's tokens (its id comes from the client, so it's checked here). */
+export const revokePat = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, id: raw, now }) => {
+    assertService(secret);
+    const id = ctx.db.normalizeId("pats", raw);
+    const p = id ? await ctx.db.get(id) : null;
+    if (!p || p.userId !== uid || p.revokedAt) return { ok: false as const };
+    await ctx.db.patch(p._id, { revokedAt: now });
+    return { ok: true as const };
   },
 });

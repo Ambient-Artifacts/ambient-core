@@ -5,6 +5,8 @@
 # Writes .env with fresh secrets (only if there is none), gets the Convex admin key, builds the
 # image and starts everything. Safe to run again: it keeps .env and the data.
 set -euo pipefail
+# .env (and its temporary copy) hold every secret: never readable by anyone else, not even briefly.
+umask 077
 cd "$(dirname "$0")/../.."
 target=${1:-}
 if [ -z "$target" ] || [ "$target" = -h ] || [ "$target" = --help ]; then

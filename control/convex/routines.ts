@@ -9,6 +9,7 @@ import type { Doc, Id } from "./_generated/dataModel.js";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
 import { routineSchedule, runStatus } from "./schema.js";
+import { emailVouched } from "./admin.js";
 
 const MAX_ROUTINES = 50;
 const MAX_HOSTS = 10;
@@ -273,7 +274,8 @@ export const staffAddHost = internalMutation({
       return { id, team: t.slug };
     }
     const want = (email ?? "").trim().toLowerCase();
-    const users = (await ctx.db.query("users").collect()).filter((u) => u.email?.toLowerCase() === want && !u.disabled);
+    // Emails someone vouches for only (see admin.ts emailVouched).
+    const users = (await ctx.db.query("users").collect()).filter((u) => emailVouched(u) && u.email?.toLowerCase() === want && !u.disabled);
     if (users.length !== 1) throw new Error(users.length ? `${users.length} users have ${email}` : `no user with ${email}`);
     const id = await ctx.db.insert("routineHosts", { userId: users[0]!._id, name, codeHash, codeExpiresAt: expiresAt, createdAt: Date.now() });
     return { id, uid: users[0]!._id };
@@ -509,6 +511,12 @@ async function failureNotice(ctx: MutationCtx, run: Doc<"routineRuns">, r: Doc<"
   const previous = recent.find((x) => x.status !== "running");
   const news = run.trigger === "manual" || previous?.status !== "failed" || !r.failureNoticeAt || now - r.failureNoticeAt >= NOTICE_REPEAT_MS;
   if (!news) return null;
+  // A team routine's notice goes to whoever started the run only while they're still in the team.
+  if (r.teamId) {
+    const teamId = r.teamId;
+    const member = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", run.userId)).unique();
+    if (!member) return null;
+  }
   await ctx.db.patch(r._id, { failureNoticeAt: now });
   const team = r.teamId ? await ctx.db.get(r.teamId) : null;
   return { uid: run.userId, routineId: r._id, runId: run._id, name: r.name, team: team?.name ?? null };

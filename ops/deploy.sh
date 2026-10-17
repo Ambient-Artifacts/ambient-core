@@ -8,9 +8,16 @@ role=${1:?core|team}; host=${2:?user@host}
 root=$(cd "$(dirname "$0")/.." && pwd)
 rev=$(git -C "$root" rev-parse --short HEAD)
 
-rsync -az --delete \
-  --exclude node_modules --exclude .git --exclude '.env*' --exclude 'control/.convex' \
-  "$root/" "$host:/opt/brain/app/"
+# Only what git has at HEAD: an env file, a backup or a token left in the checkout must never
+# reach a VM (the gateway's secrets on a team VM, where routines run, would be the worst case).
+# Uncommitted changes aren't shipped either, so REVISION tells the truth.
+git -C "$root" diff --quiet HEAD -- || echo "note: uncommitted changes are not deployed" >&2
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+git -C "$root" archive HEAD | tar -x -C "$stage"
+rsync -az --delete --chown=root:root \
+  --exclude node_modules --exclude '.env*' --exclude 'control/.convex' \
+  "$stage/" "$host:/opt/brain/app/"
 
 ssh "$host" bash -s -- "$role" "$rev" <<'REMOTE'
 set -euo pipefail
@@ -30,6 +37,8 @@ if [ "$role" = core ]; then
   units="brain-gateway.service brain-personal.timer brain-sessions.timer brain-digest.timer brain-health.timer brain-health-daily.timer"
 else
   test -f /etc/brain/team.env || { echo "missing /etc/brain/team.env" >&2; exit 1; }
+  # The wiki, its history and raw transcripts: for the brain user only, not for routines.
+  chmod 0750 /srv/brain && chmod -R o-rwx /srv/brain
   install -m 0644 ops/systemd/brain-team.service ops/systemd/brain-consolidate.service ops/systemd/brain-consolidate.timer /etc/systemd/system/
   caddyfile=ops/caddy/Caddyfile.team
   units="brain-team.service brain-consolidate.timer"

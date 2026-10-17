@@ -84,6 +84,10 @@ describe("the app's tokens", () => {
     expect(await call({ authorization: `DPoP ${ben.access_token}`, dpop: await dpopProof(ben.key, "GET", `${s.origin}/v1/app/teams`, ben.access_token) })).toBe(401);
     expect(await call({ authorization: `DPoP ${ben.access_token}`, dpop: await dpopProof(ben.key, "DELETE", me, ben.access_token) })).toBe(401);
     expect(await call({ authorization: `DPoP ${ben.access_token}`, dpop: await dpopProof(ben.key, "GET", me, "another-token") })).toBe(401);
+    // A proof works once: one seen in a log can't be sent again.
+    const proof = await dpopProof(ben.key, "GET", me, ben.access_token);
+    expect(await call({ authorization: `DPoP ${ben.access_token}`, dpop: proof })).toBe(200);
+    expect(await call({ authorization: `DPoP ${ben.access_token}`, dpop: proof })).toBe(401);
   });
 
   it("refresh with the same refresh token, again after a lost answer, but not with another key", async () => {

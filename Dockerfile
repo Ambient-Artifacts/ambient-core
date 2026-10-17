@@ -25,7 +25,8 @@ RUN apt-get update \
  && mkdir -p /data /var/lib/brain-health \
  && chown node:node /data /var/lib/brain-health
 WORKDIR /app
-COPY --from=build --chown=node:node /app /app
+# Owned by root: the server (user node) can't rewrite its own code; it writes only to /data.
+COPY --from=build /app /app
 USER node
 ENV BRAIN_LISTEN_HOST=0.0.0.0 \
     BRAIN_DATA_DIR=/data

@@ -4,7 +4,7 @@
 // old one. Brute force is capped per login attempt (see interactions.ts).
 import { randomInt } from "node:crypto";
 import { api, type Control } from "../control.ts";
-import { sha256Hex } from "../crypto.ts";
+import type { CodeHasher } from "./codes.ts";
 
 export const PAIRING_TTL_MS = 5 * 60_000;
 /** No 0/O/1/I, so a code read off a screen is typed right. */
@@ -22,14 +22,17 @@ function newCode(): string {
 }
 
 export class Pairing {
-  constructor(private control: Control) {}
+  constructor(
+    private control: Control,
+    private codes: CodeHasher,
+  ) {}
 
   async create(uid: string): Promise<{ code: string; expiresAt: number }> {
     const now = Date.now();
     const expiresAt = now + PAIRING_TTL_MS;
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = newCode();
-      const ok = await this.control.m(api.auth.createPairingCode, { uid: uid as never, codeHash: sha256Hex(`pair:${code}`), expiresAt, now });
+      const ok = await this.control.m(api.auth.createPairingCode, { uid: uid as never, codeHash: this.codes.hash("pair", code), expiresAt, now });
       if (ok) return { code, expiresAt };
     }
     throw new Error("could not allocate a pairing code");
@@ -38,7 +41,10 @@ export class Pairing {
   async consume(input: string): Promise<string | null> {
     const code = normalizeCode(input);
     if (code.length !== PAIRING_CODE_LENGTH || ![...code].every((c) => ALPHABET.includes(c))) return null;
-    const uid = await this.control.m(api.auth.consumePairingCode, { codeHash: sha256Hex(`pair:${code}`), now: Date.now() });
-    return uid ? String(uid) : null;
+    for (const codeHash of this.codes.candidates("pair", code)) {
+      const uid = await this.control.m(api.auth.consumePairingCode, { codeHash, now: Date.now() });
+      if (uid) return String(uid);
+    }
+    return null;
   }
 }

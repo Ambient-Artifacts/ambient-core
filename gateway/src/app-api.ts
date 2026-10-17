@@ -23,8 +23,11 @@ import type { RoutineService } from "./routines/service.ts";
 import type { SessionService } from "./sessions/service.ts";
 import type { EventHub, Revisions } from "./revisions.ts";
 import { TeamServerError, type TeamLink } from "./teams.ts";
+import type { CodeHasher } from "./auth/codes.ts";
 
 export interface AppApiDeps {
+  /** Invite codes are stored keyed (auth/codes.ts). */
+  codes: CodeHasher;
   control: Control;
   directory: Directory;
   /** Who an app request is from (its DPoP-bound access token); the apps sign in at /oauth. */
@@ -69,7 +72,8 @@ const BriefBody = z.object({ title: z.string().max(200).optional(), attendees: z
 
 export function appApiRouter(d: AppApiDeps): Router {
   const r = express.Router();
-  // Sync batches may carry transcripts; the app splits batches well below this.
+  // Sync batches may carry transcripts; the app splits batches well below this. Routes put `auth`
+  // before `json`, so nobody can make the gateway inflate and buffer a body without signing in.
   const json = express.json({ limit: "8mb" });
   const authLimit = limiter(30);
   const userLimit = limiter(240);
@@ -170,7 +174,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   // longest-standing admin or member (a team with nobody else is canceled), personal pages,
   // keys, repos, sessions, routines, secrets and AI-app connections are deleted, and Apple's
   // token is revoked when the app sent a fresh authorization code (App Store 5.1.1(v)).
-  r.delete("/v1/app/me", json, auth, async (req, res) => {
+  r.delete("/v1/app/me", auth, json, async (req, res) => {
     const body = DeleteAccount.safeParse(req.body ?? {});
     if (!body.success) {
       res.status(400).json({ error: "bad_request" });
@@ -191,7 +195,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.json({ deleted: done, apple, teams: begun.teams });
   });
 
-  r.post("/v1/app/me/prefs", json, auth, async (req, res) => {
+  r.post("/v1/app/me/prefs", auth, json, async (req, res) => {
     const consolidate = typeof req.body?.consolidate === "boolean" ? (req.body.consolidate as boolean) : undefined;
     const digest = typeof req.body?.digest === "boolean" ? (req.body.digest as boolean) : undefined;
     if (consolidate === undefined && digest === undefined) {
@@ -207,7 +211,7 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // The app asks when a meeting with others is about to start (it reads the calendar on the
   // device; only the attendees' names come here, to look up their pages).
-  r.post("/v1/app/briefs", json, auth, async (req, res) => {
+  r.post("/v1/app/briefs", auth, json, async (req, res) => {
     const body = BriefBody.safeParse(req.body ?? {});
     if (!body.success) {
       res.status(400).json({ error: "bad_request" });
@@ -242,7 +246,7 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // What they write about themselves, kept word for word; Claude's upkeep writes the rest of
   // the page from it and their notes (when upkeep is on).
-  r.put("/v1/app/me/about", json, auth, async (req, res) => {
+  r.put("/v1/app/me/about", auth, json, async (req, res) => {
     const about = typeof req.body?.about === "string" ? req.body.about.trim() : "";
     if (!about || about.length > MAX_ABOUT) {
       res.status(400).json({ error: "bad_request", message: `Write a few sentences, at most ${MAX_ABOUT} characters.` });
@@ -255,7 +259,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.json({ about, path: ME_PATH });
   });
 
-  r.post("/v1/app/me/name", json, auth, async (req, res) => {
+  r.post("/v1/app/me/name", auth, json, async (req, res) => {
     const name = typeof req.body?.name === "string" ? req.body.name : "";
     if (!name.trim()) {
       res.status(400).json({ error: "bad_request" });
@@ -269,7 +273,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   // ---- push notifications ----
 
   // The app's device token, sent at every launch while signed in (it can change).
-  r.put("/v1/app/push-device", json, auth, async (req, res) => {
+  r.put("/v1/app/push-device", auth, json, async (req, res) => {
     const body = PushDeviceBody.safeParse(req.body ?? {});
     if (!body.success) {
       res.status(400).json({ error: "bad_request" });
@@ -295,7 +299,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.json(await d.pairing.create(uidOf(res)));
   });
 
-  r.post("/v1/app/pats", json, auth, async (req, res) => {
+  r.post("/v1/app/pats", auth, json, async (req, res) => {
     const body = z.object({ label: z.string().min(1).max(80), team: z.string().optional(), purpose: z.enum(["claude-code"]).optional() }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request" });
@@ -318,6 +322,20 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.json(await d.pats.create({ uid, scopes, resource: { kind: "personal" }, label: body.data.label }));
   });
 
+  // A token that leaked (a laptop, a dotfile, a CI log) is revoked here; it stops working at once.
+  r.get("/v1/app/pats", auth, async (_req, res) => {
+    res.json({ tokens: await d.pats.list(uidOf(res)) });
+  });
+
+  r.delete("/v1/app/pats/:id", auth, async (req, res) => {
+    const id = String(req.params.id);
+    if (!/^[a-z0-9]{10,64}$/.test(id) || !(await d.pats.revoke(uidOf(res), id))) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    res.status(204).end();
+  });
+
   // ---- work sessions (Claude Code and AI apps) ----
 
   r.get("/v1/app/sessions", auth, async (_req, res) => {
@@ -336,7 +354,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     });
   });
 
-  r.put("/v1/app/sessions/rules", json, auth, async (req, res) => {
+  r.put("/v1/app/sessions/rules", auth, json, async (req, res) => {
     const uid = uidOf(res);
     const body = z.object({ rules: z.array(z.object({ match: z.string().trim().min(2).max(200), team: z.string().min(1).max(80) })).max(50) }).safeParse(req.body);
     if (!body.success) {
@@ -368,7 +386,7 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // ---- teams ----
 
-  r.post("/v1/app/teams/join", json, auth, async (req, res) => {
+  r.post("/v1/app/teams/join", auth, json, async (req, res) => {
     const code = typeof req.body?.code === "string" ? req.body.code.trim().toUpperCase() : "";
     if (!code || !authLimit(`join:${uidOf(res)}`)) {
       res.status(400).json({ error: "bad_request" });
@@ -376,12 +394,13 @@ export function appApiRouter(d: AppApiDeps): Router {
     }
     const uid = uidOf(res);
     const user = await d.directory.user(uid);
-    const out = await d.control.m(api.teams.joinWithInvite, {
-      uid: uid as never,
-      codeHash: sha256Hex(`invite:${code}`),
-      peopleSlug: `people/${slugify(user?.name ?? "member") || "member"}`,
-      now: Date.now(),
-    });
+    let out!: Awaited<ReturnType<typeof join>>;
+    const join = (codeHash: string) =>
+      d.control.m(api.teams.joinWithInvite, { uid: uid as never, codeHash, peopleSlug: `people/${slugify(user?.name ?? "member") || "member"}`, now: Date.now() });
+    for (const codeHash of d.codes.candidates("invite", code)) {
+      out = await join(codeHash);
+      if (out.ok || out.error !== "invalid_code") break;
+    }
     d.directory.invalidate(uid);
     if (!out.ok) {
       res.status(400).json({ error: out.error });
@@ -391,7 +410,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   });
 
   // Create a team (the user owns it) on a free server from the pool.
-  r.post("/v1/app/teams", json, auth, async (req, res) => {
+  r.post("/v1/app/teams", auth, json, async (req, res) => {
     const uid = uidOf(res);
     const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
     if (!name || name.length > 80 || !authLimit(`create:${uid}`)) {
@@ -409,6 +428,8 @@ export function appApiRouter(d: AppApiDeps): Router {
       if (made.error === "no_server") {
         console.warn("[gateway] team creation refused: the server pool is empty");
         res.status(503).json({ error: "no_server", message: "We're setting up more team servers. Try again in a few hours; we've been told." });
+      } else if (made.error === "too_many_teams") {
+        res.status(403).json({ error: made.error, message: "You already own three teams. Write to us if you need another." });
       } else {
         res.status(400).json({ error: made.error, message: "Give the team a name." });
       }
@@ -455,7 +476,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.json({ team: { slug: team.slug, name: team.name, status: team.status, role: team.role }, members });
   });
 
-  r.post("/v1/app/teams/:slug/invites", json, auth, async (req, res) => {
+  r.post("/v1/app/teams/:slug/invites", auth, json, async (req, res) => {
     const team = await managed(req, res);
     if (!team) return;
     const body = z
@@ -472,7 +493,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     const out = await d.control.m(api.teams.invite, {
       uid: uidOf(res) as never,
       slug: team.slug,
-      codeHash: sha256Hex(`invite:${code}`),
+      codeHash: d.codes.hash("invite", code),
       role: body.data.role,
       uses,
       days: body.data.days ?? 14,
@@ -495,7 +516,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     else res.status(204).end();
   });
 
-  r.post("/v1/app/teams/:slug/members/:uid/role", json, auth, async (req, res) => {
+  r.post("/v1/app/teams/:slug/members/:uid/role", auth, json, async (req, res) => {
     const team = await managed(req, res);
     if (!team) return;
     const role = req.body?.role;
@@ -518,7 +539,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     else res.status(204).end();
   });
 
-  r.post("/v1/app/teams/:slug/notes", json, auth, async (req, res) => {
+  r.post("/v1/app/teams/:slug/notes", auth, json, async (req, res) => {
     const uid = uidOf(res);
     const team = await d.directory.membership(uid, String(req.params.slug));
     if (!team || team.status !== "active") {
@@ -543,7 +564,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     }
   });
 
-  r.post("/v1/app/teams/:slug/query", json, auth, async (req, res) => {
+  r.post("/v1/app/teams/:slug/query", auth, json, async (req, res) => {
     const uid = uidOf(res);
     const team = await d.directory.membership(uid, String(req.params.slug));
     if (!team || team.status !== "active") {
@@ -568,7 +589,7 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // ---- personal wiki ----
 
-  r.post("/v1/app/personal/sync", json, auth, async (req, res) => {
+  r.post("/v1/app/personal/sync", auth, json, async (req, res) => {
     const body = SyncRequest.safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", issues: body.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
@@ -640,7 +661,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.json({ repo: await d.repos.status(uidOf(res)) });
   });
 
-  r.post("/v1/app/repo", json, auth, async (req, res) => {
+  r.post("/v1/app/repo", auth, json, async (req, res) => {
     const url = typeof req.body?.url === "string" ? req.body.url : "";
     const token = typeof req.body?.token === "string" ? req.body.token : "";
     try {
@@ -689,7 +710,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     }
   };
   r.get("/v1/app/teams/:slug/repo", auth, teamRepo("GET"));
-  r.post("/v1/app/teams/:slug/repo", json, auth, teamRepo("POST"));
+  r.post("/v1/app/teams/:slug/repo", auth, json, teamRepo("POST"));
   r.delete("/v1/app/teams/:slug/repo", auth, teamRepo("DELETE"));
 
   return r;

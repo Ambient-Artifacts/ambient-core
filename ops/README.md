@@ -30,8 +30,9 @@ AI apps ─▶        same                                            ──▶ 
 
 ## 1. Secrets
 ```sh
-node ops/gen-secrets.mjs > gateway.env   # keep a copy in the password manager
+umask 077; node ops/gen-secrets.mjs > ~/ambient-gateway.env   # outside the checkout; keep a copy in the password manager
 ```
+Never write it into the checkout: anything there could be committed or copied to a VM by mistake (deploy.sh ships only what git tracks, as a second line of defence).
 **Losing `BRAIN_MASTER_KEY` makes every stored personal page unreadable.** Back it up before the first user signs in.
 
 ## 2. Core VM

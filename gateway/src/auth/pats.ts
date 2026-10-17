@@ -35,6 +35,16 @@ export class PatService {
     return { token, id: String(id) };
   }
 
+  /** The user's live tokens (label, scopes, dates), for the app and the admin CLI. */
+  async list(uid: string) {
+    return (await this.control.q(api.auth.listPats, { uid: uid as never, now: Date.now() })).map((p) => ({ ...p, id: String(p.id), teamId: p.teamId ? String(p.teamId) : null }));
+  }
+
+  /** Revoke one of the user's tokens; false when they have no live token with that id. */
+  async revoke(uid: string, id: string): Promise<boolean> {
+    return (await this.control.m(api.auth.revokePat, { uid: uid as never, id, now: Date.now() })).ok;
+  }
+
   async find(token: string): Promise<PatRecord | undefined> {
     const r = await this.control.q(api.auth.findPat, { hash: sha256Hex(token), now: Date.now() });
     if (!r) return undefined;

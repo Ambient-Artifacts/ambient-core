@@ -237,6 +237,13 @@ export default defineSchema({
     createdAt: v.number(),
   }).index("by_code", ["codeHash"]),
 
+  /** Who an owner or admin took out of a team, and when: an invite made before that can't bring them back. */
+  removals: defineTable({
+    teamId: v.id("teams"),
+    userId: v.id("users"),
+    at: v.number(),
+  }).index("by_team_user", ["teamId", "userId"]),
+
   /** One-time codes the app shows so a user can approve an AI app (OAuth login). */
   pairingCodes: defineTable({
     userId: v.id("users"),
@@ -401,7 +408,14 @@ export default defineSchema({
     createdAt: v.number(),
   }).index("by_team", ["teamId"]),
 
-  /** oidc-provider storage (sessions, grants, codes, refresh tokens, clients). */
+  /**
+   * oidc-provider storage (sessions, grants, codes, refresh tokens, clients). The gateway seals
+   * `payload` with a key derived from the master key and stores `key`, `uid` and `userCode` as
+   * HMACs ("h1:…"): codes, refresh tokens and session ids are bearer secrets, so the database
+   * holds nothing usable. Rows from before that carry the raw id and a plain JSON payload until
+   * they expire. `accountId`, `clientId` and `consumedAt` are copied out of the payload for the
+   * few things Convex decides itself.
+   */
   oauth: defineTable({
     model: v.string(),
     key: v.string(),
@@ -410,10 +424,14 @@ export default defineSchema({
     grantId: v.optional(v.string()),
     uid: v.optional(v.string()),
     userCode: v.optional(v.string()),
+    accountId: v.optional(v.string()),
+    clientId: v.optional(v.string()),
+    consumedAt: v.optional(v.number()),
   })
     .index("by_model_key", ["model", "key"])
     .index("by_model_uid", ["model", "uid"])
     .index("by_model_userCode", ["model", "userCode"])
+    .index("by_model_account", ["model", "accountId"])
     .index("by_grant", ["grantId"])
     .index("by_expires", ["expiresAt"]),
 });

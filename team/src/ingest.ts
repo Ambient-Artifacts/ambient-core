@@ -3,7 +3,7 @@
 // input: only known fields survive, links are sanitized, size is capped.
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { NoteFrontmatter, renderPage, slugify, type TeamNoteV1 } from "@brain/spec";
+import { NoteFrontmatter, NoteId, renderPage, slugify, type TeamNoteV1 } from "@brain/spec";
 import { EntityIndex } from "@brain/wiki";
 import type { TeamWiki } from "./wiki.ts";
 
@@ -54,6 +54,8 @@ export async function ingestNote(
   opts: { rawDir: string; recordedBySlug: string | null },
 ): Promise<IngestResult & { commit?: string | null }> {
   const recordedBy = opts.recordedBySlug && REF.test(opts.recordedBySlug) ? opts.recordedBySlug : undefined;
+  // The id names the raw transcript's file: never a path (the schema says so too).
+  if (!NoteId.safeParse(note.note_id).success) throw new IngestError(422, "invalid note: note_id");
   const existing = wiki.store.findById(note.note_id);
   // A note the team already has stays as it is, except one Apple's model didn't write (quotes
   // or a list of its parts) that the same person's device has now summarized again (the app's
@@ -102,8 +104,15 @@ export async function ingestNote(
   const parsed = NoteFrontmatter.safeParse(frontmatter);
   if (!parsed.success) throw new IngestError(422, `invalid note: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")}`);
 
-  // Replaced at its old address, so links to it stay.
-  const path = existing?.path ?? notePath(note, title);
+  // Replaced at its old address, so links to it stay. A new note whose address is already
+  // another note's (same day, title and last six characters of the id, by chance or made so by a
+  // member) gets its whole id in the name instead: it must never overwrite someone else's note.
+  let path = existing?.path ?? notePath(note, title);
+  const taken = wiki.store.getByRef(path.replace(/\.md$/, ""));
+  if (!existing && taken && taken.frontmatter.id !== note.note_id) {
+    path = path.replace(/-[0-9a-z_-]{6}\.md$/, `-${note.note_id.toLowerCase()}.md`);
+    if (wiki.store.getByRef(path.replace(/\.md$/, ""))) throw new IngestError(409, "a different note already has this address");
+  }
   // Links to the note's pages in this wiki's layout (the phone's own links point elsewhere).
   const related = (["people", "orgs", "projects", "topics"] as const).flatMap((k) =>
     (frontmatter[k] as string[]).map((ref) => {

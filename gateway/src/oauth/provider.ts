@@ -43,7 +43,7 @@ export function parseResource(origin: string, resource: string): { path: string;
 
 export function createProvider(cfg: GatewayConfig, directory: Directory, control: Control): Provider {
   const configuration: Configuration = {
-    adapter: convexAdapterFactory(control),
+    adapter: convexAdapterFactory(control, cfg.masterKey),
     clients: [
       {
         client_id: APP_CLIENT_ID,

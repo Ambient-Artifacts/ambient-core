@@ -19,5 +19,26 @@ export function dpopAccess(origin: string, signingKeys: JWK[]): DPoPAccessCheck 
     [oauth.customFetch]: async () => new Response(jwks, { headers: { "content-type": "application/json" } }),
     [oauth.allowInsecureRequests]: origin.startsWith("http://"),
   };
-  return (request, audience) => oauth.validateJwtAccessToken(as, request, audience, options);
+  // Each proof works once: oauth4webapi checks its time (within 5 minutes either way) but keeps no
+  // memory, so a proof seen in a log or a proxy could be sent again, with another query or body,
+  // for as long as its token lives. The apps make a new proof (a new jti) for every request.
+  const seen = new Map<string, number>();
+  return async (request, audience) => {
+    const claims = await oauth.validateJwtAccessToken(as, request, audience, options);
+    const jti = proofJti(request.headers.get("dpop"));
+    const now = Date.now();
+    if (!jti || (seen.get(jti) ?? 0) > now) throw new Error("DPoP proof already used");
+    if (seen.size > 100_000) for (const [k, until] of seen) if (until <= now) seen.delete(k);
+    seen.set(jti, now + 11 * 60_000);
+    return claims;
+  };
+}
+
+function proofJti(proof: string | null): string | undefined {
+  try {
+    const body = JSON.parse(Buffer.from(proof?.split(".")[1] ?? "", "base64url").toString("utf8")) as { jti?: unknown };
+    return typeof body.jti === "string" && body.jti.length >= 8 && body.jti.length <= 128 ? body.jti : undefined;
+  } catch {
+    return undefined;
+  }
 }

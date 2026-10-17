@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -325,5 +325,45 @@ describe("summarize again", () => {
 
     // Summarized now: the next copy is a duplicate again.
     expect((await post("/v1/inbox", note(id), lena)).json).toMatchObject({ status: "duplicate", path });
+  });
+});
+
+describe("paths", () => {
+  it("refuses a note id that isn't a plain id: the raw transcript is named after it", async () => {
+    const res = await post("/v1/inbox", note("../../escaped-note-000001"), await token("inbox"));
+    expect(res.status).toBe(400);
+    expect(existsSync(join(dataDir, "escaped-note-000001.json"))).toBe(false);
+  });
+
+  it("never overwrites another note whose address a new id would share", async () => {
+    // Same day, title and last six characters as the first test's note, different id.
+    const original = "notes/2026-10/2026-10-06-kundencall-bergmann-000001.md";
+    const before = readFileSync(join(dataDir, "wiki", original), "utf8");
+    const res = await post("/v1/inbox", note("01JBOTHERMEMBERNOTE0000001", { entry_page: { frontmatter: { title: "Kundencall Bergmann" }, body_md: "# Kundencall Bergmann\n\nSomething else.\n" } }), await token("inbox"));
+    expect(res.status).toBe(201);
+    expect(res.json.path).toBe("notes/2026-10/2026-10-06-kundencall-bergmann-01jbothermembernote0000001.md");
+    expect(readFileSync(join(dataDir, "wiki", original), "utf8")).toBe(before);
+  });
+
+  it("doesn't follow a symlink in the wiki folder, for reading or writing", async () => {
+    // A connected repo could have committed one (git now checks links out as plain files).
+    const outside = mkdtempSync(join(tmpdir(), "brain-outside-"));
+    writeFileSync(join(outside, "secret.md"), "---\ntitle: Secret\ntype: topic\n---\nserver secret\n");
+    symlinkSync(outside, join(dataDir, "wiki", "linked"));
+    symlinkSync(join(outside, "secret.md"), join(dataDir, "wiki", "topics-leak.md"));
+    try {
+      wiki.reload();
+      expect(wiki.store.entries().some((e) => e.ref.startsWith("linked/") || e.ref === "topics-leak")).toBe(false);
+      await expect(wiki.write(async (put) => {
+        await put("linked/planted.md", "planted");
+        return { message: "test: planted", result: {} };
+      })).rejects.toThrow(/bad path/);
+      expect(existsSync(join(outside, "planted.md"))).toBe(false);
+      expect(() => wiki.read("topics-leak.md")).toThrow(/bad path/);
+    } finally {
+      unlinkSync(join(dataDir, "wiki", "linked"));
+      unlinkSync(join(dataDir, "wiki", "topics-leak.md"));
+      wiki.reload();
+    }
   });
 });

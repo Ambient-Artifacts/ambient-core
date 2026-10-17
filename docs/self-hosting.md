@@ -172,8 +172,8 @@ docker compose up -d
 A wiki can live in a repository you own (GitHub, GitLab, Bitbucket, Azure DevOps; `https://` only). Ambient keeps both sides in step: edits made in the repo come back. Give it a token that can push to that one repo, piped in on stdin so it stays out of your shell history:
 
 ```sh
-docker compose exec -T gateway admin repo you@example.com https://github.com/you/wiki.git < token.txt
-docker compose exec -T gateway admin team repo acme https://github.com/acme/wiki.git < token.txt
+docker compose exec -T gateway admin repo you@example.com https://github.com/you/wiki.git < ~/repo-token.txt
+docker compose exec -T gateway admin team repo acme https://github.com/acme/wiki.git < ~/repo-token.txt
 ```
 
 The repo must be empty, or already an Ambient wiki. A personal wiki syncs every 15 minutes; a team wiki pushes after every change and pulls before every write.
@@ -211,12 +211,14 @@ Three things hold state. Back up all three, and keep `.env` somewhere separate f
 A consistent copy, with a short stop:
 
 ```sh
+mkdir -p -m 700 ~/ambient-backups   # outside the checkout: never inside it, where an image build or a commit could pick it up
 docker compose stop
 for v in convex-data team-data; do
-  docker run --rm -v ambient_$v:/v:ro -v "$PWD":/backup alpine tar czf /backup/$v-$(date +%F).tgz -C /v .
+  docker run --rm -v ambient_$v:/v:ro -v ~/ambient-backups:/backup alpine sh -c "umask 077; tar czf /backup/$v-$(date +%F).tgz -C /v ."
 done
 docker compose up -d
 ```
+A `convex-data` archive is as good as the Convex admin key (it holds the instance secret the key is made from): keep it as carefully as `.env`.
 
 To restore, recreate the volumes from those archives (the same `docker run`, with `tar xzf` into an empty volume) on a checkout with the same `.env`. A team wiki connected to your own repo also has a full copy there. Convex can export its data without stopping, too: `npx convex export` with `CONVEX_SELF_HOSTED_URL=http://127.0.0.1:3210` and the admin key.
 

@@ -74,7 +74,7 @@ send() {
   out="$DATA/last-response"
   status="$({ printf '%s\n' "$meta"; cat "$file"; } | gzip -c |
     curl -sS -o "$out" -w '%{http_code}' --max-time 25 -X POST \
-      -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/x-ndjson" -H "Content-Encoding: gzip" \
+      -H @<(printf 'Authorization: Bearer %s\n' "$TOKEN") -H "Content-Type: application/x-ndjson" -H "Content-Encoding: gzip" \
       --data-binary @- "$SERVER/v1/sessions" 2>>"$DATA/capture.log")" || status="000"
   case "$status" in
     2??) mark_sent "$id" "$size"; log "sent $id ($status)" ;;

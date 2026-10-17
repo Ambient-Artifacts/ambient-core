@@ -151,6 +151,16 @@ describe("OAuth for the personal /mcp resource", () => {
     expect(team).toContain("Bergmann Logistik");
     await client.close();
 
+    // The database holds nothing a token could be redeemed from: no row is keyed by the refresh
+    // token or carries it, and every payload is sealed.
+    const rows = await s.t.run(async (ctx) => ctx.db.query("oauth").collect());
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.key).not.toBe(t.json.refresh_token);
+      expect(row.payload).not.toContain(t.json.refresh_token!);
+      expect(row.payload.startsWith("v1.")).toBe(true);
+    }
+
     const r1 = await token(as, { grant_type: "refresh_token", refresh_token: t.json.refresh_token!, client_id: clientId, resource });
     expect(r1.status).toBe(200);
     expect((await token(as, { grant_type: "refresh_token", refresh_token: t.json.refresh_token!, client_id: clientId, resource })).status).toBe(400);

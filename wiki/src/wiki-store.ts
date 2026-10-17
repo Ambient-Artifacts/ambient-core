@@ -1,7 +1,7 @@
 // Read model over one wiki (a user's personal wiki or a team wiki), backed by
 // the shared "brain-index v1" SQLite schema. Production builds it in memory
 // from the user's decrypted Convex rows; the spike builds it from markdown files.
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import Database from "better-sqlite3";
 import {
@@ -114,8 +114,10 @@ export class WikiStore {
         if (top && scope === "personal" && SKIP_PERSONAL_ROOT.has(name)) continue;
         if (name.startsWith(".")) continue;
         const p = join(dir, name);
-        if (statSync(p).isDirectory()) walk(p, false);
-        else if (name.endsWith(".md") && !name.startsWith("_")) {
+        // lstat: a symlink (from a connected repo) is skipped, never followed out of the wiki.
+        const st = lstatSync(p);
+        if (st.isDirectory()) walk(p, false);
+        else if (st.isFile() && name.endsWith(".md") && !name.startsWith("_")) {
           store.upsert(relative(root, p).split(sep).join("/"), readFileSync(p, "utf8"));
         }
       }

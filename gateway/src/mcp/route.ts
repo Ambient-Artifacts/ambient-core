@@ -87,6 +87,11 @@ export function mcpRouter(deps: {
   );
   router.post("/t/:slug/mcp", express.json({ limit: "1mb" }), (req, res) => {
     const slug = String(req.params.slug);
+    // The slug goes into the resource URL and the WWW-Authenticate header: a team slug or nothing.
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(slug)) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
     return handle(req, res, { url: `${deps.origin}/t/${slug}/mcp`, teamSlug: slug }, `/t/${slug}/mcp`);
   });
 

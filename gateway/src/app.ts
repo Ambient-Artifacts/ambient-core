@@ -4,6 +4,8 @@ import type Provider from "oidc-provider";
 import { appApiRouter } from "./app-api.ts";
 import { appleRevoker, type AppleRevoker } from "./auth/apple-revoke.ts";
 import { joinRouter } from "./join.ts";
+import { limiter } from "./limiter.ts";
+import { CodeHasher } from "./auth/codes.ts";
 import { appAccess } from "./auth/app-access.ts";
 import type { AppleVerifier } from "./auth/apple.ts";
 import { microsoftVerifier, type MicrosoftVerifier } from "./auth/microsoft.ts";
@@ -56,7 +58,8 @@ export function createApp(deps: AppDeps) {
   const control = new Control(deps.convex, config.serviceSecret);
   const directory = new Directory(control, config.directoryTtlMs);
   const pats = new PatService(control);
-  const pairing = new Pairing(control);
+  const codeHasher = new CodeHasher(config.masterKey);
+  const pairing = new Pairing(control, codeHasher);
   const personal = new PersonalStore(control, config.masterKey);
   const repos = new PersonalRepos(control, personal, { allowFile: config.allowFileRepos });
   const revisions = new Revisions(control);
@@ -71,6 +74,7 @@ export function createApp(deps: AppDeps) {
   const routines = new RoutineService({
     control,
     keys: new RoutineKeys({ control, personal, master: config.masterKey }),
+    codes: codeHasher,
     origin: config.origin,
     runner: runner && { version: runner.version, sha256: runner.sha256 },
     notifier,
@@ -112,6 +116,7 @@ export function createApp(deps: AppDeps) {
       directory,
       access: appAccess(config.origin, config.signingKeys),
       pairing,
+      codes: codeHasher,
       personal,
       teams,
       pats,
@@ -133,6 +138,15 @@ export function createApp(deps: AppDeps) {
   const appSignIn = config.appleAudiences.length > 0 || !!microsoft;
   const codes = !appSignIn ? "admin" : config.adminCodes ? "both" : "app";
   app.use(interactionRouter(provider, directory, pairing, control, { apple: deps.apple, microsoft, codes, signups: config.signups }));
+
+  // Client registration and the authorize step are open to anyone and each stores rows in Convex.
+  // A registered client is kept for good, so registering is limited tightly per address; the
+  // authorize step's rows expire (oauth.sweepExpired), so it only gets a ceiling against floods.
+  const registrations = limiter(20);
+  const authorizations = limiter(300);
+  const tooMany = (res: Response) => res.status(429).json({ error: "rate_limited", error_description: "Too many requests. Try again in a minute." });
+  app.post("/oauth/register", (req, res, next) => (registrations(req.ip ?? "unknown") ? next() : tooMany(res)));
+  app.use(["/oauth/authorize", "/oauth/par"], (req, res, next) => (authorizations(req.ip ?? "unknown") ? next() : tooMany(res)));
 
   // Everything else (/.well-known/openid-configuration, /oauth/*) is the provider.
   app.use(provider.callback());

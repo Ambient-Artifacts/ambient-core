@@ -173,15 +173,24 @@ describe("routines over MCP", () => {
     expect(made.isError).toBeFalsy();
     const r = (made.structuredContent as { routine: R }).routine;
     expect(text(made)).toContain("Weekdays at 07:00 (Europe/Vienna)");
+    // An AI app drafts it; it's paused until the user turns it on in the app.
+    expect(r.enabled).toBe(false);
+    expect(text(made)).toContain("an AI app can't turn it on");
+    expect((await client.callTool({ name: "run_routine", arguments: { id: r.id } })).isError).toBe(true);
+    expect((await client.callTool({ name: "update_routine", arguments: { id: r.id, enabled: true } })).isError).toBe(true);
+    expect(((await appCall(s, lena, "PATCH", `/v1/app/routines/${r.id}`, { enabled: true })).json.routine as R).enabled).toBe(true);
+    expect((await client.callTool({ name: "run_routine", arguments: { id: r.id } })).isError).toBeFalsy();
 
     const listed = text(await client.callTool({ name: "list_routines", arguments: {} }));
     expect(listed).toContain(`Inbox sweep (id: ${r.id}, personal)`);
     expect(listed).toContain("Build server (srv-test): online");
     expect(text(await client.callTool({ name: "list_routines", arguments: { id: r.id } }))).toContain("Prompt:\nSort the inbox.");
 
-    const changed = await client.callTool({ name: "update_routine", arguments: { id: r.id, prompt: "Sort and archive the inbox.", enabled: false } });
+    // A new prompt from an AI app pauses it again, until the user approves it.
+    const changed = await client.callTool({ name: "update_routine", arguments: { id: r.id, prompt: "Sort and archive the inbox." } });
     expect(text(changed)).toContain("paused");
-    expect((await client.callTool({ name: "run_routine", arguments: { id: r.id } })).isError).toBeFalsy();
+    expect(((changed.structuredContent as { routine: R }).routine).enabled).toBe(false);
+    expect((await client.callTool({ name: "run_routine", arguments: { id: r.id } })).isError).toBe(true);
     expect((await client.callTool({ name: "update_routine", arguments: { id: r.id, schedule: { every: "week", time: "07:00", timezone: "Europe/Vienna" } } })).isError).toBe(true);
 
     const row = await s.t.run(async (ctx) => (await ctx.db.query("routines").collect()).find((x) => x.name === "Inbox sweep"));

@@ -30,6 +30,11 @@ write_files:
     content: |
       Unattended-Upgrade::Automatic-Reboot "true";
       Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+      // Node (NodeSource) and Caddy (Cloudsmith) face the internet too: their updates as well.
+      Unattended-Upgrade::Origins-Pattern {
+        "site=deb.nodesource.com";
+        "site=dl.cloudsmith.io";
+      };
 runcmd:
   - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
   - apt-get install -y nodejs
@@ -37,7 +42,7 @@ runcmd:
   - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o /etc/apt/sources.list.d/caddy-stable.list
   - apt-get update && apt-get install -y caddy
   - mkdir -p /opt/brain /etc/brain /srv/brain
-  - chown -R brain:brain /srv/brain
+  - chown -R brain:brain /srv/brain && chmod 750 /srv/brain
   - chmod 750 /etc/brain && chown root:brain /etc/brain
   - ufw default deny incoming
   - ufw allow 22/tcp
