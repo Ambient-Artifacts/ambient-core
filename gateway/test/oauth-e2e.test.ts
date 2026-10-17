@@ -185,6 +185,9 @@ describe("OAuth for the personal /mcp resource", () => {
       expect(row.payload.startsWith("v1.")).toBe(true);
     }
 
+    // The client's own row names it, so one nobody connects with can be swept.
+    expect(rows.some((r) => r.model === "Client" && r.clientId === clientId)).toBe(true);
+
     // Nor is a row's stored key a token: handed in as one, it's refused.
     for (const row of rows.filter((r) => r.model === "RefreshToken")) {
       expect((await token(as, { grant_type: "refresh_token", refresh_token: row.key, client_id: clientId, resource })).status).toBe(400);

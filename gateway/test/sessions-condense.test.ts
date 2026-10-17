@@ -1,7 +1,7 @@
 // Cutting a Claude Code transcript down to what a summary needs, scrubbing secrets, and
 // deciding which team a session belongs to.
 import { describe, expect, it } from "vitest";
-import { condense, normalizeRemote, parseClaudeCode, pickTeam, redactSecrets, ruleMatches, splitBlocks } from "../src/sessions/condense.ts";
+import { claudeCodeReader, condense, KEEP_CHARS, normalizeRemote, parseClaudeCode, pickTeam, redactSecrets, ruleMatches, splitBlocks } from "../src/sessions/condense.ts";
 
 const HOME = "/Users/lena";
 const line = (o: Record<string, unknown>) => JSON.stringify({ sessionId: "5f0c2a9e-1111-4c4c-8888-0123456789ab", cwd: `${HOME}/git/platform`, gitBranch: "main", entrypoint: "cli", ...o });
@@ -132,8 +132,45 @@ describe("scrubbing secrets", () => {
   });
 });
 
+describe("what a transcript keeps", () => {
+  it("is bounded however long the transcript is: newest lines, newest pull requests and commits", () => {
+    const reader = claudeCodeReader();
+    const base = { sessionId: "s", cwd: "/w" };
+    // A tool result packed with distinct commit lines and PR links: each would be a mark.
+    const packed = Array.from({ length: 20_000 }, (_, i) => `[main ${i.toString(16).padStart(7, "0")}] c\nhttps://github.com/a/b/pull/${i}`).join("\n");
+    for (let n = 0; n < 5; n++) reader.line(JSON.stringify({ ...base, type: "user", timestamp: `2026-10-01T0${n}:00:00Z`, message: { role: "user", content: [{ type: "tool_result", content: packed }] } }));
+    // Then far more prompt text than one transcript keeps, the last one marked.
+    const prompt = "p".repeat(100_000);
+    for (let n = 0; n < 200; n++) reader.line(JSON.stringify({ ...base, type: "user", timestamp: "2026-10-01T06:00:00Z", origin: { kind: "human" }, message: { role: "user", content: n === 199 ? "the last prompt" : prompt } }));
+    const parsed = reader.done();
+    expect(parsed.marks.length).toBeLessThanOrEqual(2_000);
+    expect(parsed.marks.at(-1)).toMatchObject({ pr: "https://github.com/a/b/pull/19999" });
+    expect(parsed.lines.reduce((n, l) => n + l.text.length, 0)).toBeLessThanOrEqual(KEEP_CHARS);
+    expect(parsed.lines.at(-1)!.text).toBe("the last prompt");
+  });
+});
+
 describe("which team a session goes to", () => {
   const teams = [{ slug: "ambient-artifacts" }, { slug: "acme" }];
+
+  it("matches globs without regex backtracking: a hostile rule on a long path stays fast", () => {
+    const rule = { match: "/" + "**a".repeat(12) + "**b", team: "acme" };
+    const started = performance.now();
+    expect(ruleMatches(rule, { cwd: "/" + "a".repeat(40), repo: null, files: [] })).toBe(false);
+    expect(ruleMatches(rule, { cwd: "/" + "a".repeat(40) + "b/src", repo: null, files: [] })).toBe(true);
+    expect(performance.now() - started).toBeLessThan(500);
+    // * stays inside one folder, ** crosses them; any case; the path may go on below.
+    expect(ruleMatches({ match: "~/git/*-core", team: "acme" }, { cwd: "~/Git/Ambient-Core/gateway", repo: null, files: [] })).toBe(true);
+    expect(ruleMatches({ match: "~/git/*-core", team: "acme" }, { cwd: "~/git/x/ambient-core", repo: null, files: [] })).toBe(false);
+    expect(ruleMatches({ match: "~/git/**/core", team: "acme" }, { cwd: "~/git/x/y/core", repo: null, files: [] })).toBe(true);
+    expect(ruleMatches({ match: "~/git/core", team: "acme" }, { cwd: "~/git/core2", repo: null, files: [] })).toBe(false);
+  });
+
+  it("stops matching once an upload's matching budget is spent", () => {
+    const place = { cwd: "/srv/acme/app", repo: null, files: [] };
+    expect(ruleMatches({ match: "/srv/acme", team: "acme" }, place, { left: 10 })).toBe(false);
+    expect(ruleMatches({ match: "/srv/acme", team: "acme" }, place, { left: 1000 })).toBe(true);
+  });
 
   it("normalizes git remotes", () => {
     expect(normalizeRemote("git@github.com:Ambient-Artifacts/brain-platform.git")).toBe("github.com/ambient-artifacts/brain-platform");

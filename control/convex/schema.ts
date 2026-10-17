@@ -441,6 +441,7 @@ export default defineSchema({
     .index("by_model_uid", ["model", "uid"])
     .index("by_model_userCode", ["model", "userCode"])
     .index("by_model_account", ["model", "accountId"])
+    .index("by_model_client", ["model", "clientId"])
     .index("by_grant", ["grantId"])
     .index("by_expires", ["expiresAt"]),
 });
