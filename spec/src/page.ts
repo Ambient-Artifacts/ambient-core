@@ -99,17 +99,42 @@ export function mergeLiving(serverText: string, phoneText: string): string {
  * `pending_rewrite`, since their current truth may still mention it.
  */
 export function forgetNote(notePath: string, pages: Map<string, string>): { writes: { path: string; content: string }[]; deletes: string[] } {
-  const file = notePath.split("/").pop() ?? notePath;
-  const deletes = [notePath];
-  const note = pages.get(notePath);
-  const raw = note ? parsePage(note).frontmatter.raw : undefined;
-  if (typeof raw === "string" && raw) deletes.push(raw);
+  return forgetNotes([notePath], pages);
+}
+
+/**
+ * `forgetNote` for several recordings at once, the same as one after another but reading each
+ * living page once: a sync can delete hundreds, and a wiki has thousands of pages.
+ */
+export function forgetNotes(notePaths: string[], pages: Map<string, string>): { writes: { path: string; content: string }[]; deletes: string[] } {
+  const deletes: string[] = [];
+  const files = new Set<string>();
+  for (const notePath of new Set(notePaths)) {
+    files.add(notePath.split("/").pop() ?? notePath);
+    deletes.push(notePath);
+    const note = pages.get(notePath);
+    const raw = note ? parsePage(note).frontmatter.raw : undefined;
+    if (typeof raw === "string" && raw) deletes.push(raw);
+  }
+  // Whether a timeline line points at one of the files: "/<file>" somewhere in it.
+  const plainNames = [...files].every((f) => !f.includes("/") && f.endsWith(".md") && f.indexOf(".md") === f.length - 3);
+  const pointsAt = (line: string): boolean => {
+    if (!plainNames) return [...files].some((f) => line.includes(`/${f}`));
+    for (let i = line.indexOf("/"); i >= 0; i = line.indexOf("/", i + 1)) {
+      const end = line.indexOf(".md", i + 1);
+      if (end < 0) return false;
+      if (files.has(line.slice(i + 1, end + 3))) return true;
+    }
+    return false;
+  };
   const writes: { path: string; content: string }[] = [];
   for (const [path, text] of [...pages.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     if (!/^wiki\/(people|orgs|projects|topics)\//.test(path)) continue;
+    // Most pages link none of them: skip those without parsing.
+    if (!text.split("\n").some(pointsAt)) continue;
     const page = parsePage(text);
     const { currentTruth, timeline } = splitCompiled(page.body);
-    const kept = timeline.filter((l) => !l.includes(`/${file}`));
+    const kept = timeline.filter((l) => !pointsAt(l));
     if (kept.length === timeline.length) continue;
     if (kept.length === 0) {
       deletes.push(path);

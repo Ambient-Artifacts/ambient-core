@@ -4,7 +4,7 @@ import type Provider from "oidc-provider";
 import { appApiRouter } from "./app-api.ts";
 import { appleRevoker, type AppleRevoker } from "./auth/apple-revoke.ts";
 import { joinRouter } from "./join.ts";
-import { limiter } from "./limiter.ts";
+import { addressKey, limiter } from "./limiter.ts";
 import { CodeHasher } from "./auth/codes.ts";
 import { SignInNonces } from "./auth/signin-nonce.ts";
 import { appAccess } from "./auth/app-access.ts";
@@ -149,8 +149,8 @@ export function createApp(deps: AppDeps) {
   const registrations = limiter(20);
   const authorizations = limiter(300);
   const tooMany = (res: Response) => res.status(429).json({ error: "rate_limited", error_description: "Too many requests. Try again in a minute." });
-  app.post("/oauth/register", (req, res, next) => (registrations(req.ip ?? "unknown") ? next() : tooMany(res)));
-  app.use(["/oauth/authorize", "/oauth/par"], (req, res, next) => (authorizations(req.ip ?? "unknown") ? next() : tooMany(res)));
+  app.post("/oauth/register", (req, res, next) => (registrations(addressKey(req.ip)) ? next() : tooMany(res)));
+  app.use(["/oauth/authorize", "/oauth/par"], (req, res, next) => (authorizations(addressKey(req.ip)) ? next() : tooMany(res)));
 
   // Everything else (/.well-known/openid-configuration, /oauth/*) is the provider.
   app.use(provider.callback());

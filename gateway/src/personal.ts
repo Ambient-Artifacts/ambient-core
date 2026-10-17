@@ -1,7 +1,7 @@
 // Personal wikis: encrypted at rest in Convex, decrypted only here, in memory,
 // to answer a search or restore a phone. One in-memory index per user, rebuilt
 // when the user's sequence number moves.
-import { forgetNote, mergeLiving, parsePage } from "@brain/spec";
+import { forgetNotes, mergeLiving, parsePage } from "@brain/spec";
 import { LocalReader, WikiStore, type WikiReader } from "@brain/wiki";
 import { api, type Control } from "./control.ts";
 import {
@@ -157,23 +157,16 @@ export class PersonalStore {
     return { seq, applied, rejected, ...pulled, devices: origin !== "phone" };
   }
 
-  /** Remove deleted recordings from every stored page (see spec forgetNote). */
+  /**
+   * Remove deleted recordings from every stored page (see spec forgetNotes): all of them in one
+   * pass over the pages. One by one, a sync of 500 deletes (real or made up) re-read every page
+   * 500 times, and held up every other request to this gateway while it did.
+   */
   private async forget(uid: string, notePaths: string[]): Promise<void> {
     const pages = new Map((await this.pages(uid)).pages.map((p) => [p.path, p.content]));
-    const writes = new Map<string, string>();
-    const deletes = new Set<string>();
-    for (const notePath of notePaths) {
-      const r = forgetNote(notePath, pages);
-      for (const w of r.writes) {
-        pages.set(w.path, w.content);
-        writes.set(w.path, w.content);
-      }
-      for (const d of r.deletes) {
-        pages.delete(d);
-        writes.delete(d);
-        deletes.add(d);
-      }
-    }
+    const r = forgetNotes(notePaths, pages);
+    const deletes = new Set(r.deletes);
+    const writes = new Map(r.writes.filter((w) => !deletes.has(w.path)).map((w) => [w.path, w.content]));
     if (writes.size) await this.serverWrite(uid, [...writes].map(([path, content]) => ({ path, content })));
     const ops = [...deletes].filter((p) => PERSONAL_PATH.test(p)).map((path) => ({ op: "delete" as const, path }));
     for (let i = 0; i < ops.length; i += 100) await this.control.m(api.personal.apply, { uid: uid as never, ops: ops.slice(i, i + 100) });

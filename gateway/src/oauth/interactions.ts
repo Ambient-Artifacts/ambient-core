@@ -21,7 +21,7 @@ import type { MicrosoftVerifier } from "../auth/microsoft.ts";
 import type { Pairing } from "../auth/pairing.ts";
 import { api, type Control } from "../control.ts";
 import type { Directory } from "../directory.ts";
-import { limiter, strikes } from "../limiter.ts";
+import { addressKey, limiter, strikes } from "../limiter.ts";
 import { consentPage, errorPage, esc, loginPage, type LoginCodes } from "./pages.ts";
 import { APP_CLIENT_ID, appResource, parseResource } from "./provider.ts";
 import type { SignInNonces } from "../auth/signin-nonce.ts";
@@ -152,7 +152,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         await provider.interactionFinished(req, res, { error: "access_denied", error_description: "too many wrong codes" }, { mergeWithLastSubmission: false });
         return;
       }
-      const address = req.ip ?? "unknown";
+      const address = addressKey(req.ip);
       const form = async (status: number, error: string) => {
         const client = await provider.Client.find(String(details.params.client_id));
         res.status(status).send(loginForm(details.uid, String(client?.clientName ?? details.params.client_id), shownHost(String(details.params.redirect_uri)), error));
@@ -228,7 +228,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
 
   /** The interaction, when it's the app's and waiting for a sign-in; otherwise answered here. */
   const appInteraction = async (req: Request, res: Response) => {
-    if (!appSignIns(req.ip ?? "?")) {
+    if (!appSignIns(addressKey(req.ip))) {
       res.status(429).json({ error: "slow_down" });
       return null;
     }
@@ -245,14 +245,17 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
   /**
    * Whether an Apple or Microsoft ID token may sign in here, by its nonce: one this server issued
    * (still valid, first use), or none at all from an app from before nonces, which is taken until
-   * BRAIN_SIGNIN_NONCE=required. A nonce that isn't ours (another server's) is refused: that's a
-   * token given to some other server, replayed here. `legacy` is the old Microsoft flow's own
-   * random nonce, sent next to the token. Returns why it's refused, or null.
+   * BRAIN_SIGNIN_NONCE=required. One of ours that expired or was used already is refused (a
+   * replay), and so is an Apple token with a nonce that isn't ours: a token given to some other
+   * server, replayed here. `legacy` is the old Microsoft flow's own random nonce, sent next to the
+   * token: it can't be told apart from another server's nonce, so until nonces are required such
+   * a Microsoft token is taken. Returns why it's refused, or null.
    */
   const nonceRefusal = (token: string | undefined, legacy?: string): string | null => {
     if (token !== undefined) {
       const check = app.nonces.check(token);
       if (check === "ok") return null;
+      if (check === "expired" || check === "used") return check;
       if (legacy === undefined || token !== legacy) return check;
     }
     return app.requireNonce ? "missing" : null;

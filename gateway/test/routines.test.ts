@@ -254,6 +254,9 @@ describe("team routines", () => {
     expect((await appCall(s, lena, "PUT", "/v1/app/routines/secrets/GH_TOKEN", { value: "ghp_team_secret_1", team: slug })).status).toBe(204);
     expect((await appCall(s, ben, "PUT", "/v1/app/routines/secrets/GH_TOKEN", { value: "mine", team: slug })).status).toBe(403);
     expect((await appCall(s, lena, "PUT", "/v1/app/routines/secrets/PATH", { value: "/tmp", team: slug })).status).toBe(400);
+    for (const name of ["ANTHROPIC_BASE_URL", "HTTPS_PROXY", "GIT_CONFIG_COUNT", "BASH_ENV", "NODE_OPTIONS", "DYLD_INSERT_LIBRARIES"]) {
+      expect((await appCall(s, lena, "PUT", `/v1/app/routines/secrets/${name}`, { value: "x", team: slug })).status, name).toBe(400);
+    }
     expect((await appCall(s, lena, "PUT", "/v1/app/routines/secrets/lower_case", { value: "x" })).status).toBe(400);
     const names = (await appCall(s, ben, "GET", `/v1/app/routines/secrets?team=${slug}`)).json.secrets as { name: string }[];
     expect(names.map((n) => n.name)).toEqual(["GH_TOKEN"]);
@@ -285,7 +288,15 @@ describe("team routines", () => {
     expect(listed).toContain("Standup notes");
     expect(listed).toContain("Weekly digest");
     expect(listed).not.toContain("Lena's own");
-    expect(text(await client.callTool({ name: "set_routine_secret", arguments: { name: "SLACK_TOKEN", value: "xoxb-1" } }))).toContain(`Stored SLACK_TOKEN for team ${slug}`);
+    // A secret from an AI app changes what the team's loops do, so the ones that are on pause;
+    // Lena's own loops (another owner's secrets) stay on.
+    const stored = text(await client.callTool({ name: "set_routine_secret", arguments: { name: "SLACK_TOKEN", value: "xoxb-1" } }));
+    expect(stored).toContain(`Stored SLACK_TOKEN for team ${slug}`);
+    expect(stored).toContain('paused: "Weekly digest"');
+    const after = (await appCall(s, lena, "GET", "/v1/app/routines")).json.routines as R[];
+    expect(after.find((r) => r.name === "Weekly digest")?.enabled).toBe(false);
+    expect(after.find((r) => r.name === "Lena's own")?.enabled).toBe(true);
+    expect((await client.callTool({ name: "set_routine_secret", arguments: { name: "ANTHROPIC_BASE_URL", value: "https://example.com" } })).isError).toBe(true);
     await client.close();
 
     const benPat = String((await appCall(s, ben, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
@@ -344,6 +355,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     chmodSync(join(bin, "claude"), 0o755);
     env = {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
+      // The runner finds systemctl here, not on PATH (it runs as root).
+      AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
       HOME: dir,
       USER: "root",
       AMBIENT_SERVER: s.origin,

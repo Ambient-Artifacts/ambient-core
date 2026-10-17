@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -38,8 +38,28 @@ const RUN_LIMIT = "3h";
 // runner is released (ops/sign-runner.mjs), with a key that never goes to the gateway.
 const RUNNER_KEYS = ["MCowBQYDK2VwAyEAuyLm3reOo6pWuKDgpQjUFRRVXx4FIZOc6peGpeT2WGU="];
 const SUMMARY_MAX = 4000;
+/**
+ * Where the runner finds systemctl, getent and setpriv. It runs as root, so never on runner.env's
+ * PATH: that one puts the routine user's own folders first and is for Claude Code's runs, and a
+ * program the user (or a run) put there would run as root.
+ */
+const SYSTEM_PATH = (process.env.AMBIENT_SYSTEM_PATH || "/usr/sbin:/usr/bin:/sbin:/bin").split(":").filter(Boolean);
+/**
+ * Secret names a run never gets, whatever the gateway sends (the gateway refuses them too, as
+ * RESERVED_ENV in gateway/src/routines/service.ts): what the computer sets itself, and variables
+ * that change how Claude Code, git, a shell, a runtime or the network behave. setpriv starts as
+ * root with the run's environment, so LD_PRELOAD and the like matter there as well.
+ */
+const RESERVED_ENV =
+  /^(PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|TMPDIR|TMP|TEMP|TERM|LANG|LANGUAGE|LC_.*|IFS|ENV|BASH_ENV|BASH_FUNC_.*|PS4|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|EDITOR|VISUAL|PAGER|MANPAGER|GIT_.*|SSH_.*|GNUPGHOME|ANTHROPIC_.*|CLAUDE.*|AMBIENT_.*|LD_.*|DYLD_.*|NODE_.*|NPM_CONFIG_.*|YARN_.*|PYTHON.*|PIP_.*|PERL.*|RUBY.*|GEM_.*|BUNDLE_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_PROXY|SSL_.*|CURL_.*|OPENSSL_.*|REQUESTS_CA_BUNDLE|XDG_.*|DOCKER_HOST)$/;
 
 const log = (...a) => console.log(...a);
+
+/** A system program by its full path (SYSTEM_PATH). */
+function sys(name) {
+  for (const d of SYSTEM_PATH) if (existsSync(join(d, name))) return join(d, name);
+  return join(SYSTEM_PATH[0] ?? "/usr/bin", name);
+}
 const die = (msg, code = 1) => {
   console.error(msg);
   process.exit(code);
@@ -120,9 +140,11 @@ async function call(cfg, method, path, body, { retries = 2 } = {}) {
   }
 }
 
+/** Run as the routine's user: the claude binary is theirs to change (the native installer puts it in their home). */
 function claudeVersion(cfg) {
   try {
-    const out = execFileSync(cfg.claude, ["--version"], { encoding: "utf8", timeout: 20_000, env: runEnv(cfg) });
+    const as = asUser(cfg.user);
+    const out = execFileSync(cfg.claude, ["--version"], { encoding: "utf8", timeout: 20_000, env: runEnv(cfg, as ? { HOME: as.home } : {}), ...(as ? { uid: as.uid, gid: as.gid } : {}) });
     return out.trim().split("\n")[0].slice(0, 80);
   } catch {
     return "not found";
@@ -138,7 +160,7 @@ function info(cfg, state) {
 // ---- systemd ----
 
 function systemctl(...args) {
-  return spawnSync("systemctl", args, { encoding: "utf8" });
+  return spawnSync(sys("systemctl"), args, { encoding: "utf8" });
 }
 
 /** Characters a unit's Description can hold without systemd specifiers or line breaks. */
@@ -283,11 +305,40 @@ async function selfUpdate(cfg, latest) {
     log(`Not updating to ${latest.version}: it isn't signed with Ambient's release key.`);
     return;
   }
+  // Only forward: an older release is signed too, and going back to it would bring back what a
+  // newer one fixed. The version is read from the signed source, not from what the gateway says.
+  const theirs = /const VERSION = "([0-9.]+)";/.exec(source)?.[1];
+  if (!theirs || !newer(theirs, VERSION)) {
+    log(`Not updating to ${theirs ?? "a release without a version"}: this runner is ${VERSION}.`);
+    return;
+  }
   const tmp = `${INSTALLED}.new`;
   writeFileSync(tmp, source, { mode: 0o755 });
   if (spawnSync(process.execPath, ["--check", tmp]).status !== 0) return rmSync(tmp, { force: true });
   renameSync(tmp, INSTALLED);
   log(`Updated the runner to ${latest.version}`);
+}
+
+/** Is version `a` (1.2.3) after `b`? */
+function newer(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+
+/** Who other than root could change `file`: its owner, or anyone through group or other write on it or its folders. */
+function changeableByOthers(file) {
+  for (let p = file; ; p = dirname(p)) {
+    const st = statSync(p);
+    if (st.uid !== 0) return `its owner (uid ${st.uid}${p === file ? "" : `, of ${p}`})`;
+    // A folder with the sticky bit (/tmp) is fine for what root owns in it.
+    if (st.mode & 0o022 && !(st.isDirectory() && st.mode & 0o1000)) return `others (group or world write on ${p})`;
+    if (p === dirname(p)) return null;
+  }
 }
 
 // ---- one run ----
@@ -298,8 +349,16 @@ function home(user) {
 
 /** A local account's uid, gid and home, from passwd. */
 function account(user) {
-  const f = spawnSync("getent", ["passwd", user], { encoding: "utf8" }).stdout.trim().split(":");
+  const f = (spawnSync(sys("getent"), ["passwd", user], { encoding: "utf8" }).stdout ?? "").trim().split(":");
   return { uid: Number(f[2] ?? NaN), gid: Number(f[3] ?? NaN), home: f[5] || (user === "root" ? "/root" : `/home/${user}`) };
+}
+
+/** As root, the routine's user (to run their programs as them); otherwise null (already them). */
+function asUser(user) {
+  if (process.getuid?.() !== 0 || !user || user === "root") return null;
+  const a = account(user);
+  if (!Number.isInteger(a.uid) || !Number.isInteger(a.gid)) throw new Error(`no user ${user}`);
+  return a;
 }
 
 function expand(folder, user) {
@@ -308,8 +367,9 @@ function expand(folder, user) {
 }
 
 /** The environment Claude Code runs in: the runner's, without the computer's token. */
-function runEnv(cfg, extra = {}) {
-  const env = { ...process.env, ...extra };
+function runEnv(cfg, extra = {}, secrets = {}) {
+  const allowed = Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k)));
+  const env = { ...process.env, ...allowed, ...extra };
   delete env.AMBIENT_HOST_TOKEN;
   for (const k of Object.keys(env)) if (k.startsWith("CLAUDE_CODE_") || k === "CLAUDECODE") delete env[k];
   return env;
@@ -375,19 +435,22 @@ async function run(id) {
   // groups: the token stays in this process, which that user can't read.
   const drop = process.getuid?.() === 0 && user !== "root";
   const as = drop ? account(user) : null;
-  if (drop && (!Number.isInteger(as.uid) || !Number.isInteger(as.gid) || spawnSync("setpriv", ["--version"]).status !== 0)) {
+  if (drop && (!Number.isInteger(as.uid) || !Number.isInteger(as.gid) || spawnSync(sys("setpriv"), ["--version"]).status !== 0)) {
     await finish({ status: "failed", summary: `Can't run as ${user} on ${hostname()}: the account or setpriv (util-linux) is missing.` });
     process.exit(1);
   }
-  const child = spawn(drop ? "setpriv" : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
+  const child = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
     cwd: folder,
-    env: runEnv(cfg, {
-      ...secrets,
-      AMBIENT_ROUTINE_ID: routine.id,
-      AMBIENT_ROUTINE_NAME: routine.name,
-      AMBIENT_RUN_ID: runInfo.id,
-      ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}),
-    }),
+    env: runEnv(
+      cfg,
+      {
+        AMBIENT_ROUTINE_ID: routine.id,
+        AMBIENT_ROUTINE_NAME: routine.name,
+        AMBIENT_RUN_ID: runInfo.id,
+        ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}),
+      },
+      secrets,
+    ),
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.stdin.end(routine.prompt);
@@ -504,7 +567,7 @@ function findClaude(user) {
 /** Is Claude Code signed in for `user` (or is there an API key)? */
 function claudeSignedIn(claude, user, env) {
   if (env.ANTHROPIC_API_KEY) return true;
-  const r = spawnSync(claude, ["auth", "status"], { encoding: "utf8", timeout: 30_000, env: { ...env, HOME: home(user) }, uid: uidOf(user) });
+  const r = spawnSync(claude, ["auth", "status"], { encoding: "utf8", timeout: 30_000, env: { ...env, HOME: home(user) }, uid: uidOf(user), gid: gidOf(user) });
   try {
     return JSON.parse(r.stdout).loggedIn === true;
   } catch {
@@ -513,13 +576,13 @@ function claudeSignedIn(claude, user, env) {
 }
 
 function uidOf(user) {
-  const line = spawnSync("getent", ["passwd", user], { encoding: "utf8" }).stdout.trim();
+  const line = (spawnSync(sys("getent"), ["passwd", user], { encoding: "utf8" }).stdout ?? "").trim();
   const uid = Number(line.split(":")[2]);
   return Number.isInteger(uid) ? uid : undefined;
 }
 
 function gidOf(user) {
-  const line = spawnSync("getent", ["passwd", user], { encoding: "utf8" }).stdout.trim();
+  const line = (spawnSync(sys("getent"), ["passwd", user], { encoding: "utf8" }).stdout ?? "").trim();
   const gid = Number(line.split(":")[3]);
   return Number.isInteger(gid) ? gid : undefined;
 }
@@ -528,7 +591,10 @@ async function setup(args) {
   const code = args.find((a) => /^[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(a));
   if (!code) die("usage: sudo node ambient-runner.mjs setup <code> [--user <name>] [--path <dirs to put first on PATH>] [--server <url>]", 2);
   if (process.getuid?.() !== 0) die("Run setup with sudo: it installs systemd units.");
-  if (spawnSync("systemctl", ["--version"]).status !== 0) die("This computer has no systemd. Routines need Linux with systemd for now.");
+  if (spawnSync(sys("systemctl"), ["--version"]).status !== 0) die("This computer has no systemd. Routines need Linux with systemd for now.");
+  // systemd runs this Node as root every minute: someone who can change it would get root.
+  const unsafe = changeableByOthers(process.execPath);
+  if (unsafe) die(`${process.execPath} can be changed by ${unsafe}, and the runner runs it as root. Install Node for the whole system (owned by root, e.g. /usr/bin/node) and run setup with that one.`);
 
   const user = flag(args, "user") || process.env.SUDO_USER || "root";
   const uid = uidOf(user);

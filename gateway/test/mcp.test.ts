@@ -228,3 +228,29 @@ describe("revoking a token", () => {
     expect(left.map((t) => t.label)).not.toContain("Leaked laptop");
   });
 });
+
+describe("the failed sign-in limit on /mcp", () => {
+  it("counts only tokens nobody was given, not ones for another resource", async () => {
+    const own = await startStack();
+    try {
+      const lena = await signIn(own, "apple-lena", "Lena Vogel");
+      await appCall(own, lena.access_token, "POST", "/v1/app/teams/join", { code: INVITE });
+      const personal = String((await appCall(own, lena.access_token, "POST", "/v1/app/pats", { label: "Codex" })).json.token);
+      const team = String((await appCall(own, lena.access_token, "POST", "/v1/app/pats", { label: "Copilot", team: "acme" })).json.token);
+      const call = (token: string) =>
+        fetch(`${own.origin}/mcp`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+        });
+      // A real token used on the wrong resource, again and again: refused, never blocked.
+      for (let i = 0; i < 65; i++) expect((await call(team)).status).toBe(401);
+      expect((await call(personal)).status).toBe(200);
+      // Made-up tokens: after 60, this address waits, even with a good one.
+      for (let i = 0; i < 60; i++) expect((await call(`ambient_pat_madeup${i}`)).status).toBe(401);
+      expect((await call(personal)).status).toBe(429);
+    } finally {
+      own.close();
+    }
+  });
+});

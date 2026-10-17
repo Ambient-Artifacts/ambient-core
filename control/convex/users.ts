@@ -2,6 +2,7 @@ import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel.js";
 import { mutation, query, type MutationCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
+import { reserveSlug } from "./teams.js";
 
 /**
  * Who may make a new account on a server whose sign-ups aren't open (a self-hosted one): exact
@@ -233,6 +234,7 @@ export const beginDeletion = mutation({
         }
       }
       await ctx.db.delete(m._id);
+      await reserveSlug(ctx, m.teamId, uid, m.peopleSlug);
       if (team) teams.push({ slug: team.slug, outcome });
     }
     return { ok: true as const, teams };

@@ -49,7 +49,7 @@ afterAll(() => {
 describe("personal repo", () => {
   it("refuses http, private addresses and repos with other content", async () => {
     // Also loopback and cloud metadata written as IPv6 (URL parsing turns them into ::ffff:7f00:1 etc.).
-    for (const bad of ["http://github.com/x/y.git", "https://10.0.0.5/x.git", "https://127.0.0.1/x.git", "https://[::ffff:127.0.0.1]/x.git", "https://[::ffff:169.254.169.254]/x.git", "https://[::1]/x.git"]) {
+    for (const bad of ["http://github.com/x/y.git", "https://10.0.0.5/x.git", "https://127.0.0.1/x.git", "https://[::ffff:127.0.0.1]/x.git", "https://[::ffff:169.254.169.254]/x.git", "https://[::1]/x.git", "https://[2002:a9fe:a9fe::1]/x.git", "https://[64:ff9b::a9fe:a9fe]/x.git", "https://[fec0::1]/x.git"]) {
       const r = await appCall(s, token, "POST", "/v1/app/repo", { url: bad, token: "t" });
       expect(r.status, bad).toBe(400);
       expect(r.json.error).toBe("bad_url");

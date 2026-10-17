@@ -41,11 +41,12 @@ export const BOT_AUTHOR = { name: "Ambient Bot", email: "bot@ambient.invalid" };
 
 // Addresses git must never reach: private, loopback, link-local (cloud metadata), shared, reserved,
 // multicast. BlockList also matches IPv4 written as IPv6 (`::ffff:7f00:1` is 127.0.0.1), which
-// URL parsing produces from `[::ffff:127.0.0.1]`.
+// URL parsing produces from `[::ffff:127.0.0.1]`. The IPv6 ranges that carry IPv4 inside them on
+// networks that route them (6to4, Teredo, NAT64, IPv4-translated) and old site-local go too.
 const BLOCKED = (() => {
   const b = new BlockList();
   for (const [net, bits] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4]] as const) b.addSubnet(net, bits, "ipv4");
-  for (const [net, bits] of [["::", 96], ["::1", 128], ["64:ff9b::", 96], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["2001:db8::", 32]] as const) b.addSubnet(net, bits, "ipv6");
+  for (const [net, bits] of [["::", 96], ["::1", 128], ["::ffff:0:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["2001::", 32], ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8], ["2001:db8::", 32]] as const) b.addSubnet(net, bits, "ipv6");
   return b;
 })();
 const isPrivate = (ip: string) => BLOCKED.check(ip, isIP(ip) === 6 ? "ipv6" : "ipv4");

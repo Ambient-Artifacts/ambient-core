@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -372,6 +372,27 @@ describe("paths", () => {
     } finally {
       unlinkSync(join(dataDir, "wiki", "linked"));
       unlinkSync(join(dataDir, "wiki", "topics-leak.md"));
+      wiki.reload();
+    }
+  });
+
+  it("writes in a wiki with a folder whose name has two dots in it", async () => {
+    // A folder like this can come from the team's repo; "..", the path part, is what's refused.
+    mkdirSync(join(dataDir, "wiki", "projects", "v1..v2"), { recursive: true });
+    writeFileSync(join(dataDir, "wiki", "projects", "v1..v2", "plan.md"), "---\ntitle: Plan\ntype: project\n---\nThe plan.\n");
+    try {
+      wiki.reload();
+      const out = await wiki.write(async (put) => {
+        await put("topics/dots.md", "---\ntitle: Dots\ntype: topic\n---\nDots.\n");
+        return { message: "test: dots", result: {} };
+      });
+      expect(out.commit).toBeTruthy();
+      await expect(wiki.write(async (put) => {
+        await put("projects/../../escaped.md", "x");
+        return { message: "test: escape", result: {} };
+      })).rejects.toThrow(/bad path/);
+    } finally {
+      rmSync(join(dataDir, "wiki", "projects", "v1..v2"), { recursive: true, force: true });
       wiki.reload();
     }
   });

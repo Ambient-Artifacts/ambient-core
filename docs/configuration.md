@@ -21,14 +21,14 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 | `BRAIN_DIRECTORY_TTL_MS` | `60000` | How long membership is cached: a removed member loses access within this. |
 | `PORT` | `8080` | |
 | `BRAIN_LISTEN_HOST` | `127.0.0.1` | `0.0.0.0` in the Docker image. |
-| `BRAIN_TRUST_PROXY` | `loopback` | Which proxies' `X-Forwarded-For` to believe, in Express's [trust proxy](https://expressjs.com/en/guide/behind-proxies.html) syntax. The compose file sets `loopback, uniquelocal`. |
+| `BRAIN_TRUST_PROXY` | `loopback` | Which proxies' `X-Forwarded-For` to believe, in Express's [trust proxy](https://expressjs.com/en/guide/behind-proxies.html) syntax. The compose file sets `loopback, uniquelocal`. Every limit per address (sign-in, client registration, failed tokens) goes by the address this yields, so name only proxies that replace `X-Forwarded-For`, and don't put the gateway's own port on the internet: whoever could reach it directly could make up any address. |
 
 **Sign-in from the iPhone and Mac apps:**
 
 | Variable | |
 |---|---|
 | `BRAIN_APPLE_AUDIENCES` | Comma-separated bundle ids accepted from Sign in with Apple. The compose file defaults to the App Store apps' `si.ambientartifacts.brain`; `none` turns Apple sign-in off. |
-| `BRAIN_SIGNIN_NONCE` | `required`: Apple and Microsoft sign-ins must carry a nonce this server issued (`GET /v1/app/sign-in-nonce`), so an ID token the app gave some other server can't be replayed here. Turn it on once every app in use sends one (`BRAIN_MIN_APP_VERSION`); until then tokens without a nonce are taken, and a nonce from another server is always refused. |
+| `BRAIN_SIGNIN_NONCE` | `required`: Apple and Microsoft sign-ins must carry a nonce this server issued (`GET /v1/app/sign-in-nonce`), so an ID token the app gave some other server can't be replayed here. Turn it on once every app in use sends one (`BRAIN_MIN_APP_VERSION`); until then tokens without a nonce are taken, one of this server's nonces works once and only while it's valid, and an Apple token with another server's nonce is refused. A Microsoft token from an app before nonces carries the app's own nonce, which can't be told from another server's, so replays from other servers are only shut out once this is `required`. |
 | `BRAIN_SIGNUPS` | Who may make an account by signing in from the apps. Unset or `open`: anyone (Ambient Cloud); a server you run yourself outside the compose file should set it, since unset means open (the gateway says so in its log at start). `none` (the compose default): only people added with `admin user add`, matched by the email Apple confirms. Or a list of emails and domains, e.g. `@acme.com,anna@gmail.com`. New Microsoft accounts need `open`: Microsoft doesn't vouch for emails in every tenant. |
 | `BRAIN_ADMIN_CODES` | `true`: the AI-app sign-in page also says the server's admin hands out codes (`admin connect-code`). Set in the compose file. |
 | `BRAIN_APPLE_TEAM_ID`, `BRAIN_APPLE_KEY_ID`, `BRAIN_APPLE_PRIVATE_KEY`, `BRAIN_APPLE_CLIENT_ID` | A Sign in with Apple key, to revoke a deleted account's Apple token. The private key is the `.p8` text on one line with `\n` for newlines. |

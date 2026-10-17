@@ -51,4 +51,13 @@ describe("Sign in with Microsoft", () => {
     expect((await signIn({ idToken: await s.microsoftToken(TENANT, "x", { nonce: "nonce-one-1" }), nonce: "nonce-other-2" })).status).toBe(401);
     expect((await signIn({ idToken: "nope" })).status).toBe(400);
   });
+
+  it("takes this server's nonce once, also from an app that sends it next to the token", async () => {
+    const mine = String(((await (await fetch(`${s.origin}/v1/app/sign-in-nonce`)).json()) as { nonce: string }).nonce);
+    const token = await s.microsoftToken(TENANT, "oid-nonce", { nonce: mine });
+    expect((await signIn({ idToken: token, nonce: mine })).status).toBe(200);
+    // The same token again (replayed), with the nonce next to it as the old flow sends it: refused.
+    expect((await signIn({ idToken: token, nonce: mine })).status).toBe(401);
+    expect((await signIn({ idToken: token })).status).toBe(401);
+  });
 });

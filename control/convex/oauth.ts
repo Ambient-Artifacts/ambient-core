@@ -12,16 +12,23 @@ import { assertService, secretArg } from "./lib/service.js";
 
 type Row = { _id: Id<"oauth">; key: string; payload: string; expiresAt: number; consumedAt?: number; grantId?: string };
 
+/** A row from before the gateway sealed them: its payload is plain JSON. */
+const plain = (payload: string) => payload.startsWith("{");
+
+/**
+ * A row found by a raw id (`legacy…`) counts only if it's one of those old rows. A sealed row is
+ * keyed by an HMAC, so a raw id that matches its key (or its uid or user code) is someone handing
+ * in the stored value itself, read from a copy of this table: no client was ever given that.
+ */
+const legacyOnly = <T extends { payload: string }>(row: T | null): T | null => (row && plain(row.payload) ? row : null);
+
 async function byKey(ctx: QueryCtx, model: string, key: string, legacyKey?: string): Promise<Row | null> {
   const row = await ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", model).eq("key", key)).unique();
   if (row || !legacyKey) return row;
-  return ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", model).eq("key", legacyKey)).unique();
+  return legacyOnly(await ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", model).eq("key", legacyKey)).unique());
 }
 
 const live = (row: Row | null, now: number) => (row && row.expiresAt > now ? { key: row.key, payload: row.payload, consumedAt: row.consumedAt ?? null } : null);
-
-/** A row from before the gateway sealed them: its payload is plain JSON. */
-const plain = (payload: string) => payload.startsWith("{");
 
 export const upsert = mutation({
   args: {
@@ -45,7 +52,7 @@ export const upsert = mutation({
     else await ctx.db.insert("oauth", row);
     // The same record saved again (a session, a grant): the old plain row goes.
     if (legacyKey) {
-      const old = await ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", model).eq("key", legacyKey)).unique();
+      const old = legacyOnly(await ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", model).eq("key", legacyKey)).unique());
       if (old) await ctx.db.delete(old._id);
     }
   },
@@ -64,7 +71,7 @@ export const findByUid = query({
   handler: async (ctx, { secret, model, uid, legacyUid, now }) => {
     assertService(secret);
     let d = await ctx.db.query("oauth").withIndex("by_model_uid", (q) => q.eq("model", model).eq("uid", uid)).first();
-    if (!d && legacyUid) d = await ctx.db.query("oauth").withIndex("by_model_uid", (q) => q.eq("model", model).eq("uid", legacyUid)).first();
+    if (!d && legacyUid) d = legacyOnly(await ctx.db.query("oauth").withIndex("by_model_uid", (q) => q.eq("model", model).eq("uid", legacyUid)).first());
     return live(d, now);
   },
 });
@@ -74,7 +81,7 @@ export const findByUserCode = query({
   handler: async (ctx, { secret, model, userCode, legacyUserCode, now }) => {
     assertService(secret);
     let d = await ctx.db.query("oauth").withIndex("by_model_userCode", (q) => q.eq("model", model).eq("userCode", userCode)).first();
-    if (!d && legacyUserCode) d = await ctx.db.query("oauth").withIndex("by_model_userCode", (q) => q.eq("model", model).eq("userCode", legacyUserCode)).first();
+    if (!d && legacyUserCode) d = legacyOnly(await ctx.db.query("oauth").withIndex("by_model_userCode", (q) => q.eq("model", model).eq("userCode", legacyUserCode)).first());
     return live(d, now);
   },
 });
@@ -103,9 +110,11 @@ export const destroy = mutation({
   args: { ...secretArg, model: v.string(), key: v.string(), legacyKey: v.optional(v.string()) },
   handler: async (ctx, { secret, model, key, legacyKey }) => {
     assertService(secret);
-    for (const k of [key, ...(legacyKey ? [legacyKey] : [])]) {
-      const d = await ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", model).eq("key", k)).unique();
-      if (d) await ctx.db.delete(d._id);
+    const d = await byKey(ctx, model, key);
+    if (d) await ctx.db.delete(d._id);
+    if (legacyKey) {
+      const old = legacyOnly(await ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", model).eq("key", legacyKey)).unique());
+      if (old) await ctx.db.delete(old._id);
     }
   },
 });
@@ -126,11 +135,29 @@ export const listGrants = query({
   handler: async (ctx, { secret, accountId, now }) => {
     assertService(secret);
     const rows = await ctx.db.query("oauth").withIndex("by_model_account", (q) => q.eq("model", "Grant").eq("accountId", accountId)).collect();
-    return rows
+    const out = rows
       .filter((g) => g.expiresAt > now && g.clientId && g.clientId !== "ambient-app" && g.grantId)
       .map((g) => ({ grantId: g.grantId!, clientId: g.clientId!, since: g._creationTime }));
+    // Grants from before these columns: only their JSON says whose they are (a refresh doesn't
+    // save the grant again, so they stay like that until they expire).
+    for await (const g of ctx.db.query("oauth").withIndex("by_model_account", (q) => q.eq("model", "Grant").eq("accountId", undefined))) {
+      const old = legacyGrant(g);
+      if (old && g.expiresAt > now && old.accountId === accountId && old.clientId !== "ambient-app") out.push({ grantId: g.key, clientId: old.clientId, since: g._creationTime });
+    }
+    return out;
   },
 });
+
+/** Whose an old, plain Grant row is (keyed by the grant id itself). */
+function legacyGrant(row: { payload: string }): { accountId: string; clientId: string } | null {
+  if (!plain(row.payload)) return null;
+  try {
+    const p = JSON.parse(row.payload) as { accountId?: unknown; clientId?: unknown };
+    return typeof p.accountId === "string" && typeof p.clientId === "string" ? { accountId: p.accountId, clientId: p.clientId } : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Disconnect one AI app: everything of that grant goes, if it's the account's. */
 export const revokeGrant = mutation({
@@ -138,7 +165,16 @@ export const revokeGrant = mutation({
   handler: async (ctx, { secret, accountId, grantId }) => {
     assertService(secret);
     const rows = await ctx.db.query("oauth").withIndex("by_grant", (q) => q.eq("grantId", grantId)).collect();
-    const grant = rows.find((r) => r.model === "Grant");
+    let grant: { accountId?: string; clientId?: string } | undefined = rows.find((r) => r.model === "Grant");
+    if (!grant) {
+      // An old grant: its row is keyed by the grant id and only its JSON names the account.
+      const old = await ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", "Grant").eq("key", grantId)).unique();
+      const owner = old && legacyGrant(old);
+      if (old && owner) {
+        grant = owner;
+        rows.push(old);
+      }
+    }
     if (!grant || grant.accountId !== accountId || grant.clientId === "ambient-app") return { ok: false as const };
     for (const r of rows) await ctx.db.delete(r._id);
     return { ok: true as const };

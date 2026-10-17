@@ -3,6 +3,7 @@
 // picked up from its git head.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { UserRevisions } from "../src/revisions.ts";
+import { MAX_STREAMS } from "../src/app-api.ts";
 import { appCall, appHeaders, fixturePersonalOps, INVITE, signIn, startStack, type Stack } from "./helpers.ts";
 
 let s: Stack;
@@ -108,6 +109,20 @@ describe("revisions", () => {
     await streamB.close();
     await new Promise((r) => setTimeout(r, 100));
     expect(s.events.size).toBe(0);
+  });
+
+  it("close the oldest stream once an account has more than MAX_STREAMS open", async () => {
+    const u = await signIn(s, "apple-rev-4", "Many Tabs");
+    const open = async () =>
+      fetch(`${s.origin}/v1/app/events`, { headers: await appHeaders(u.access_token, "GET", `${s.origin}/v1/app/events`), signal: AbortSignal.timeout(10_000) });
+    const all = [];
+    for (let i = 0; i <= MAX_STREAMS; i++) all.push(await open());
+    const drained = async (res: Response) => {
+      const reader = res.body!.getReader();
+      for (;;) if ((await reader.read()).done) return true;
+    };
+    expect(await drained(all[0]!)).toBe(true);
+    for (const res of all.slice(1)) await res.body!.cancel();
   });
 
   it("refuse a stream without sign-in", async () => {

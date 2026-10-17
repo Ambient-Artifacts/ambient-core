@@ -12,7 +12,7 @@ import type { PatService } from "./auth/pats.ts";
 import { api, type Control } from "./control.ts";
 import { sha256Hex } from "./crypto.ts";
 import type { Directory } from "./directory.ts";
-import { limiter } from "./limiter.ts";
+import { addressKey, limiter } from "./limiter.ts";
 import { MAX_ABOUT, ME_PATH, writeAbout } from "./me.ts";
 import { appStores, meetingBrief, waitingOn } from "./briefs.ts";
 import { localDay, validZone } from "./digest.ts";
@@ -75,6 +75,9 @@ const PushDeviceBody = z.object({
 const BriefBody = z.object({ title: z.string().max(200).optional(), attendees: z.array(z.string().min(1).max(120)).min(1).max(20) });
 
 
+/** Live event streams one account can hold open at once (see /v1/app/events). */
+export const MAX_STREAMS = 8;
+
 export function appApiRouter(d: AppApiDeps): Router {
   const r = express.Router();
   // Sync batches may carry transcripts; the app splits batches well below this. Routes put `auth`
@@ -105,7 +108,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   const nonceLimit = limiter(60);
   r.get("/v1/app/sign-in-nonce", (req, res) => {
     res.set("Cache-Control", "no-store");
-    if (!nonceLimit(req.ip ?? "unknown")) {
+    if (!nonceLimit(addressKey(req.ip))) {
       res.status(429).json({ error: "slow_down" });
       return;
     }
@@ -139,10 +142,15 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.json({ revisions: await d.revisions.forUser(uidOf(res)) });
   });
 
+  // Live streams per account, oldest first: a few devices each, so past MAX_STREAMS the oldest
+  // closes (its app reconnects if it's still there). Each holds a socket and a timer for up to
+  // streamMaxMs, and the per-account rate limit alone would let one account keep thousands open.
+  const streams = new Map<string, (() => void)[]>();
   // The same, live, while the app is open: server-sent events, a `revisions` event at once and
   // another whenever something moves. Closed after `streamMaxMs`, and the app reconnects with a
   // fresh token; a comment every 25 s keeps proxies from closing an idle stream.
   r.get("/v1/app/events", auth, (req, res) => {
+    const uid = uidOf(res);
     res.status(200);
     res.set({
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -155,18 +163,30 @@ export function appApiRouter(d: AppApiDeps): Router {
       if (!res.writableEnded) res.write(chunk);
     };
     send("retry: 5000\n\n");
-    const stop = d.events.subscribe(uidOf(res), (revisions) => send(`event: revisions\ndata: ${JSON.stringify(revisions)}\n\n`));
+    const stop = d.events.subscribe(uid, (revisions) => send(`event: revisions\ndata: ${JSON.stringify(revisions)}\n\n`));
     const ping = setInterval(() => send(": ping\n\n"), 25_000);
+    let done = false;
     const finish = () => {
+      if (done) return;
+      done = true;
       clearInterval(ping);
       clearTimeout(end);
       stop();
+      const list = streams.get(uid);
+      const i = list?.indexOf(close) ?? -1;
+      if (list && i >= 0) list.splice(i, 1);
+      if (list?.length === 0) streams.delete(uid);
     };
-    const end = setTimeout(() => {
+    const close = () => {
       finish();
       res.end();
-    }, d.streamMaxMs ?? 10 * 60_000);
+    };
+    const end = setTimeout(close, d.streamMaxMs ?? 10 * 60_000);
     req.on("close", finish);
+    const list = streams.get(uid) ?? [];
+    list.push(close);
+    streams.set(uid, list);
+    while (list.length > MAX_STREAMS) list.shift()!();
   });
 
   r.get("/v1/app/me", auth, async (_req, res) => {
@@ -354,7 +374,8 @@ export function appApiRouter(d: AppApiDeps): Router {
   });
 
   // The AI apps connected over OAuth ("Disconnect any time in the app", the consent page says):
-  // disconnecting one ends its tokens at once.
+  // disconnecting one ends its grant and refresh tokens at once. An access token it already has is
+  // a signed JWT nothing stores, so it works until it expires (accessTokenTtl, an hour by default).
   r.get("/v1/app/connections", auth, async (_req, res) => {
     const grants = await d.control.q(api.oauth.listGrants, { accountId: uidOf(res), now: Date.now() });
     const connections = await Promise.all(
@@ -474,11 +495,18 @@ export function appApiRouter(d: AppApiDeps): Router {
     try {
       await d.teams.claim(made.server, { id: made.team.id, name: made.team.name });
     } catch (err) {
-      console.error(`[gateway] claiming pool server ${made.server.serverId} failed: ${(err as Error).message}`);
-      await d.control.m(api.teams.abandonCreate, { teamId: made.team.id as never });
-      d.directory.invalidate(uid);
-      res.status(503).json({ error: "team_unavailable", message: "The team's server didn't answer. Try again in a minute." });
-      return;
+      const claim = err instanceof TeamServerError ? err.claim : undefined;
+      console.error(`[gateway] claiming pool server ${made.server.serverId} failed (${claim ?? "error"}): ${(err as Error).message}`);
+      // It may have taken the claim before the answer was lost: keep the team, as when the server
+      // is slow to restart. Freeing it then would hand a server that now serves a deleted team to
+      // the next team, and every creation after would fail on it.
+      if (claim !== "uncertain") {
+        // A server that says it's taken stays out of the pool; one that surely didn't claim goes back.
+        await d.control.m(api.teams.abandonCreate, { teamId: made.team.id as never, release: claim !== "taken" });
+        d.directory.invalidate(uid);
+        res.status(503).json({ error: "team_unavailable", message: "The team's server didn't answer. Try again in a minute." });
+        return;
+      }
     }
     d.directory.invalidate(uid);
     // Best effort: the server restarts as the team's; notes queue on the phone until it's up.

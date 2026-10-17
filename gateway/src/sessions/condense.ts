@@ -273,20 +273,34 @@ export function normalizeRemote(url: string | null | undefined): string | null {
   return /^[a-z0-9.-]+\/[^\s]+$/.test(u) ? u : null;
 }
 
-/** Anything secret-shaped in free text, replaced. Errs on the side of removing too much. */
+/**
+ * Secrets in free text, replaced: known token formats, keys, credentials in URLs, headers and
+ * connection strings, and values next to a name that says secret, token, password or key. Errs on
+ * the side of removing too much, but it can't know every format: a bare random string with nothing
+ * around it stays (tool output and file contents, where most secrets are, never get here).
+ */
 export function redactSecrets(text: string): string {
   return text
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[private key removed]")
     .replace(
-      /\b(sk-ant-[A-Za-z0-9_-]{20,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|(?:ambient|brain)_pat_[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|phc_[A-Za-z0-9]{20,}|[sp]k-lf-[A-Za-z0-9-]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{30,})/g,
+      /\b(sk-ant-[A-Za-z0-9_-]{20,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{10,}|A[KS]IA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|GOCSPX-[A-Za-z0-9_-]{20,}|(?:ambient|brain)_pat_[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|phc_[A-Za-z0-9]{20,}|[sp]k-lf-[A-Za-z0-9-]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{30,}|hf_[A-Za-z0-9]{30,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|dop_v1_[a-f0-9]{40,}|shpat_[a-fA-F0-9]{32,})/g,
       "[secret]",
     )
+    .replace(/https:\/\/(?:hooks\.slack\.com\/services|discord(?:app)?\.com\/api\/webhooks|[a-z0-9-]+\.webhook\.office\.com)\/[^\s"'<>)]+/g, "[webhook URL]")
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "[token]")
     .replace(/(https?:\/\/)[^\s:@/]+:[^\s@/]+@/g, "$1[credentials]@")
     .replace(/(https?:\/\/)[^\s@/]{20,}@/g, "$1[credentials]@")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]+:[^\s@/]+@/gi, "$1[credentials]@")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/g, "$1[token]")
+    .replace(/(Basic\s+)[A-Za-z0-9+/=]{12,}/g, "$1[credentials]")
+    .replace(/\b((?:x-)?(?:api-key|auth-token|access-token|apikey)\s*:\s*)["']?[^\s"']{12,}["']?/gi, "$1[secret]")
+    .replace(/\b((?:AccountKey|SharedAccessKey|SharedAccessSignature|Password|Pwd)\s*=\s*)[^;\s"']{6,}/g, "$1[secret]")
+    .replace(/(--(?:password|passwd|token|api-key|apikey|secret|access-key|auth-token)(?:=|\s+))["']?[^\s"']{6,}["']?/gi, "$1[secret]")
+    .replace(/\b((?:mysql|mysqldump|mariadb|mysqladmin)\b[^\n]*?\s-p)[^\s"']{4,}/g, "$1[secret]")
     .replace(/\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY|DSN)[A-Z0-9_]*)(\s*[=:]\s*)(["']?)[^\s"']{8,}\3/g, "$1$2[secret]")
-    .replace(/(["']?(?:api[_-]?key|secret|token|password|client[_-]?secret|access[_-]?key)["']?\s*[:=]\s*["'])[^"'\s]{8,}(["'])/gi, "$1[secret]$2");
+    .replace(/(["']?(?:api[_-]?key|secret|token|password|client[_-]?secret|access[_-]?key)["']?\s*[:=]\s*["'])[^"'\s]{8,}(["'])/gi, "$1[secret]$2")
+    // Unquoted, any case, spaces around the sign: aws_secret_access_key = wJalr…
+    .replace(/\b([a-z0-9_.-]*(?:secret|token|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key)[a-z0-9_.-]*\s*[:=]\s*)(?!\[secret\])[A-Za-z0-9+/_.~-]{16,}={0,2}/gi, "$1[secret]");
 }
 
 function clock(at: string | null): string {

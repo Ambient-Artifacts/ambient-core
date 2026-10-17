@@ -105,6 +105,31 @@ describe("scrubbing secrets", () => {
     }
     expect(out).toContain("github.com/acme/repo");
   });
+
+  it("also removes unquoted keys, header and connection-string forms, flags and webhook URLs", () => {
+    // Built from parts, so no scanner mistakes these made-up values for real ones.
+    const j = (...p: string[]) => p.join("");
+    const text = [
+      j("aws_secret_access_key = ", "wJalrXUtnFEMI", "K7MDENGbPxRfiCYEXAMPLEKEY"),
+      j("X-Api-Key: ", "3f9a77c2d1e0", "4b5a8c9d0e1f2a3b"),
+      j("Authorization: Basic ", "bGVuYTpodW50ZXIy", "aHVudGVyMg=="),
+      j("DefaultEndpointsProtocol=https;AccountName=acme;AccountKey=", "c2VjcmV0c2VjcmV0", "c2VjcmV0;EndpointSuffix=core.windows.net"),
+      j("mysql -u admin -p", "Hunter2Pass", " acme_db"),
+      j("deploy --token ", "tok_9f8e7d6c", "5b4a3f2e"),
+      j("mongodb+srv://admin:", "S3cretPassw0rd", "@cluster0.example.net/app"),
+      j("https://hooks.slack.com/services/", "T0000000/B0000000/", "XXXXXXXXXXXXXXXXXXXXXXXX"),
+      j("SG.", "aaaaaaaaaaaaaaaaaaaa", ".", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+      j("GOCSPX-", "abcdefghijklmnopqrst", "uvwx"),
+    ].join("\n");
+    const out = redactSecrets(text);
+    for (const leaked of ["wJalrXUtnFEMI", "3f9a77c2d1e0", "bGVuYTpodW50ZXIy", "c2VjcmV0c2VjcmV0", "Hunter2Pass", "tok_9f8e7d6c", "S3cretPassw0rd", "T0000000", "aaaaaaaaaaaaaaaaaaaa", "abcdefghijklmnopqrst"]) {
+      expect(out, leaked).not.toContain(leaked);
+    }
+    expect(out).toContain("cluster0.example.net/app");
+    expect(out).toContain("acme_db");
+    // Ordinary code stays readable.
+    expect(redactSecrets("const tokens = countTokens(text);")).toBe("const tokens = countTokens(text);");
+  });
 });
 
 describe("which team a session goes to", () => {

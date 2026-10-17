@@ -35,7 +35,7 @@ A wiki is a folder of markdown files with YAML front matter: the same format for
 ## How notes get in
 
 - **The apps** record and transcribe on the device and compile the note there. A personal note syncs to the gateway; a team note goes to the team server's inbox through the gateway. Raw transcripts are stored encrypted for the owner and, for teams, under `raw/` outside git.
-- **Claude Code** (the plugin) uploads a finished session. The gateway cuts it down to prompts, answers and one line per action, removes anything that looks like a secret, keeps only that (encrypted) until Claude has written the note, then drops it. A session is split into working blocks at breaks of an hour or more. The user's folder and repo rules decide which blocks go to a team, after a 30-minute hold in which they can keep a block personal.
+- **Claude Code** (the plugin) uploads a finished session. The gateway cuts it down to prompts, answers and one line per action, removes secrets in the formats it knows (tokens, keys, credentials in URLs, headers and connection strings, values named secret, token, password or key), keeps only that (encrypted) until Claude has written the note, then drops it. A session is split into working blocks at breaks of an hour or more. The user's folder and repo rules decide which blocks go to a team, after a 30-minute hold in which they can keep a block personal.
 - **Any AI app** can call `save_note` (personal) and `log_work` (a summary of finished work, personal or team).
 - **A connected git repo**: edits made in a user's or team's own repo come back into the wiki.
 
