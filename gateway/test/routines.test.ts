@@ -391,6 +391,25 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     expect(readFileSync(join(dir, "systemctl.log"), "utf8")).toContain(`start --no-block ambient-routine-${routineId}.service`);
   });
 
+  it("an installed older runner replaces itself with the gateway's signed release", async () => {
+    const install = join(dir, "install");
+    mkdirSync(install, { recursive: true });
+    const installed = join(install, "ambient-runner.mjs");
+    writeFileSync(installed, readFileSync(RUNNER, "utf8").replace(/const VERSION = "[^"]+";/, 'const VERSION = "0.0.1";'));
+    const out = await new Promise<{ code: number | null; out: string }>((resolve) => {
+      const p = spawn(process.execPath, [installed, "sync"], { env: { ...env, AMBIENT_INSTALL_DIR: install } });
+      let text = "";
+      p.stdout.on("data", (d) => (text += d));
+      p.stderr.on("data", (d) => (text += d));
+      p.on("close", (code) => resolve({ code, out: text }));
+    });
+    expect(out.code, out.out).toBe(0);
+    const version = /const VERSION = "([^"]+)";/.exec(readFileSync(RUNNER, "utf8"))![1];
+    expect(out.out).toContain(`Updated the runner to ${version}`);
+    expect(readFileSync(installed, "utf8")).toContain(`const VERSION = "${version}";`);
+    expect(readdirSync(install)).toEqual(["ambient-runner.mjs"]);
+  });
+
   it("run feeds the prompt to claude -p in the routine's folder and reports the result", async () => {
     const out = await runner(["run", routineId]);
     expect(out.code, out.out).toBe(0);

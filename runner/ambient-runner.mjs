@@ -17,14 +17,14 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
 const CONFIG = join(CONFIG_DIR, "runner.env");
 /** Optional, written by whoever runs the computer: variables every run gets (a team server's ANTHROPIC_API_KEY). */
 const EXTRA = join(CONFIG_DIR, "extra.env");
-const INSTALL_DIR = "/opt/ambient-runner";
+const INSTALL_DIR = process.env.AMBIENT_INSTALL_DIR || "/opt/ambient-runner";
 const INSTALLED = join(INSTALL_DIR, "ambient-runner.mjs");
 const STATE_DIR = process.env.AMBIENT_STATE_DIR || "/var/lib/ambient-runner";
 const STATE = join(STATE_DIR, "state.json");
@@ -312,9 +312,14 @@ async function selfUpdate(cfg, latest) {
     log(`Not updating to ${theirs ?? "a release without a version"}: this runner is ${VERSION}.`);
     return;
   }
-  const tmp = `${INSTALLED}.new`;
+  // Ends in .mjs: Node refuses to check a file with another extension (".new" made every update
+  // fail its check, so runners up to 0.5.0 never replaced themselves).
+  const tmp = join(INSTALL_DIR, "ambient-runner.next.mjs");
   writeFileSync(tmp, source, { mode: 0o755 });
-  if (spawnSync(process.execPath, ["--check", tmp]).status !== 0) return rmSync(tmp, { force: true });
+  if (spawnSync(process.execPath, ["--check", tmp]).status !== 0) {
+    log(`Not updating to ${theirs}: it doesn't pass node --check here.`);
+    return rmSync(tmp, { force: true });
+  }
   renameSync(tmp, INSTALLED);
   log(`Updated the runner to ${latest.version}`);
 }
