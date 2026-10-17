@@ -70,6 +70,16 @@ function runShape(r: Doc<"routineRuns">) {
   };
 }
 
+/**
+ * Whether `uid` owns or administers `teamId` right now. Read here, for every team write: the
+ * gateway's view of roles is cached for up to a minute, and an admin who was just demoted or
+ * removed mustn't change what runs on the team's server in that minute.
+ */
+async function manages(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamId: Id<"teams">): Promise<boolean> {
+  const m = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid)).unique();
+  return !!m && (m.role === "owner" || m.role === "admin");
+}
+
 /** A routine the user may see (reads) or change (writes): theirs, or one of the given teams'. */
 async function routineFor(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamIds: Id<"teams">[], id: string) {
   const routineId = ctx.db.normalizeId("routines", id);
@@ -130,6 +140,7 @@ export const create = mutation({
   },
   handler: async (ctx, { secret, uid, teamId, hostId, now, ...fields }) => {
     assertService(secret);
+    if (teamId && !(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
     const count = teamId ? (await teamRoutines(ctx, teamId)).length : (await personalRoutines(ctx, uid)).length;
     if (count >= MAX_ROUTINES) return { ok: false as const, error: "too_many_routines" };
     let host: Doc<"routineHosts"> | null = null;
@@ -163,6 +174,7 @@ export const update = mutation({
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r) return { ok: false as const, error: "no_such_routine" };
+    if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     const patch: Partial<Doc<"routines">> = { updatedAt: now, source: fields.source };
     if (fields.name !== undefined) patch.name = fields.name;
     if (fields.promptIv !== undefined && fields.promptCt !== undefined) {
@@ -191,6 +203,7 @@ export const remove = mutation({
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r) return { ok: false as const, error: "no_such_routine" };
+    if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     const runs = await ctx.db.query("routineRuns").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(KEEP_RUNS * 4);
     for (const run of runs) await ctx.db.delete(run._id);
     await ctx.db.delete(r._id);
@@ -205,6 +218,7 @@ export const requestRun = mutation({
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r) return { ok: false as const, error: "no_such_routine" };
+    if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     if (r.teamId) {
       const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
       if (!server?.tokenHash) return { ok: false as const, error: "no_team_server" };
@@ -309,6 +323,7 @@ export const setSecret = mutation({
   args: { ...secretArg, uid: v.id("users"), teamId: v.optional(v.id("teams")), name: v.string(), valueIv: v.string(), valueCt: v.string(), now: v.number() },
   handler: async (ctx, { secret, uid, teamId, name, valueIv, valueCt, now }) => {
     assertService(secret);
+    if (teamId && !(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
     const rows = await secretRows(ctx, uid, teamId);
     const existing = rows.find((r) => r.name === name);
     if (existing) {
@@ -325,6 +340,7 @@ export const removeSecret = mutation({
   args: { ...secretArg, uid: v.id("users"), teamId: v.optional(v.id("teams")), name: v.string() },
   handler: async (ctx, { secret, uid, teamId, name }) => {
     assertService(secret);
+    if (teamId && !(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
     const row = (await secretRows(ctx, uid, teamId)).find((r) => r.name === name);
     if (!row) return { ok: false as const, error: "no_such_secret" };
     await ctx.db.delete(row._id);

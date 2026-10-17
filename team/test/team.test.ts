@@ -85,6 +85,15 @@ beforeAll(async () => {
 afterAll(() => close());
 
 describe("auth", () => {
+  it("says only that it's up, unless the gateway's health token asks for the details", async () => {
+    const open = (await (await fetch(`${base}/health`)).json()) as Record<string, unknown>;
+    expect(open).toEqual({ status: "ok", service: "brain-team", version: "test" });
+    const withToken = await fetch(`${base}/health`, { headers: { authorization: `Bearer ${await token("health")}` } });
+    expect(await withToken.json()).toHaveProperty("head");
+    const wrongPurpose = await fetch(`${base}/health`, { headers: { authorization: `Bearer ${await token("query")}` } });
+    expect(await wrongPurpose.json()).not.toHaveProperty("head");
+  });
+
   it("accepts only gateway tokens for this team and purpose", async () => {
     const q = { op: "recent" };
     expect((await post("/v1/query", q, "nope")).status).toBe(401);

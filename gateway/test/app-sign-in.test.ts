@@ -4,6 +4,9 @@
 // the pairing code or MCP, and a token is useless without its key.
 import { decodeJwt } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { randomBytes } from "node:crypto";
+import { SignInNonces } from "../src/auth/signin-nonce.ts";
+import { parseMasterKey } from "../src/crypto.ts";
 import { APP_CLIENT_ID, APP_REDIRECT_URI } from "../src/oauth/provider.ts";
 import {
   appCall,
@@ -160,5 +163,34 @@ describe("keeping the apps and AI apps apart", () => {
   it("the app can't ask for MCP", async () => {
     const res = await get(authorize(APP_CLIENT_ID, APP_REDIRECT_URI, `${s.origin}/mcp`, "personal:read"), new CookieJar());
     expect(new URL(res.headers.get("location")!).searchParams.get("error")).toBe("invalid_target");
+  });
+});
+
+describe("sign-in nonces (a token given to another server can't sign in here)", () => {
+  const nonce = async (stack: Stack) => String(((await (await fetch(`${stack.origin}/v1/app/sign-in-nonce`)).json()) as { nonce: string }).nonce);
+
+  it("takes this server's nonce once, and refuses another server's", async () => {
+    const mine = await nonce(s);
+    const first = await appSignIn(s, { apple: await s.appleToken("apple-nonce-1", "n1@example.com", { nonce: mine }), name: "Nina" });
+    expect(first.session).toBeDefined();
+    const again = await appSignIn(s, { apple: await s.appleToken("apple-nonce-1", "n1@example.com", { nonce: mine }), name: "Nina" });
+    expect(again.session).toBeUndefined();
+    expect(again.json).toMatchObject({ error: "invalid_nonce" });
+
+    const elsewhere = new SignInNonces(parseMasterKey("other", randomBytes(32).toString("base64"))).issue().nonce;
+    const replayed = await appSignIn(s, { apple: await s.appleToken("apple-nonce-1", "n1@example.com", { nonce: elsewhere }), name: "Nina" });
+    expect(replayed.json).toMatchObject({ error: "invalid_nonce" });
+  });
+
+  it("refuses a token without a nonce once the server requires them", async () => {
+    const strict = await startStack({ requireSignInNonce: true });
+    try {
+      const without = await appSignIn(strict, { apple: await strict.appleToken("apple-nonce-2", "n2@example.com"), name: "Noah" });
+      expect(without.json).toMatchObject({ error: "invalid_nonce", message: "Update Ambient to sign in." });
+      const withOne = await appSignIn(strict, { apple: await strict.appleToken("apple-nonce-2", "n2@example.com", { nonce: await nonce(strict) }), name: "Noah" });
+      expect(withOne.session).toBeDefined();
+    } finally {
+      strict.close();
+    }
   });
 });

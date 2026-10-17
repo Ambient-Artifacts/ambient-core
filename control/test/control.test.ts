@@ -277,3 +277,18 @@ describe("teams managed from the app", () => {
     expect(await t.query(api.teams.members, { secret, uid: cara, slug: "acme" })).toBeNull();
   });
 });
+
+describe("team routines and secrets", () => {
+  it("are changed only by someone who manages the team now, whatever the gateway passes", async () => {
+    const { t, uid } = await setup();
+    const teamId = await t.mutation(internal.teams.create, { slug: "crew", name: "Crew" });
+    await t.run(async (ctx) => ctx.db.insert("members", { teamId, userId: uid as never, role: "member", peopleSlug: "people/lena", joinedAt: 0 }));
+    const set = () => t.mutation(api.routines.setSecret, { secret, uid: uid as never, teamId, name: "TOKEN", valueIv: "iv", valueCt: "ct", now: 1 });
+    expect(await set()).toEqual({ ok: false, error: "admins_only" });
+    await t.run(async (ctx) => {
+      const m = await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).first();
+      await ctx.db.patch(m!._id, { role: "admin" });
+    });
+    expect(await set()).toEqual({ ok: true });
+  });
+});

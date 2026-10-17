@@ -26,5 +26,10 @@ app.listen(port, host, () => {
     config.microsoftClientIds?.length ? "Microsoft" : null,
   ].filter(Boolean);
   console.log(`[gateway] app sign-in: ${signIn.length ? signIn.join(", ") : "none (accounts and AI-app codes come from the admin CLI)"}`);
+  // Unset BRAIN_SIGNUPS means open: say so, so a server meant to be private doesn't stay open unnoticed.
+  if (signIn.length) {
+    console.log(`[gateway] new accounts: ${config.signups ? `only people the admin added${config.signups.allow.length ? ` or ${config.signups.allow.join(", ")}` : ""}` : "anyone who signs in (BRAIN_SIGNUPS unset or open)"}`);
+    console.log(`[gateway] sign-in nonces: ${config.requireSignInNonce ? "required" : "checked when the app sends one (BRAIN_SIGNIN_NONCE=required makes them mandatory)"}`);
+  }
   console.log(`[gateway] push notifications ${config.apns ? `on (APNs key ${config.apns.keyId}, topic ${config.apns.topic})` : "off: no APNs key in the env"}`);
 });

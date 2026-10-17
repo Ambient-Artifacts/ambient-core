@@ -59,7 +59,9 @@ export function convexAdapterFactory(control: Control, master: MasterKey) {
         legacyKey: id,
         payload: seal(model, key, JSON.stringify(payload)),
         expiresAt: expiresIn ? Date.now() + expiresIn * 1000 : NEVER,
-        grantId: payload.grantId,
+        // A grant's own row carries its id too, so it can be listed and revoked by it (a grant id
+        // isn't a credential: tokens name theirs).
+        grantId: payload.grantId ?? (model === "Grant" ? id : undefined),
         uid: payload.uid ? hash("uid", model, payload.uid) : undefined,
         userCode: payload.userCode ? hash("userCode", model, payload.userCode) : undefined,
         accountId: payload.accountId,

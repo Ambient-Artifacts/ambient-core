@@ -24,8 +24,13 @@ import type { SessionService } from "./sessions/service.ts";
 import type { EventHub, Revisions } from "./revisions.ts";
 import { TeamServerError, type TeamLink } from "./teams.ts";
 import type { CodeHasher } from "./auth/codes.ts";
+import type { SignInNonces } from "./auth/signin-nonce.ts";
 
 export interface AppApiDeps {
+  /** An AI app's name, by its client id (oidc-provider's registered clients). */
+  clientName?: (clientId: string) => Promise<string | undefined>;
+  /** Sign-in nonces for Apple and Microsoft (auth/signin-nonce.ts). */
+  signInNonces: SignInNonces;
   /** Invite codes are stored keyed (auth/codes.ts). */
   codes: CodeHasher;
   control: Control;
@@ -94,6 +99,18 @@ export function appApiRouter(d: AppApiDeps): Router {
   const uidOf = (res: Response) => res.locals.uid as string;
 
   // ---- launch config (no sign-in needed) ----
+
+  // A nonce for Sign in with Apple or Microsoft: the app puts it into the request, they sign it
+  // into the ID token, and this server's sign-in step takes only its own (auth/signin-nonce.ts).
+  const nonceLimit = limiter(60);
+  r.get("/v1/app/sign-in-nonce", (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!nonceLimit(req.ip ?? "unknown")) {
+      res.status(429).json({ error: "slow_down" });
+      return;
+    }
+    res.json(d.signInNonces.issue());
+  });
 
   // An app older than `minimumVersion` asks to be updated before it goes on (it can't keep in
   // step with the server any more).
@@ -330,6 +347,25 @@ export function appApiRouter(d: AppApiDeps): Router {
   r.delete("/v1/app/pats/:id", auth, async (req, res) => {
     const id = String(req.params.id);
     if (!/^[a-z0-9]{10,64}$/.test(id) || !(await d.pats.revoke(uidOf(res), id))) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    res.status(204).end();
+  });
+
+  // The AI apps connected over OAuth ("Disconnect any time in the app", the consent page says):
+  // disconnecting one ends its tokens at once.
+  r.get("/v1/app/connections", auth, async (_req, res) => {
+    const grants = await d.control.q(api.oauth.listGrants, { accountId: uidOf(res), now: Date.now() });
+    const connections = await Promise.all(
+      grants.map(async (g) => ({ id: g.grantId, clientId: g.clientId, name: (await d.clientName?.(g.clientId).catch(() => undefined)) ?? g.clientId, since: g.since })),
+    );
+    res.json({ connections });
+  });
+
+  r.delete("/v1/app/connections/:id", auth, async (req, res) => {
+    const id = String(req.params.id);
+    if (id.length > 200 || !(await d.control.m(api.oauth.revokeGrant, { accountId: uidOf(res), grantId: id })).ok) {
       res.status(404).json({ error: "not_found" });
       return;
     }
@@ -687,7 +723,8 @@ export function appApiRouter(d: AppApiDeps): Router {
   // A team wiki's own repo: any member sees the status; owners and admins connect it.
   const teamRepo = (method: "GET" | "POST" | "DELETE") => async (req: Request, res: Response) => {
     const uid = uidOf(res);
-    const team = await d.directory.membership(uid, String(req.params.slug));
+    // Changing the repo: the role as it is now, not as cached a minute ago.
+    const team = method === "GET" ? await d.directory.membership(uid, String(req.params.slug)) : await d.directory.freshMembership(uid, String(req.params.slug));
     if (!team || team.status !== "active") {
       res.status(403).json({ error: "not_a_member" });
       return;

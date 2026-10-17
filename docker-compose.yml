@@ -8,6 +8,9 @@ x-platform: &platform
   image: ${AMBIENT_IMAGE:-ambient-platform:local}
   build: .
   restart: unless-stopped
+  # Node services need no Linux capabilities (they listen above 1024) and never gain any.
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
 
 x-gateway-env: &gateway-env
   BRAIN_ORIGIN: ${BRAIN_ORIGIN}
@@ -45,6 +48,8 @@ x-team-env: &team-env
 
 services:
   convex:
+    networks: [backend]
+    security_opt: ["no-new-privileges:true"]
     image: ${CONVEX_BACKEND_IMAGE:-ghcr.io/convex/convex-backend:latest}
     restart: unless-stopped
     stop_grace_period: 10s
@@ -68,6 +73,7 @@ services:
 
   # Deploys the Convex functions and registers the team server; runs on every `up`, then exits.
   setup:
+    networks: [backend, teams]
     <<: *platform
     restart: "no"
     command: ["node", "ops/docker/setup.mjs"]
@@ -81,6 +87,7 @@ services:
         condition: service_healthy
 
   gateway:
+    networks: [backend, teams, edge]
     <<: *platform
     command: ["node", "--import", "tsx", "gateway/src/server.ts"]
     environment:
@@ -101,6 +108,7 @@ services:
 
   # Work-session notes, personal upkeep and repo sync, health checks (ops/docker/jobs.mjs).
   jobs:
+    networks: [backend, teams]
     <<: *platform
     command: ["node", "ops/docker/jobs.mjs", "gateway"]
     environment:
@@ -115,6 +123,7 @@ services:
   # One team's wiki. It waits in the pool until `admin team create` gives it a team, then
   # restarts as that team's server. Only the gateway can reach it.
   team:
+    networks: [teams]
     <<: *platform
     command: ["node", "--import", "tsx", "team/src/server.ts"]
     environment:
@@ -127,6 +136,7 @@ services:
         condition: service_completed_successfully
 
   team-jobs:
+    networks: [teams]
     <<: *platform
     command: ["node", "ops/docker/jobs.mjs", "team"]
     environment: *team-env
@@ -136,6 +146,10 @@ services:
       - team
 
   caddy:
+    networks: [edge]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
     image: caddy:2
     profiles: ["caddy"]
     restart: unless-stopped
@@ -154,6 +168,8 @@ services:
 
   # Convex's dashboard on http://127.0.0.1:6791 (sign in with CONVEX_SELF_HOSTED_ADMIN_KEY).
   dashboard:
+    networks: [backend]
+    security_opt: ["no-new-privileges:true"]
     image: ${CONVEX_DASHBOARD_IMAGE:-ghcr.io/convex/convex-dashboard:latest}
     profiles: ["dashboard"]
     restart: unless-stopped
@@ -164,6 +180,14 @@ services:
     depends_on:
       convex:
         condition: service_healthy
+
+# Who reaches whom: the database only from the gateway's side (team containers run the team's
+# Claude Code and connected repos, and never need it); team servers only from the gateway and its
+# jobs; Caddy only the gateway.
+networks:
+  backend:
+  teams:
+  edge:
 
 volumes:
   convex-data:

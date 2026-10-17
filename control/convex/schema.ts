@@ -242,6 +242,8 @@ export default defineSchema({
     teamId: v.id("teams"),
     userId: v.id("users"),
     at: v.number(),
+    /** Their people page in the team wiki: never handed to someone else who joins. */
+    peopleSlug: v.optional(v.string()),
   }).index("by_team_user", ["teamId", "userId"]),
 
   /** One-time codes the app shows so a user can approve an AI app (OAuth login). */

@@ -52,6 +52,12 @@ export interface GatewayConfig {
    * added with `admin user add`, matched by the email Apple confirms).
    */
   signups?: { allow: string[] };
+  /**
+   * Refuse Apple and Microsoft sign-ins whose ID token doesn't carry a nonce this server issued
+   * (auth/signin-nonce.ts). Off until every app in use sends one (set BRAIN_MIN_APP_VERSION to
+   * the first that does); until then a token without a nonce is still taken.
+   */
+  requireSignInNonce?: boolean;
 }
 
 export async function generateSigningKey(): Promise<JWK> {
@@ -111,6 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     microsoftClientIds: env.BRAIN_MICROSOFT_CLIENT_IDS?.split(",").map((s) => s.trim()).filter(Boolean),
     adminCodes: env.BRAIN_ADMIN_CODES === "true",
     signups: parseSignups(env.BRAIN_SIGNUPS),
+    requireSignInNonce: env.BRAIN_SIGNIN_NONCE === "required",
     apns:
       env.BRAIN_APNS_KEY_ID && env.BRAIN_APNS_PRIVATE_KEY
         ? {

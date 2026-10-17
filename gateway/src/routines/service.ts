@@ -238,11 +238,19 @@ export interface HostRoutine {
  * The runner script computers download, pointed at this gateway, and its hash (installed
  * runners replace themselves when it changes).
  */
-export function loadRunner(dir: string, origin: string): { version: string; sha256: string; source: string } | undefined {
+export function loadRunner(dir: string, origin: string): { version: string; sha256: string; signature?: string; source: string } | undefined {
   try {
     const source = readFileSync(join(dir, "ambient-runner.mjs"), "utf8").replace(/const DEFAULT_SERVER = "[^"]*";/, `const DEFAULT_SERVER = ${JSON.stringify(origin)};`);
     const version = /const VERSION = "([^"]+)"/.exec(source)?.[1] ?? "0";
-    return { version, sha256: createHash("sha256").update(source).digest("hex"), source };
+    // The release signature (ops/sign-runner.mjs): runners install an update only with it.
+    const signature = (() => {
+      try {
+        return readFileSync(join(dir, "ambient-runner.mjs.sig"), "utf8").trim() || undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    return { version, sha256: createHash("sha256").update(source).digest("hex"), signature, source };
   } catch {
     return undefined;
   }
@@ -258,7 +266,7 @@ export class RoutineService {
       /** Setup codes are stored keyed (auth/codes.ts). */
       codes: CodeHasher;
       origin: string;
-      runner?: { version: string; sha256: string };
+      runner?: { version: string; sha256: string; signature?: string };
       now?: () => number;
       /** Pushes to the owner's apps when a run fails (finishRun decides when it's news). */
       notifier?: Notifier;
@@ -565,7 +573,7 @@ export class RoutineService {
     return { token, computer: { id: String(out.host.id), name: out.host.name, team: Boolean(out.host.teamId) } };
   }
 
-  async sync(host: Host, info?: HostInfo): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string } }> {
+  async sync(host: Host, info?: HostInfo): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string } }> {
     const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info, now: this.now() });
     if (!out) throw new RoutineError("unauthorized", "This computer was removed.", 401);
     return {

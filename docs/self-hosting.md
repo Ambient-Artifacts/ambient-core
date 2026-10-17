@@ -269,20 +269,23 @@ services:
     extends: { file: docker-compose.yml, service: team }
     environment: { BRAIN_SERVER_ID: team-2 }
     volumes: [team-2-data:/data]
+    networks: [teams]
   team-2-jobs:
     extends: { file: docker-compose.yml, service: team-jobs }
     environment: { BRAIN_SERVER_ID: team-2 }
     volumes: [team-2-data:/data]
+    networks: [teams]
 volumes:
   team-2-data:
 ```
 
-Then `docker compose up -d` and `docker compose exec gateway admin server add team-2 http://team-2:8090`. The next `admin team create` claims it. A team server can also run on another machine. It only has to be reachable from the gateway. Start it with `node --import tsx team/src/server.ts` and the variables in [configuration.md](configuration.md#team-server), and register its URL the same way.
+Then `docker compose up -d` and `docker compose exec gateway admin server add team-2 http://team-2:8090`. The next `admin team create` claims it. A team server can also run on another machine. It only has to be reachable from the gateway: register an `https://` address (put Caddy or another proxy with TLS in front of it), and let only the gateway's address through its firewall, since notes, transcripts and the team repo's token cross that link. Start it with `node --import tsx team/src/server.ts` and the variables in [configuration.md](configuration.md#team-server), and register its URL the same way.
 
 ## Security notes
 
 - New accounts: only people you add, or whose emails `BRAIN_SIGNUPS` allows. Anyone else with the app and your server's address is turned away.
 - Only Caddy listens publicly (80 and 443). The gateway and Convex ports are bound to `127.0.0.1`, and the team server is reachable only on Docker's network.
+- Containers run without Linux capabilities and can't gain privileges (Caddy keeps only binding ports 80 and 443). Three Docker networks keep them apart: Convex is reachable from the gateway's side only, never from a team container (which runs the team's routines and connected repos); team servers from the gateway and its jobs; Caddy reaches only the gateway.
 - `.env` is written with mode 600. It holds the master key, the token signing key, and Convex's admin key, which can read and change everything in the database.
 - Personal pages are encrypted with a per-user data key before they reach Convex. Those keys are wrapped by `BRAIN_MASTER_KEY`, which only the gateway and its jobs get. Team wikis are plain git on the team server's volume, by design: they're meant to be read by the team's tools.
 - Tokens: OAuth access tokens are short-lived and bound to one MCP URL. Personal access tokens are stored as SHA-256 hashes. Team servers accept only 60-second tokens signed by the gateway.

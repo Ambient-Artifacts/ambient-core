@@ -81,10 +81,14 @@ export const joinWithInvite = mutation({
       .withIndex("by_team_user", (q) => q.eq("teamId", team._id).eq("userId", uid))
       .unique();
     if (existing) return { ok: true as const, team: shape(team, existing) };
-    // Keep people slugs unique inside a team (two "Anna Müller"s get -2).
+    // Keep people slugs unique inside a team (two "Anna Müller"s get -2), and never hand someone
+    // a removed member's page by renaming themselves after them (their own comes back to them).
     const taken = new Set(
       (await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", team._id)).collect()).map((m) => m.peopleSlug),
     );
+    for (const r of await ctx.db.query("removals").withIndex("by_team_user", (q) => q.eq("teamId", team._id)).collect()) {
+      if (r.peopleSlug && r.userId !== uid) taken.add(r.peopleSlug);
+    }
     let slug = peopleSlug;
     for (let i = 2; taken.has(slug); i++) slug = `${peopleSlug}-${i}`;
     const memberId = await ctx.db.insert("members", { teamId: team._id, userId: uid, role: invite.role, peopleSlug: slug, joinedAt: now });
@@ -202,11 +206,11 @@ export const createOwned = mutation({
 export const MAX_OWNED_TEAMS = 3;
 
 /** Note that `userId` was taken out of `teamId` now, so older invites can't bring them back. */
-export async function recordRemoval(ctx: MutationCtx, teamId: Id<"teams">, userId: Id<"users">): Promise<void> {
+export async function recordRemoval(ctx: MutationCtx, teamId: Id<"teams">, userId: Id<"users">, peopleSlug?: string): Promise<void> {
   const at = Date.now();
   const prior = await ctx.db.query("removals").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", userId)).unique();
-  if (prior) await ctx.db.patch(prior._id, { at });
-  else await ctx.db.insert("removals", { teamId, userId, at });
+  if (prior) await ctx.db.patch(prior._id, { at, ...(peopleSlug ? { peopleSlug } : {}) });
+  else await ctx.db.insert("removals", { teamId, userId, at, ...(peopleSlug ? { peopleSlug } : {}) });
 }
 
 /** Undo `createOwned` when the server couldn't be claimed: the team goes, the server is free again. */
@@ -267,7 +271,7 @@ export const removeMemberBy = mutation({
     if (!t) return { ok: true as const };
     if (t.role === "owner" || (t.role === "admin" && m.member.role !== "owner")) return { ok: false as const, error: "forbidden" };
     await ctx.db.delete(t._id);
-    await recordRemoval(ctx, m.team._id, target);
+    await recordRemoval(ctx, m.team._id, target, t.peopleSlug);
     return { ok: true as const };
   },
 });

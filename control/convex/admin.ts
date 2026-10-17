@@ -162,7 +162,7 @@ export const removeMember = mutation({
       if (owners.length === 1) return { ok: false as const, error: "last_owner" };
     }
     await ctx.db.delete(m._id);
-    await recordRemoval(ctx, team._id, uid);
+    await recordRemoval(ctx, team._id, uid, m.peopleSlug);
     return { ok: true as const, removed: true };
   },
 });

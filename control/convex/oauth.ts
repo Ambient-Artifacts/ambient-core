@@ -120,6 +120,31 @@ export const revokeByGrantId = mutation({
   },
 });
 
+/** The AI apps an account has connected (its grants, the Ambient apps' own sign-in left out). */
+export const listGrants = query({
+  args: { ...secretArg, accountId: v.string(), now: v.number() },
+  handler: async (ctx, { secret, accountId, now }) => {
+    assertService(secret);
+    const rows = await ctx.db.query("oauth").withIndex("by_model_account", (q) => q.eq("model", "Grant").eq("accountId", accountId)).collect();
+    return rows
+      .filter((g) => g.expiresAt > now && g.clientId && g.clientId !== "ambient-app" && g.grantId)
+      .map((g) => ({ grantId: g.grantId!, clientId: g.clientId!, since: g._creationTime }));
+  },
+});
+
+/** Disconnect one AI app: everything of that grant goes, if it's the account's. */
+export const revokeGrant = mutation({
+  args: { ...secretArg, accountId: v.string(), grantId: v.string() },
+  handler: async (ctx, { secret, accountId, grantId }) => {
+    assertService(secret);
+    const rows = await ctx.db.query("oauth").withIndex("by_grant", (q) => q.eq("grantId", grantId)).collect();
+    const grant = rows.find((r) => r.model === "Grant");
+    if (!grant || grant.accountId !== accountId || grant.clientId === "ambient-app") return { ok: false as const };
+    for (const r of rows) await ctx.db.delete(r._id);
+    return { ok: true as const };
+  },
+});
+
 /** An account's AI-app connections (grants, sessions, tokens, codes), when the account is deleted. */
 export const destroyByAccount = mutation({
   args: { ...secretArg, accountId: v.string() },

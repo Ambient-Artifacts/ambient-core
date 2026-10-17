@@ -59,4 +59,10 @@ export class Directory {
   async membership(uid: string, slug: string): Promise<Team | undefined> {
     return (await this.teamsOf(uid)).find((t) => t.slug === slug);
   }
+
+  /** As membership, read from Convex now (and cached again): for writes a just-demoted admin mustn't make. */
+  async freshMembership(uid: string, slug: string): Promise<Team | undefined> {
+    this.cache.delete(`teams:${uid}`);
+    return this.membership(uid, slug);
+  }
 }

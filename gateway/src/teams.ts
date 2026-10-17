@@ -32,7 +32,7 @@ export class TeamLink {
     this.keyPromise = importJWK(signingKey, "ES256");
   }
 
-  async token(team: Team, purpose: "query" | "inbox" | "repo", subject?: string, extra: Record<string, string> = {}): Promise<string> {
+  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "health", subject?: string, extra: Record<string, string> = {}): Promise<string> {
     return new SignJWT({ ...extra, purpose, team_slug: team.slug })
       .setProtectedHeader({ alg: "ES256", kid: this.kid, typ: TEAM_TOKEN_TYP })
       .setIssuer(this.issuer)

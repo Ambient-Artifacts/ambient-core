@@ -89,6 +89,7 @@ if (cmd === "personal") {
     gatewayUrl: process.env.BRAIN_HEALTH_GATEWAY_URL || `http://127.0.0.1:${process.env.PORT ?? 8080}`,
     now,
     unit: systemdUnit,
+    teamToken: (team) => new TeamLink(config.origin, config.signingKeys[0]!, fetch).token(team, "health"),
   });
   const out = alerts(await loadState(stateFile), problems, now, flags.includes("--daily"), summary);
   for (const m of out.messages) await post(process.env.BRAIN_ALERT_WEBHOOK, m).catch((err) => console.error(`alert failed: ${(err as Error).message}`));
