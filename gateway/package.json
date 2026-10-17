@@ -25,6 +25,6 @@
     "@brain/team": "*",
     "@types/express": "^5.0.6",
     "@types/oidc-provider": "^9.12.1",
-    "convex-test": "^0.0.60"
+    "convex-test": "^0.0.61"
   }
 }
