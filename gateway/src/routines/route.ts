@@ -4,7 +4,7 @@ import express, { type NextFunction, type Request, type RequestHandler, type Res
 import { z } from "zod";
 import type { Directory } from "../directory.ts";
 import { HostInfo, RoutineError, RoutineInput, RoutinePatch, RunProgress, RunResult, SecretName, SecretValue, type Actor, type Host, type RoutineService } from "./service.ts";
-import { limiter } from "../limiter.ts";
+import { addressKey, limiter } from "../limiter.ts";
 
 function fail(res: Response, err: unknown) {
   if (err instanceof RoutineError) {
@@ -175,7 +175,7 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
   const hostOf = (res: Response) => res.locals.host as Host;
 
   r.post("/v1/host/setup", json, async (req, res) => {
-    if (!perSetupAddress(req.ip ?? "?")) {
+    if (!perSetupAddress(addressKey(req.ip))) {
       res.status(429).json({ error: "slow_down" });
       return;
     }
@@ -188,7 +188,7 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
     }
   });
 
-  r.post("/v1/host/sync", json, host, async (req, res) => {
+  r.post("/v1/host/sync", host, json, async (req, res) => {
     const info = HostInfo.safeParse(req.body?.info);
     try {
       res.json(await d.routines.sync(hostOf(res), info.success ? info.data : undefined));
@@ -205,7 +205,7 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
     }
   });
 
-  r.post("/v1/host/runs/:runId", json, host, async (req, res) => {
+  r.post("/v1/host/runs/:runId", host, json, async (req, res) => {
     const body = RunResult.safeParse(req.body);
     if (!body.success) return badRequest(res, body.error);
     try {
@@ -216,7 +216,7 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
     }
   });
 
-  r.patch("/v1/host/runs/:runId", json, host, async (req, res) => {
+  r.patch("/v1/host/runs/:runId", host, json, async (req, res) => {
     const body = RunProgress.safeParse(req.body);
     if (!body.success) return badRequest(res, body.error);
     try {

@@ -25,6 +25,12 @@ export class AuthError extends Error {
     readonly status: 401 | 403,
     readonly code: "invalid_token" | "insufficient_scope" | "invalid_request",
     message: string,
+    /**
+     * A token nobody was given (a made-up PAT, a bad signature): what the failed-auth limiter
+     * counts. An expired token is the normal first step of a refresh, and AI apps like claude.ai
+     * share addresses, so counting those would lock everyone behind one address out.
+     */
+    readonly strike = false,
   ) {
     super(message);
   }
@@ -66,7 +72,7 @@ export function createBearerVerifier(opts: { issuer: string; signingKeys: JWK[];
 
     if (scheme === "bearer" && (token.startsWith(PAT_PREFIX) || token.startsWith(LEGACY_PAT_PREFIX))) {
       const pat = await opts.pats.find(token);
-      if (!pat) throw new AuthError(401, "invalid_token", "unknown or revoked token");
+      if (!pat) throw new AuthError(401, "invalid_token", "unknown or revoked token", true);
       const team = target.teamSlug ? await opts.directory.teamBySlug(target.teamSlug) : undefined;
       const resourceOk =
         pat.resource.kind === "personal" ? target.teamSlug === null : team !== undefined && pat.resource.teamId === team.id;
@@ -86,8 +92,9 @@ export function createBearerVerifier(opts: { issuer: string; signingKeys: JWK[];
         scopes = new Set(String(payload.scope ?? "").split(" ").filter(Boolean));
         clientId = typeof payload.client_id === "string" ? payload.client_id : undefined;
         via = "oauth";
-      } catch {
-        throw new AuthError(401, "invalid_token", "invalid, expired or wrong-audience token");
+      } catch (err) {
+        const expired = (err as { code?: unknown }).code === "ERR_JWT_EXPIRED";
+        throw new AuthError(401, "invalid_token", "invalid, expired or wrong-audience token", !expired);
       }
     }
 

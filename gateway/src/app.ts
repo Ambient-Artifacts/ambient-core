@@ -4,7 +4,7 @@ import type Provider from "oidc-provider";
 import { appApiRouter } from "./app-api.ts";
 import { appleRevoker, type AppleRevoker } from "./auth/apple-revoke.ts";
 import { joinRouter } from "./join.ts";
-import { limiter } from "./limiter.ts";
+import { addressKey, limiter } from "./limiter.ts";
 import { CodeHasher } from "./auth/codes.ts";
 import { SignInNonces } from "./auth/signin-nonce.ts";
 import { appAccess } from "./auth/app-access.ts";
@@ -14,7 +14,7 @@ import { createBearerVerifier } from "./auth/bearer.ts";
 import { Pairing } from "./auth/pairing.ts";
 import { PatService } from "./auth/pats.ts";
 import type { GatewayConfig } from "./config.ts";
-import { Control, type ConvexCaller } from "./control.ts";
+import { api, Control, type ConvexCaller } from "./control.ts";
 import { Directory } from "./directory.ts";
 import type { ReaderSource } from "./mcp/tools.ts";
 import { contextRouter } from "./context/route.ts";
@@ -60,7 +60,7 @@ export function createApp(deps: AppDeps) {
   const directory = new Directory(control, config.directoryTtlMs);
   const pats = new PatService(control);
   const codeHasher = new CodeHasher(config.masterKey);
-  const signInNonces = new SignInNonces(config.masterKey);
+  const signInNonces = new SignInNonces(config.masterKey, async (key, expiresAt) => (await control.m(api.oauth.useOnce, { model: "SignInNonce", key, expiresAt })).first);
   const pairing = new Pairing(control, codeHasher);
   const personal = new PersonalStore(control, config.masterKey);
   const repos = new PersonalRepos(control, personal, { allowFile: config.allowFileRepos });
@@ -149,8 +149,8 @@ export function createApp(deps: AppDeps) {
   const registrations = limiter(20);
   const authorizations = limiter(300);
   const tooMany = (res: Response) => res.status(429).json({ error: "rate_limited", error_description: "Too many requests. Try again in a minute." });
-  app.post("/oauth/register", (req, res, next) => (registrations(req.ip ?? "unknown") ? next() : tooMany(res)));
-  app.use(["/oauth/authorize", "/oauth/par"], (req, res, next) => (authorizations(req.ip ?? "unknown") ? next() : tooMany(res)));
+  app.post("/oauth/register", (req, res, next) => (registrations(addressKey(req.ip)) ? next() : tooMany(res)));
+  app.use(["/oauth/authorize", "/oauth/par"], (req, res, next) => (authorizations(addressKey(req.ip)) ? next() : tooMany(res)));
 
   // Everything else (/.well-known/openid-configuration, /oauth/*) is the provider.
   app.use(provider.callback());

@@ -84,11 +84,17 @@ export type RoutineInput = z.infer<typeof RoutineInput>;
 export const RoutinePatch = RoutineInput.omit({ team: true }).partial();
 export type RoutinePatch = z.infer<typeof RoutinePatch>;
 
-const RESERVED = /^(PATH|HOME|USER|LOGNAME|SHELL|PWD|TMPDIR|TERM|LANG|NODE_OPTIONS|CLAUDE_CONFIG_DIR|AMBIENT_.*|LD_.*|CLAUDE_CODE_.*)$/;
+/**
+ * Names a secret can't have: what the computer sets itself, and variables that change how Claude
+ * Code, git, a shell, a language runtime or the network behave without the prompt asking (where
+ * the model is, a proxy, a git hook, a library to preload). The runner drops them too.
+ */
+export const RESERVED_ENV =
+  /^(PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|TMPDIR|TMP|TEMP|TERM|LANG|LANGUAGE|LC_.*|IFS|ENV|BASH_ENV|BASH_FUNC_.*|PS4|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|EDITOR|VISUAL|PAGER|MANPAGER|GIT_.*|SSH_.*|GNUPGHOME|ANTHROPIC_.*|CLAUDE.*|AMBIENT_.*|LD_.*|DYLD_.*|NODE_.*|NPM_CONFIG_.*|YARN_.*|PYTHON.*|PIP_.*|PERL.*|RUBY.*|GEM_.*|BUNDLE_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_PROXY|SSL_.*|CURL_.*|OPENSSL_.*|REQUESTS_CA_BUNDLE|XDG_.*|DOCKER_HOST)$/;
 export const SecretName = z
   .string()
   .regex(/^[A-Z_][A-Z0-9_]{0,63}$/, "capital letters, digits and _, like GITHUB_TOKEN")
-  .refine((n) => !RESERVED.test(n), "that name is used by the computer itself");
+  .refine((n) => !RESERVED_ENV.test(n), "that name is used by the computer itself, or changes how its tools behave");
 export const SecretValue = z.string().min(1).max(10_000);
 
 export const HostInfo = z.object({
@@ -514,11 +520,22 @@ export class RoutineService {
     return this.d.control.q(api.routines.secretNames, { uid: actor.uid as never, teamId: teamId as never });
   }
 
-  async setSecret(actor: Actor, team: string | null | undefined, name: string, value: string): Promise<void> {
+  /** `pauseLoops` (an AI app set it): the owner's loops that are on pause; their names come back. */
+  async setSecret(actor: Actor, team: string | null | undefined, name: string, value: string, opts: { pauseLoops?: boolean; source?: string } = {}): Promise<{ paused: string[] }> {
     const { owner, teamId } = this.secretOwner(actor, team, true);
     const sealed = await this.d.keys.seal(owner, `routine:secret:${name}`, value);
-    const out = await this.d.control.m(api.routines.setSecret, { uid: actor.uid as never, teamId: teamId as never, name, valueIv: sealed.iv, valueCt: sealed.ciphertext, now: this.now() });
+    const out = await this.d.control.m(api.routines.setSecret, {
+      uid: actor.uid as never,
+      teamId: teamId as never,
+      name,
+      valueIv: sealed.iv,
+      valueCt: sealed.ciphertext,
+      pauseLoops: opts.pauseLoops,
+      source: opts.source,
+      now: this.now(),
+    });
     if (!out.ok) throw refused(out.error);
+    return { paused: out.paused };
   }
 
   async removeSecret(actor: Actor, team: string | null | undefined, name: string): Promise<void> {
@@ -599,7 +616,8 @@ export class RoutineService {
     const r = out.routine as unknown as RoutineRow;
     const owner = this.ownerOf(r);
     const env: Record<string, string> = {};
-    for (const s of out.secrets) env[s.name] = await this.d.keys.open(owner, `routine:secret:${s.name}`, s.iv, s.ct);
+    // Secrets stored before a name was reserved don't go out either.
+    for (const s of out.secrets) if (!RESERVED_ENV.test(s.name)) env[s.name] = await this.d.keys.open(owner, `routine:secret:${s.name}`, s.iv, s.ct);
     return {
       run: { id: String(out.runId), trigger: out.trigger },
       routine: { id: r.id, name: r.name, prompt: await this.d.keys.open(owner, "routine:prompt", r.promptIv, r.promptCt), folder: r.folder },

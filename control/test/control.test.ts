@@ -45,6 +45,19 @@ describe("AI app connected", () => {
     await t.mutation(api.oauth.upsert, { secret, model: "Grant", key: "g2", payload: JSON.stringify({ accountId: other!.uid, clientId: "claude-abc" }), expiresAt: 9e15 });
     expect(await t.mutation(api.users.checkAppConnected, { secret, uid: other!.uid, now: 4 })).toEqual({ connected: true });
   });
+
+  it("lists and disconnects an AI app connected before grants had columns of their own", async () => {
+    const { t, uid } = await setup();
+    // As the old adapter wrote them: the grant keyed by its id, its tokens carrying the grant id.
+    await t.mutation(api.oauth.upsert, { secret, model: "Grant", key: "old-grant", payload: JSON.stringify({ accountId: uid, clientId: "claude-old" }), expiresAt: 9e15 });
+    await t.mutation(api.oauth.upsert, { secret, model: "RefreshToken", key: "old-refresh", payload: JSON.stringify({ accountId: uid, grantId: "old-grant" }), expiresAt: 9e15, grantId: "old-grant" });
+    expect(await t.query(api.oauth.listGrants, { secret, accountId: uid, now: 1 })).toMatchObject([{ grantId: "old-grant", clientId: "claude-old" }]);
+    const stranger = await t.mutation(api.users.upsertApple, { secret, appleSub: "apple-x", name: "X", now: 1 });
+    expect(await t.mutation(api.oauth.revokeGrant, { secret, accountId: stranger!.uid, grantId: "old-grant" })).toEqual({ ok: false });
+    expect(await t.mutation(api.oauth.revokeGrant, { secret, accountId: uid, grantId: "old-grant" })).toEqual({ ok: true });
+    expect(await t.query(api.oauth.listGrants, { secret, accountId: uid, now: 1 })).toEqual([]);
+    expect(await t.query(api.oauth.find, { secret, model: "RefreshToken", key: "old-refresh", now: 1 })).toBeNull();
+  });
 });
 
 describe("OAuth storage", () => {
@@ -151,6 +164,17 @@ describe("oauth storage", () => {
     expect(await t.query(api.oauth.find, { secret, model: "Session", key: "h1:s", now: 1 })).toMatchObject({ payload: "v1.z" });
     expect((await t.mutation(api.oauth.destroyByAccount, { secret, accountId: "u1" })).removed).toBe(1);
   });
+
+  it("never takes a sealed row's stored key, uid or user code as a raw id", async () => {
+    const { t } = await setup();
+    await t.mutation(api.oauth.upsert, { secret, model: "RefreshToken", key: "h1:r9", payload: "v1.x", expiresAt: 10_000, uid: "h1:u9", userCode: "h1:c9" });
+    expect(await t.query(api.oauth.find, { secret, model: "RefreshToken", key: "h1:of-h1:r9", legacyKey: "h1:r9", now: 1 })).toBeNull();
+    expect(await t.query(api.oauth.findByUid, { secret, model: "RefreshToken", uid: "h1:of-h1:u9", legacyUid: "h1:u9", now: 1 })).toBeNull();
+    expect(await t.query(api.oauth.findByUserCode, { secret, model: "RefreshToken", userCode: "h1:of-h1:c9", legacyUserCode: "h1:c9", now: 1 })).toBeNull();
+    expect(await t.mutation(api.oauth.consume, { secret, model: "RefreshToken", key: "h1:of-h1:r9", legacyKey: "h1:r9", now: 1 })).toEqual({ reused: false });
+    await t.mutation(api.oauth.destroy, { secret, model: "RefreshToken", key: "h1:of-h1:r9", legacyKey: "h1:r9" });
+    expect(await t.query(api.oauth.find, { secret, model: "RefreshToken", key: "h1:r9", now: 1 })).toEqual({ key: "h1:r9", payload: "v1.x", consumedAt: null });
+  });
 });
 
 describe("server writes, two-way sync and the personal worker", () => {
@@ -247,6 +271,17 @@ describe("teams managed from the app", () => {
     expect(await t.query(api.teams.ofUser, { secret, uid })).toEqual([]);
   });
 
+  it("keeps a server that says it's taken out of the pool, so it can't jam the next team", async () => {
+    const { t, uid } = await setup();
+    await t.mutation(internal.teams.registerServer, { serverId: "srv-1", url: "https://t-pool-1.example.com" });
+    const made = await t.mutation(api.teams.createOwned, { secret, uid, name: "Acme", peopleSlug: "people/lena-vogel", now: 2 });
+    if (!made.ok) throw new Error("not created");
+    await t.mutation(api.teams.abandonCreate, { secret, teamId: made.team.id, release: false });
+    expect(await t.query(api.teams.freeServers, { secret })).toHaveLength(0);
+    expect(await t.query(api.teams.ofUser, { secret, uid })).toEqual([]);
+    expect(await t.mutation(api.teams.createOwned, { secret, uid, name: "Acme", peopleSlug: "people/lena-vogel", now: 3 })).toEqual({ ok: false, error: "no_server" });
+  });
+
   it("lets owners and admins invite and remove, and only the owner change roles", async () => {
     const { t, uid: owner } = await setup();
     await t.mutation(internal.teams.registerServer, { serverId: "srv-1", url: "https://t-pool-1.example.com" });
@@ -269,12 +304,53 @@ describe("teams managed from the app", () => {
     expect(await t.mutation(api.teams.setRole, { secret, uid: ben, slug: "acme", target: cara, role: "admin" })).toEqual({ ok: false, error: "forbidden" });
     expect(await t.mutation(api.teams.setRole, { secret, uid: owner, slug: "acme", target: ben, role: "admin" })).toEqual({ ok: true });
     expect(await t.mutation(api.teams.removeMemberBy, { secret, uid: ben, slug: "acme", target: owner })).toEqual({ ok: false, error: "forbidden" });
-    expect(await t.mutation(api.teams.removeMemberBy, { secret, uid: ben, slug: "acme", target: cara })).toEqual({ ok: true });
+    expect(await t.mutation(api.teams.removeMemberBy, { secret, uid: ben, slug: "acme", target: cara })).toEqual({ ok: true, invitesEnded: 0 });
     // The owner can't leave; others can.
     expect(await t.mutation(api.teams.leaveBySlug, { secret, uid: owner, slug: "acme" })).toEqual({ ok: false, error: "owner_cannot_leave" });
     expect(await t.mutation(api.teams.leaveBySlug, { secret, uid: ben, slug: "acme" })).toEqual({ ok: true });
     expect((await t.query(api.teams.members, { secret, uid: owner, slug: "acme" }))!.map((m) => m.name)).toEqual(["Lena Vogel"]);
     expect(await t.query(api.teams.members, { secret, uid: cara, slug: "acme" })).toBeNull();
+  });
+
+  it("lets nobody back in on invites from before a removal, or from someone who no longer manages the team", async () => {
+    const { t, uid: owner } = await setup();
+    await t.mutation(internal.teams.registerServer, { serverId: "srv-1", url: "https://t-pool-1.example.com" });
+    const now = Date.now();
+    await t.mutation(api.teams.createOwned, { secret, uid: owner, name: "Acme", peopleSlug: "people/lena-vogel", now });
+    const account = async (sub: string) => (await t.mutation(api.users.upsertApple, { secret, appleSub: sub, name: sub, now }))!.uid;
+    const invite = (uid: unknown, codeHash: string) => t.mutation(api.teams.invite, { secret, uid: uid as never, slug: "acme", codeHash, uses: 10, days: 7, now });
+    const join = (uid: unknown, codeHash: string, peopleSlug = "people/x") => t.mutation(api.teams.joinWithInvite, { secret, uid: uid as never, codeHash, peopleSlug, now: now + 1 });
+    const ben = await account("ben");
+    await invite(owner, "o1");
+    expect((await join(ben, "o1", "people/ben")).ok).toBe(true);
+    await t.mutation(api.teams.setRole, { secret, uid: owner, slug: "acme", target: ben, role: "admin" });
+    await invite(ben, "b1");
+
+    // Ben is removed: his own codes and the owner's older one are ended, for any account of his.
+    expect(await t.mutation(api.teams.removeMemberBy, { secret, uid: owner, slug: "acme", target: ben })).toEqual({ ok: true, invitesEnded: 2 });
+    const ben2 = await account("ben-second-account");
+    expect(await join(ben2, "b1")).toEqual({ ok: false, error: "invalid_code" });
+    expect(await join(ben2, "o1")).toEqual({ ok: false, error: "invalid_code" });
+    await new Promise((r) => setTimeout(r, 5));
+    await invite(owner, "o2");
+    expect((await join(ben2, "o2")).ok).toBe(true);
+
+    // An admin's code stops working once they aren't one.
+    const cara = await account("cara");
+    expect((await join(cara, "o2", "people/cara")).ok).toBe(true);
+    await t.mutation(api.teams.setRole, { secret, uid: owner, slug: "acme", target: cara, role: "admin" });
+    await invite(cara, "c1");
+    await t.mutation(api.teams.setRole, { secret, uid: owner, slug: "acme", target: cara, role: "member" });
+    expect(await join(await account("dan"), "c1")).toEqual({ ok: false, error: "invalid_code" });
+
+    // Someone who leaves keeps their people page: a later "Cara" gets another one.
+    await t.mutation(api.teams.leaveBySlug, { secret, uid: cara, slug: "acme" });
+    const other = await account("another-cara");
+    const joined = await join(other, "o2", "people/cara");
+    expect(joined.ok && joined.team.peopleSlug).toBe("people/cara-2");
+    // And she gets her own back when she returns.
+    const back = await join(cara, "o2", "people/cara");
+    expect(back.ok && back.team.peopleSlug).toBe("people/cara");
   });
 });
 
@@ -289,6 +365,6 @@ describe("team routines and secrets", () => {
       const m = await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).first();
       await ctx.db.patch(m!._id, { role: "admin" });
     });
-    expect(await set()).toEqual({ ok: true });
+    expect(await set()).toEqual({ ok: true, paused: [] });
   });
 });

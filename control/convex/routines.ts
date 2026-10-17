@@ -320,21 +320,49 @@ export const secretNames = query({
 
 /** Set a secret (`teamId`: a team the user manages). */
 export const setSecret = mutation({
-  args: { ...secretArg, uid: v.id("users"), teamId: v.optional(v.id("teams")), name: v.string(), valueIv: v.string(), valueCt: v.string(), now: v.number() },
-  handler: async (ctx, { secret, uid, teamId, name, valueIv, valueCt, now }) => {
+  args: {
+    ...secretArg,
+    uid: v.id("users"),
+    teamId: v.optional(v.id("teams")),
+    name: v.string(),
+    valueIv: v.string(),
+    valueCt: v.string(),
+    // Set by an AI app: the owner's loops that are on pause, in the same step (see pauseOwned).
+    pauseLoops: v.optional(v.boolean()),
+    source: v.optional(v.string()),
+    now: v.number(),
+  },
+  handler: async (ctx, { secret, uid, teamId, name, valueIv, valueCt, pauseLoops, source, now }) => {
     assertService(secret);
     if (teamId && !(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
     const rows = await secretRows(ctx, uid, teamId);
     const existing = rows.find((r) => r.name === name);
     if (existing) {
       await ctx.db.patch(existing._id, { valueIv, valueCt, updatedBy: uid, updatedAt: now });
-      return { ok: true as const };
+    } else {
+      if (rows.length >= MAX_SECRETS) return { ok: false as const, error: "too_many_secrets" };
+      await ctx.db.insert("routineSecrets", { ...(teamId ? { teamId } : { userId: uid }), name, valueIv, valueCt, updatedBy: uid, updatedAt: now });
     }
-    if (rows.length >= MAX_SECRETS) return { ok: false as const, error: "too_many_secrets" };
-    await ctx.db.insert("routineSecrets", { ...(teamId ? { teamId } : { userId: uid }), name, valueIv, valueCt, updatedBy: uid, updatedAt: now });
-    return { ok: true as const };
+    const paused = pauseLoops ? await pauseOwned(ctx, uid, teamId, source ?? "mcp", now) : [];
+    return { ok: true as const, paused };
   },
 });
+
+/**
+ * Pauses the loops of one owner (a user's own, or a team's) that are on; returns their names.
+ * Every run gets all of its owner's secrets, so a secret an AI app sets changes what loops the user
+ * turned on do: a token swapped for someone else's, or a variable a tool reads on its own (a proxy,
+ * a base URL). Only the user turns a loop on, so those loops wait for them again.
+ */
+async function pauseOwned(ctx: MutationCtx, uid: Id<"users">, teamId: Id<"teams"> | undefined, source: string, now: number): Promise<string[]> {
+  const names: string[] = [];
+  for (const r of teamId ? await teamRoutines(ctx, teamId) : await personalRoutines(ctx, uid)) {
+    if (!r.enabled) continue;
+    await ctx.db.patch(r._id, { enabled: false, updatedAt: now, source });
+    names.push(r.name);
+  }
+  return names;
+}
 
 export const removeSecret = mutation({
   args: { ...secretArg, uid: v.id("users"), teamId: v.optional(v.id("teams")), name: v.string() },

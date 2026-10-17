@@ -3,6 +3,7 @@ import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   forgetNote,
+  forgetNotes,
   mergeLiving,
   DecisionFrontmatter,
   LivingPageFrontmatter,
@@ -199,5 +200,24 @@ describe("forgetNote", () => {
     expect(splitCompiled(page.body).timeline).toEqual(["- 2026-10-01: Owns pricing ([note](../notes/2026/10/2026-10-01-pricing-aaaaaa.md))"]);
     expect(splitCompiled(page.body).currentTruth).toContain("- Owns pricing.");
     expect(page.frontmatter.pending_rewrite).toBe(1);
+  });
+  it("does several at once, as one after another would", () => {
+    const both = forgetNotes(["wiki/notes/2026/10/2026-10-08-test-bbbbbb.md", "wiki/notes/2026/10/2026-10-01-pricing-aaaaaa.md", "wiki/notes/2026/10/2026-10-08-test-bbbbbb.md"], pages);
+    expect(both.writes).toEqual([]);
+    expect(both.deletes).toEqual([
+      "wiki/notes/2026/10/2026-10-08-test-bbbbbb.md",
+      "raw/2026/10/01K7TEST.md",
+      "wiki/notes/2026/10/2026-10-01-pricing-aaaaaa.md",
+      "wiki/people/anna-mueller.md",
+      "wiki/people/johann-beurich.md",
+    ]);
+  });
+  it("reads each page once, however many recordings go", () => {
+    const many = new Map(pages);
+    for (let i = 0; i < 3000; i++) many.set(`wiki/topics/t${i}.md`, solo.replace("2026-10-08-test-bbbbbb", `2026-10-08-t-${String(i).padStart(6, "0")}`));
+    const gone = Array.from({ length: 500 }, (_, i) => `wiki/notes/2026/10/made-up-${i}.md`);
+    const started = performance.now();
+    forgetNotes(gone, many);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

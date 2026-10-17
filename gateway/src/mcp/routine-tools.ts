@@ -238,7 +238,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     {
       title: "Set a routine secret",
       description:
-        "Store a secret (a token or key) that runs get as an environment variable, e.g. GITHUB_TOKEN, for the user's own routines or a team's. Only with a value the user gave you and asked to store. Values can't be read back, not even here; remove: true deletes one.",
+        "Store a secret (a token or key) that runs get as an environment variable, e.g. GITHUB_TOKEN, for the user's own routines or a team's. Only with a value the user gave you and asked to store. Values can't be read back, not even here; remove: true deletes one. Storing one pauses that owner's routines that are on, until the user turns them on again in the Ambient app: every run gets every secret.",
       inputSchema: {
         name: z.string().max(64).describe("Capital letters, digits and _, e.g. GITHUB_TOKEN."),
         value: z.string().max(10_000).optional(),
@@ -260,8 +260,10 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         }
         const value = SecretValue.safeParse(a.value);
         if (!value.success) return error("Pass the secret's value, or remove: true to delete it.");
-        await routines.setSecret(actor, team, name.data, value.data);
-        return result(`Stored ${name.data} for ${whose}. Their runs get it as an environment variable from the next run on.`);
+        const { paused } = await routines.setSecret(actor, team, name.data, value.data, { pauseLoops: true, source });
+        const stored = `Stored ${name.data} for ${whose}. Their runs get it as an environment variable.`;
+        if (paused.length === 0) return result(stored);
+        return result(`${stored} Because an AI app changed a secret, ${paused.length === 1 ? "this routine is" : "these routines are"} paused: ${paused.map((n) => `"${n}"`).join(", ")}. ${PAUSED}`);
       }),
   );
 }

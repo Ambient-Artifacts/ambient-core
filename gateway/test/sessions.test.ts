@@ -11,6 +11,7 @@ import type { SessionSummarizer, SessionSummaryInput } from "@brain/team";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parsePage } from "@brain/spec";
 import { appCall, INVITE, mcpClient, signIn, startStack, text, type Stack } from "./helpers.ts";
+import { MAX_BLOCKS } from "../src/sessions/service.ts";
 
 const SCRIPT = join(import.meta.dirname, "..", "..", "integrations", "claude-code", "scripts", "capture.sh");
 const HOLD = 30 * 60_000;
@@ -213,6 +214,31 @@ describe("Claude Code sessions", () => {
     expect(await upload()).toMatchObject({ status: "queued", blocks: 2, queued: 1 });
     await s.sessions.process(model);
     expect(await upload()).toMatchObject({ status: "skipped", queued: 0 });
+  });
+
+  it("queues at most MAX_BLOCKS blocks from one upload, the latest", async () => {
+    const id = "5f0c2a9e-bbbb-4c4c-8888-000000000021";
+    const base = { sessionId: id, cwd: "/opt/workspace", gitBranch: "main", entrypoint: "sdk-cli" };
+    // A prompt every two hours: a block each.
+    const lines = Array.from({ length: MAX_BLOCKS + 30 }, (_, i) => ({
+      ...base,
+      type: "user",
+      timestamp: new Date(Date.parse("2026-09-01T00:00:00Z") + i * 2 * 3600_000).toISOString(),
+      origin: { kind: "human" },
+      message: { role: "user", content: `Step ${i}: write down what changed in the deploy script and why it matters.` },
+    }));
+    const res = await fetch(`${s.origin}/v1/sessions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-encoding": "gzip" },
+      body: gzipSync(`${JSON.stringify({ session_id: id, cwd: "/opt/workspace", ambient: { home } })}\n${lines.map((l) => JSON.stringify(l)).join("\n")}\n`),
+    });
+    expect(await res.json()).toMatchObject({ status: "queued", blocks: MAX_BLOCKS + 30, queued: MAX_BLOCKS });
+    const queued = await s.t.run(async (ctx) => (await ctx.db.query("sessionInbox").collect()).map((r) => r.sessionId).filter((x) => x.startsWith(id)));
+    expect(queued).not.toContain(`${id}-b${Date.parse("2026-09-01T00:00:00Z") / 1000}`);
+    // Not summarized here: the next tests count what gets written.
+    await s.t.run(async (ctx) => {
+      for (const r of await ctx.db.query("sessionInbox").collect()) if (r.sessionId.startsWith(id)) await ctx.db.delete(r._id);
+    });
   });
 
   it("a rule written as an absolute path matches, and a rule added later re-routes unchanged blocks when the session is sent again", async () => {

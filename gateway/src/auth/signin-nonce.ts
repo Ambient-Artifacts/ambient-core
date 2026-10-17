@@ -5,7 +5,8 @@
 // person in there: the token's audience is the app, not the server.
 //
 // Stateless: random, expiry and an HMAC (a key derived from the master key, so another server
-// can't mint ours). Each works once; used ones are remembered until they expire.
+// can't mint ours). Each works once; used ones are remembered until they expire, here and, with
+// `seen`, in Convex too, so a restart (or a second gateway) doesn't make them usable again.
 import { createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
 import type { MasterKey } from "../crypto.ts";
 
@@ -13,11 +14,17 @@ export const SIGNIN_NONCE_TTL_MS = 10 * 60_000;
 
 export type NonceCheck = "ok" | "foreign" | "expired" | "used";
 
+/** Records a used nonce (by a hash) until `expiresAt`; false when it was recorded already. */
+export type NonceLedger = (hash: string, expiresAt: number) => Promise<boolean>;
+
 export class SignInNonces {
   private key: Buffer;
   private used = new Map<string, number>();
 
-  constructor(master: MasterKey) {
+  constructor(
+    master: MasterKey,
+    private seen?: NonceLedger,
+  ) {
     this.key = Buffer.from(hkdfSync("sha256", master.key, Buffer.alloc(0), "ambient sign-in nonce", 32));
   }
 
@@ -32,7 +39,7 @@ export class SignInNonces {
   }
 
   /** Whether `nonce` is one of ours, still valid and not used yet; uses it up when it is. */
-  check(nonce: string, now = Date.now()): NonceCheck {
+  async check(nonce: string, now = Date.now()): Promise<NonceCheck> {
     const parts = nonce.split(".");
     if (parts.length !== 3) return "foreign";
     const body = `${parts[0]}.${parts[1]}`;
@@ -44,6 +51,7 @@ export class SignInNonces {
     if (this.used.has(body)) return "used";
     if (this.used.size > 50_000) for (const [k, until] of this.used) if (until < now) this.used.delete(k);
     this.used.set(body, expiresAt);
+    if (this.seen && !(await this.seen(`n1:${this.mac(`used:${body}`)}`, expiresAt))) return "used";
     return "ok";
   }
 }

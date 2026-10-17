@@ -1,11 +1,12 @@
 // Personal wikis in the user's own git repo, end to end against local bare repos.
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parsePage, splitCompiled } from "@brain/spec";
+import { checkout } from "@brain/wiki";
 import { appCall, fixturePersonalOps, signIn, startStack, type Stack } from "./helpers.ts";
 
 let s: Stack;
@@ -49,7 +50,7 @@ afterAll(() => {
 describe("personal repo", () => {
   it("refuses http, private addresses and repos with other content", async () => {
     // Also loopback and cloud metadata written as IPv6 (URL parsing turns them into ::ffff:7f00:1 etc.).
-    for (const bad of ["http://github.com/x/y.git", "https://10.0.0.5/x.git", "https://127.0.0.1/x.git", "https://[::ffff:127.0.0.1]/x.git", "https://[::ffff:169.254.169.254]/x.git", "https://[::1]/x.git"]) {
+    for (const bad of ["http://github.com/x/y.git", "https://10.0.0.5/x.git", "https://127.0.0.1/x.git", "https://[::ffff:127.0.0.1]/x.git", "https://[::ffff:169.254.169.254]/x.git", "https://[::1]/x.git", "https://[2002:a9fe:a9fe::1]/x.git", "https://[64:ff9b::a9fe:a9fe]/x.git", "https://[fec0::1]/x.git"]) {
       const r = await appCall(s, token, "POST", "/v1/app/repo", { url: bad, token: "t" });
       expect(r.status, bad).toBe(400);
       expect(r.json.error).toBe("bad_url");
@@ -134,6 +135,17 @@ describe("personal repo", () => {
     expect(existsSync(join(after, "wiki/projects/onboarding-redesign.md"))).toBe(true);
   });
 
+  it("doesn't import a file too large to be one of Ambient's pages", async () => {
+    const dir = clone(url, "agent-huge");
+    writeFileSync(join(dir, "wiki/topics/huge.md"), `---\ntitle: Huge\ntype: topic\n---\n${"x".repeat(700_000)}\n`);
+    sh(["add", "-A"], dir);
+    sh(["commit", "-q", "-m", "huge"], dir);
+    sh(["-c", "protocol.file.allow=always", "push", "-q", "origin", "HEAD:main"], dir);
+    expect((await appCall(s, token, "POST", "/v1/app/repo/sync")).status).toBe(200);
+    const paths = await s.t.run(async (ctx) => (await ctx.db.query("personalPages").collect()).map((p) => p.path));
+    expect(paths).not.toContain("wiki/topics/huge.md");
+  });
+
   it("never follows a symlink committed to the repo out of the checkout", async () => {
     // A link to a file of the server's own (the gateway's env file, in real life) must not land in
     // the wiki: git checks it out as a plain file holding the link's target, and only that comes in.
@@ -151,6 +163,20 @@ describe("personal repo", () => {
     const contents = (pulled.json.changes as { path: string; content: string }[]).map((c) => c.content ?? "").join("\n");
     expect(contents).not.toContain("top-secret-value");
     expect(readFileSync(secret, "utf8")).toBe("BRAIN_MASTER_KEY=top-secret-value\n");
+  });
+
+  it("stops a clone that takes more disk than allowed", async () => {
+    const bigUrl = bare("big");
+    const work = clone(bigUrl, "big-work");
+    // Random bytes don't compress: the clone takes about what the file is.
+    writeFileSync(join(work, "blob.bin"), randomBytes(2 * 1024 * 1024));
+    sh(["add", "-A"], work);
+    sh(["commit", "-q", "-m", "big"], work);
+    sh(["push", "-q", "origin", "HEAD:main"], work);
+    const into = mkdtempSync(join(tmpdir(), "ambient-big-"));
+    await expect(checkout({ url: bigUrl, token: "t" }, join(into, "c"), { allowFile: true, maxCloneBytes: 512 * 1024 })).rejects.toMatchObject({ code: "too_large" });
+    await expect(checkout({ url: bigUrl, token: "t" }, join(into, "d"), { allowFile: true })).resolves.toMatchObject({ branch: "main" });
+    rmSync(into, { recursive: true, force: true });
   });
 
   it("disconnects", async () => {

@@ -45,6 +45,9 @@ interface Queued {
   commits: { sha: string; message: string }[];
 }
 
+/** Work blocks one upload queues at most (see receive). */
+export const MAX_BLOCKS = 50;
+
 export class BadUpload extends Error {}
 
 export interface NoteSpec {
@@ -102,8 +105,9 @@ export class SessionService {
     const blocks = splitBlocks(parsed);
     let route: { rules: SessionRule[]; teams: Team[] } | null = null;
     let queued = 0;
-    for (const block of blocks) {
-      if (!block.interactive) continue;
+    // A block per gap of an hour or more: a made-up transcript can have tens of thousands, each a
+    // seal and a queued row. A real one has a handful; past the cap, the latest are kept.
+    for (const block of blocks.filter((b) => b.interactive).slice(-MAX_BLOCKS)) {
       const transcript = condense(block, { home });
       if (transcript.length < 40) continue;
       const start = block.startedAt ? Math.floor(Date.parse(block.startedAt) / 1000) : Number.NaN;

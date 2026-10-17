@@ -235,9 +235,16 @@ export default defineSchema({
     usesLeft: v.number(),
     expiresAt: v.number(),
     createdAt: v.number(),
-  }).index("by_code", ["codeHash"]),
+    /** Who made it (from the app): it stops working once they no longer manage the team. */
+    createdBy: v.optional(v.id("users")),
+  })
+    .index("by_code", ["codeHash"])
+    .index("by_team", ["teamId"]),
 
-  /** Who an owner or admin took out of a team, and when: an invite made before that can't bring them back. */
+  /**
+   * Who an owner or admin took out of a team, and when: an invite made before that can't bring them
+   * back. Also who left on their own (`at` 0, nothing to hold against them), for their people page.
+   */
   removals: defineTable({
     teamId: v.id("teams"),
     userId: v.id("users"),

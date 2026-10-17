@@ -185,6 +185,11 @@ describe("OAuth for the personal /mcp resource", () => {
       expect(row.payload.startsWith("v1.")).toBe(true);
     }
 
+    // Nor is a row's stored key a token: handed in as one, it's refused.
+    for (const row of rows.filter((r) => r.model === "RefreshToken")) {
+      expect((await token(as, { grant_type: "refresh_token", refresh_token: row.key, client_id: clientId, resource })).status).toBe(400);
+    }
+
     const r1 = await token(as, { grant_type: "refresh_token", refresh_token: t.json.refresh_token!, client_id: clientId, resource });
     expect(r1.status).toBe(200);
     expect((await token(as, { grant_type: "refresh_token", refresh_token: t.json.refresh_token!, client_id: clientId, resource })).status).toBe(400);

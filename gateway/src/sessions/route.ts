@@ -4,12 +4,14 @@
 import express, { type NextFunction, type Request, type Response, type Router } from "express";
 import { LEGACY_PAT_PREFIX, PAT_PREFIX, type PatService } from "../auth/pats.ts";
 import type { Directory } from "../directory.ts";
-import { limiter } from "../limiter.ts";
+import { inFlight, limiter } from "../limiter.ts";
 import { BadUpload, type SessionService } from "./service.ts";
 
 export function sessionUploadRouter(d: { pats: PatService; directory: Directory; sessions: SessionService }): Router {
   const r = express.Router();
   const allow = limiter(30);
+  const perUser = inFlight(2);
+  const everyone = inFlight(6);
 
   // The token first, from the headers alone: only then is the body read, so nobody can make the
   // gateway inflate and buffer an upload (or a gzip bomb) without a valid token.
@@ -29,6 +31,19 @@ export function sessionUploadRouter(d: { pats: PatService; directory: Directory;
       res.status(429).json({ error: "slow_down" });
       return;
     }
+    // Up to 150 MB each, held in memory while they're read and condensed: two at a time per
+    // account, a few for everyone (the plugin sends one when a session ends, and retries).
+    const mine = perUser(pat.uid);
+    const ours = mine && everyone("all");
+    if (!mine || !ours) {
+      mine?.();
+      res.status(429).json({ error: "slow_down" });
+      return;
+    }
+    res.on("close", () => {
+      mine();
+      ours();
+    });
     res.locals.uid = pat.uid;
     next();
   };

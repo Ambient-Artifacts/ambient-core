@@ -31,13 +31,19 @@ export function convexAdapterFactory(control: Control, master: MasterKey) {
     return `v1.${iv.toString("base64url")}.${body.toString("base64url")}`;
   };
 
-  const open = (model: string, row: Stored): AdapterPayload | undefined => {
+  // The raw value a row from before hashing was keyed by. Never one that looks like a hashed key:
+  // that's the stored key itself handed in as a token, by someone holding a copy of the table.
+  const legacy = (value: string) => (value.startsWith("h1:") ? undefined : value);
+
+  /** `key`: what the row must be keyed by, when the lookup was by id (a sealed row found by its id). */
+  const open = (model: string, row: Stored, key?: string): AdapterPayload | undefined => {
     if (!row) return undefined;
     let payload: AdapterPayload;
     if (row.payload.startsWith("{")) {
       // Written before rows were sealed (they expire within 180 days of 2026-10-16).
       payload = JSON.parse(row.payload) as AdapterPayload;
     } else {
+      if (key !== undefined && row.key !== key) return undefined;
       const [, iv, body] = row.payload.split(".");
       const raw = Buffer.from(body ?? "", "base64url");
       const decipher = createDecipheriv("aes-256-gcm", sealKey, Buffer.from(iv ?? "", "base64url"));
@@ -56,7 +62,7 @@ export function convexAdapterFactory(control: Control, master: MasterKey) {
       await control.m(api.oauth.upsert, {
         model,
         key,
-        legacyKey: id,
+        legacyKey: legacy(id),
         payload: seal(model, key, JSON.stringify(payload)),
         expiresAt: expiresIn ? Date.now() + expiresIn * 1000 : NEVER,
         // A grant's own row carries its id too, so it can be listed and revoked by it (a grant id
@@ -69,21 +75,22 @@ export function convexAdapterFactory(control: Control, master: MasterKey) {
       });
     },
     async find(id: string) {
-      return open(model, await control.q(api.oauth.find, { model, key: hash("id", model, id), legacyKey: id, now: Date.now() }));
+      const key = hash("id", model, id);
+      return open(model, await control.q(api.oauth.find, { model, key, legacyKey: legacy(id), now: Date.now() }), key);
     },
     async findByUid(uid: string) {
-      return open(model, await control.q(api.oauth.findByUid, { model, uid: hash("uid", model, uid), legacyUid: uid, now: Date.now() }));
+      return open(model, await control.q(api.oauth.findByUid, { model, uid: hash("uid", model, uid), legacyUid: legacy(uid), now: Date.now() }));
     },
     async findByUserCode(userCode: string) {
-      return open(model, await control.q(api.oauth.findByUserCode, { model, userCode: hash("userCode", model, userCode), legacyUserCode: userCode, now: Date.now() }));
+      return open(model, await control.q(api.oauth.findByUserCode, { model, userCode: hash("userCode", model, userCode), legacyUserCode: legacy(userCode), now: Date.now() }));
     },
     async consume(id: string) {
-      const out = await control.m(api.oauth.consume, { model, key: hash("id", model, id), legacyKey: id, now: Date.now() });
+      const out = await control.m(api.oauth.consume, { model, key: hash("id", model, id), legacyKey: legacy(id), now: Date.now() });
       // Used twice (two requests raced past oidc-provider's own check): Convex has ended the grant.
       if (out.reused) throw new errors.InvalidGrant("grant request is invalid");
     },
     async destroy(id: string) {
-      await control.m(api.oauth.destroy, { model, key: hash("id", model, id), legacyKey: id });
+      await control.m(api.oauth.destroy, { model, key: hash("id", model, id), legacyKey: legacy(id) });
     },
     async revokeByGrantId(grantId: string) {
       await control.m(api.oauth.revokeByGrantId, { grantId });

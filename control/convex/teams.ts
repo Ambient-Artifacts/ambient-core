@@ -72,6 +72,13 @@ export const joinWithInvite = mutation({
     if (!invite || invite.usesLeft <= 0 || invite.expiresAt < now) return { ok: false as const, error: "invalid_code" };
     const team = await ctx.db.get(invite.teamId);
     if (!team || team.status !== "active") return { ok: false as const, error: "team_unavailable" };
+    // An invite works only while whoever made it still manages the team (not after they were
+    // removed, left, lost the admin role or deleted their account): a removed admin can't keep a
+    // stack of codes to let themselves, or anyone, back in.
+    if (invite.createdBy) {
+      const maker = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", team._id).eq("userId", invite.createdBy!)).unique();
+      if (!maker || !canManage(maker.role)) return { ok: false as const, error: "invalid_code" };
+    }
     // Someone who was removed needs an invite made after that: a code they kept, or a link still
     // going round, doesn't bring them back.
     const removed = await ctx.db.query("removals").withIndex("by_team_user", (q) => q.eq("teamId", team._id).eq("userId", uid)).unique();
@@ -154,7 +161,10 @@ export const removeMember = internalMutation({
       .query("members")
       .withIndex("by_team_user", (q) => q.eq("teamId", team._id).eq("userId", uid))
       .unique();
-    if (m) await ctx.db.delete(m._id);
+    if (m) {
+      await ctx.db.delete(m._id);
+      await recordRemoval(ctx, team._id, uid, m.peopleSlug);
+    }
   },
 });
 
@@ -205,22 +215,46 @@ export const createOwned = mutation({
 /** How many active teams one account can own (each takes a server from the pool). */
 export const MAX_OWNED_TEAMS = 3;
 
-/** Note that `userId` was taken out of `teamId` now, so older invites can't bring them back. */
-export async function recordRemoval(ctx: MutationCtx, teamId: Id<"teams">, userId: Id<"users">, peopleSlug?: string): Promise<void> {
+/**
+ * Note that `userId` was taken out of `teamId` now, so older invites can't bring them back, and
+ * end every invite made before now. The block above is per account, and sign-ups are open: a code
+ * they kept or a link still going round would let them back in with another account.
+ */
+export async function recordRemoval(ctx: MutationCtx, teamId: Id<"teams">, userId: Id<"users">, peopleSlug?: string): Promise<{ invitesEnded: number }> {
   const at = Date.now();
   const prior = await ctx.db.query("removals").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", userId)).unique();
   if (prior) await ctx.db.patch(prior._id, { at, ...(peopleSlug ? { peopleSlug } : {}) });
   else await ctx.db.insert("removals", { teamId, userId, at, ...(peopleSlug ? { peopleSlug } : {}) });
+  let invitesEnded = 0;
+  for (const invite of await ctx.db.query("invites").withIndex("by_team", (q) => q.eq("teamId", teamId)).collect()) {
+    if (invite.usesLeft <= 0 || invite.expiresAt < at || invite.createdAt > at) continue;
+    await ctx.db.patch(invite._id, { usesLeft: 0 });
+    invitesEnded++;
+  }
+  return { invitesEnded };
 }
 
-/** Undo `createOwned` when the server couldn't be claimed: the team goes, the server is free again. */
+/**
+ * Someone left (or deleted their account): their people page stays theirs, never handed to someone
+ * who joins later with the same name. They can come back with any invite.
+ */
+export async function reserveSlug(ctx: MutationCtx, teamId: Id<"teams">, userId: Id<"users">, peopleSlug: string): Promise<void> {
+  const prior = await ctx.db.query("removals").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", userId)).unique();
+  if (prior) await ctx.db.patch(prior._id, { peopleSlug });
+  else await ctx.db.insert("removals", { teamId, userId, at: 0, peopleSlug });
+}
+
+/**
+ * Undo `createOwned` when the server couldn't be claimed: the team goes, and the server is free
+ * again (`release`, the default) or, when it says it's already in use, stays out of the pool.
+ */
 export const abandonCreate = mutation({
-  args: { ...secretArg, teamId: v.id("teams") },
-  handler: async (ctx, { secret, teamId }) => {
+  args: { ...secretArg, teamId: v.id("teams"), release: v.optional(v.boolean()) },
+  handler: async (ctx, { secret, teamId, release }) => {
     assertService(secret);
     for (const m of await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).collect()) await ctx.db.delete(m._id);
     const server = await ctx.db.query("teamServers").filter((q) => q.eq(q.field("teamId"), teamId)).first();
-    if (server) await ctx.db.patch(server._id, { status: "free", teamId: undefined });
+    if (server) await ctx.db.patch(server._id, release === false ? { teamId: undefined } : { status: "free", teamId: undefined });
     await ctx.db.delete(teamId);
   },
 });
@@ -253,7 +287,7 @@ export const invite = mutation({
     if (!canManage(m.member.role)) return { ok: false as const, error: "forbidden" };
     const inviteRole = r === "admin" && m.member.role === "owner" ? "admin" : "member";
     const expiresAt = now + Math.min(Math.max(days, 1), 90) * 86_400_000;
-    await ctx.db.insert("invites", { teamId: m.team._id, codeHash, role: inviteRole, usesLeft: Math.min(Math.max(uses, 1), 100), expiresAt, createdAt: now });
+    await ctx.db.insert("invites", { teamId: m.team._id, codeHash, role: inviteRole, usesLeft: Math.min(Math.max(uses, 1), 100), expiresAt, createdAt: now, createdBy: uid });
     return { ok: true as const, expiresAt, role: inviteRole };
   },
 });
@@ -271,8 +305,8 @@ export const removeMemberBy = mutation({
     if (!t) return { ok: true as const };
     if (t.role === "owner" || (t.role === "admin" && m.member.role !== "owner")) return { ok: false as const, error: "forbidden" };
     await ctx.db.delete(t._id);
-    await recordRemoval(ctx, m.team._id, target, t.peopleSlug);
-    return { ok: true as const };
+    const { invitesEnded } = await recordRemoval(ctx, m.team._id, target, t.peopleSlug);
+    return { ok: true as const, invitesEnded };
   },
 });
 
@@ -301,6 +335,7 @@ export const leaveBySlug = mutation({
     if (!m) return { ok: true as const };
     if (m.member.role === "owner") return { ok: false as const, error: "owner_cannot_leave" };
     await ctx.db.delete(m.member._id);
+    await reserveSlug(ctx, m.team._id, uid, m.member.peopleSlug);
     return { ok: true as const };
   },
 });

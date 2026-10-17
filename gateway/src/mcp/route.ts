@@ -1,10 +1,10 @@
-import express, { type Request, type Response, type Router } from "express";
+import express, { type NextFunction, type Request, type Response, type Router } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { AuthError, type ResourceTarget, type createBearerVerifier } from "../auth/bearer.ts";
+import { AuthError, type Principal, type ResourceTarget, type createBearerVerifier } from "../auth/bearer.ts";
 import type { RoutineService } from "../routines/service.ts";
 import { personalInstructions } from "./context.ts";
 import { buildMcpServer, type ReaderSource } from "./tools.ts";
-import { strikes } from "../limiter.ts";
+import { addressKey, strikes } from "../limiter.ts";
 
 export const MCP_SCOPES = ["personal:read", "personal:write", "team:read", "team:write"];
 export const TEAM_MCP_SCOPES = ["team:read", "team:write"];
@@ -54,29 +54,48 @@ export function mcpRouter(deps: {
   });
 
   // Made-up tokens cost a database lookup each: an address that keeps failing waits a minute.
-  // Only real failures count (a missing token is the normal start of an OAuth connection).
+  // Only tokens nobody was given count (AuthError.strike): not a missing one (the normal start of
+  // an OAuth connection), an expired one (the start of a refresh) or one without the scope.
   const failures = strikes(60, 60_000);
 
-  const handle = async (req: Request, res: Response, target: ResourceTarget, resourcePath: string) => {
-    const address = req.ip ?? "unknown";
+  /** Where the request goes: the personal /mcp or a team's, by slug (null: no such resource). */
+  const targetOf = (req: Request): { target: ResourceTarget; path: string } | null => {
+    if (req.params.slug === undefined) return { target: { url: `${deps.origin}/mcp`, teamSlug: null }, path: "/mcp" };
+    const slug = String(req.params.slug);
+    // The slug goes into the resource URL and the WWW-Authenticate header: a team slug or nothing.
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(slug)) return null;
+    return { target: { url: `${deps.origin}/t/${slug}/mcp`, teamSlug: slug }, path: `/t/${slug}/mcp` };
+  };
+
+  // The token first, from the headers alone: only then is the body (up to 1 MB) read and parsed.
+  const authenticate = async (req: Request, res: Response, next: NextFunction) => {
+    const where = targetOf(req);
+    if (!where) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    const address = addressKey(req.ip);
     if (failures.blocked(address)) {
       res.status(429).json({ error: "slow_down", error_description: "Too many failed sign-ins from here. Try again in a minute." });
       return;
     }
-    let principal;
     try {
       const proof = req.headers.dpop;
-      principal = await deps.verify(req.headers.authorization, target, { method: req.method, proof: typeof proof === "string" ? proof : undefined });
+      res.locals.principal = await deps.verify(req.headers.authorization, where.target, { method: req.method, proof: typeof proof === "string" ? proof : undefined });
     } catch (err) {
-      if (!(err instanceof AuthError)) throw err;
-      if (req.headers.authorization) failures.add(address);
-      const params = [`resource_metadata="${resourceMetadataUrl(deps.origin, resourcePath)}"`];
+      if (!(err instanceof AuthError)) return next(err);
+      if (err.strike) failures.add(address);
+      const params = [`resource_metadata="${resourceMetadataUrl(deps.origin, where.path)}"`];
       if (err.code !== "invalid_request") params.push(`error="${err.code}"`, `error_description="${err.message}"`);
-      if (err.code === "insufficient_scope") params.push(`scope="${target.teamSlug ? TEAM_MCP_SCOPES.join(" ") : MCP_SCOPES.join(" ")}"`);
+      if (err.code === "insufficient_scope") params.push(`scope="${where.target.teamSlug ? TEAM_MCP_SCOPES.join(" ") : MCP_SCOPES.join(" ")}"`);
       res.status(err.status).set("WWW-Authenticate", `Bearer ${params.join(", ")}`).json({ error: err.code, error_description: err.message });
       return;
     }
+    next();
+  };
 
+  const handle = async (req: Request, res: Response) => {
+    const principal = res.locals.principal as Principal;
     // Instructions reach the model only through `initialize`: only then are they made for this user.
     const body = req.body as unknown;
     const connecting = (Array.isArray(body) ? body : [body]).some((m) => (m as { method?: unknown } | null)?.method === "initialize");
@@ -93,18 +112,7 @@ export function mcpRouter(deps: {
     await transport.handleRequest(req, res, req.body);
   };
 
-  router.post("/mcp", express.json({ limit: "1mb" }), (req, res) =>
-    handle(req, res, { url: `${deps.origin}/mcp`, teamSlug: null }, "/mcp"),
-  );
-  router.post("/t/:slug/mcp", express.json({ limit: "1mb" }), (req, res) => {
-    const slug = String(req.params.slug);
-    // The slug goes into the resource URL and the WWW-Authenticate header: a team slug or nothing.
-    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(slug)) {
-      res.status(404).json({ error: "not_found" });
-      return;
-    }
-    return handle(req, res, { url: `${deps.origin}/t/${slug}/mcp`, teamSlug: slug }, `/t/${slug}/mcp`);
-  });
+  router.post(["/mcp", "/t/:slug/mcp"], authenticate, express.json({ limit: "1mb" }), handle);
 
   // Stateless server: no server→client stream and no sessions to delete.
   const notAllowed = (_req: Request, res: Response) => {

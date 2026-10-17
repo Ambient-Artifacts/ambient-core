@@ -12,6 +12,12 @@ export class TeamServerError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /**
+     * For a claim: whether it surely didn't happen ("refused", "unreachable"), happened for
+     * someone else ("taken": the server is in use, keep it out of the pool), or may have
+     * ("uncertain": a timeout or a server error after it may have saved the team).
+     */
+    readonly claim?: "refused" | "unreachable" | "taken" | "uncertain",
   ) {
     super(message);
   }
@@ -65,9 +71,13 @@ export class TeamLink {
         signal: AbortSignal.timeout(10_000),
       });
     } catch (err) {
-      throw new TeamServerError(503, `pool server unreachable: ${(err as Error).message}`);
+      const code = (err as { cause?: { code?: string } }).cause?.code;
+      const never = code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN";
+      throw new TeamServerError(503, `pool server unreachable: ${(err as Error).message}`, never ? "unreachable" : "uncertain");
     }
-    if (res.status !== 202) throw new TeamServerError(503, `pool server answered ${res.status}`);
+    if (res.status === 202) return;
+    const claim = res.status === 409 ? "taken" : res.status >= 400 && res.status < 500 ? "refused" : "uncertain";
+    throw new TeamServerError(503, `pool server answered ${res.status}`, claim);
   }
 
   /** True once the server answers as a team's server (not as an unclaimed pool server). */

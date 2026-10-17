@@ -136,7 +136,10 @@ export class TeamWiki {
     const changed: string[] = [];
     const rendered = renderIndexFiles(this.store.entries(), `${this.teamName} wiki`, attention(this.store.lint()));
     for (const [path, text] of rendered) {
-      const file = inside(this.dir, path);
+      // A folder from the repo that can't be written to (a link on the way, say) gets no index,
+      // rather than every write failing, and the server with it (it writes at startup).
+      const file = insideOrNull(this.dir, path);
+      if (!file) continue;
       if (existsSync(file) && readFileSync(file, "utf8") === text) continue;
       await mkdir(dirname(file), { recursive: true });
       await writeFile(file, text);
@@ -144,8 +147,9 @@ export class TeamWiki {
     }
     // A folder whose pages all moved or went keeps no index of nothing.
     for (const path of await indexFilesIn(this.dir)) {
-      if (rendered.has(path)) continue;
-      await rm(inside(this.dir, path), { force: true });
+      const file = rendered.has(path) ? null : insideOrNull(this.dir, path);
+      if (!file) continue;
+      await rm(file, { force: true });
       changed.push(path);
     }
     return changed;
@@ -158,9 +162,11 @@ export class TeamWiki {
  * plain files, core.symlinks false, but a checkout from before that may still hold one).
  */
 function inside(dir: string, path: string): string {
-  if (!path || path.startsWith("/") || path.includes("..") || path.includes("\\") || path.includes("\0")) throw new Error(`bad path ${path}`);
+  const parts = path.split("/");
+  // ".." as a part of the path, not inside a name: a folder "v1..v2" from the repo is fine.
+  if (!path || parts.some((p) => p === "" || p === "." || p === "..") || path.includes("\\") || path.includes("\0")) throw new Error(`bad path ${path}`);
   let at = dir;
-  for (const part of path.split("/")) {
+  for (const part of parts) {
     at = join(at, part);
     let link: boolean;
     try {
@@ -171,4 +177,12 @@ function inside(dir: string, path: string): string {
     if (link) throw new Error(`bad path ${path}`);
   }
   return join(dir, path);
+}
+
+function insideOrNull(dir: string, path: string): string | null {
+  try {
+    return inside(dir, path);
+  } catch {
+    return null;
+  }
 }

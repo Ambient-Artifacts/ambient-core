@@ -49,7 +49,13 @@ export class TeamRemote {
         return;
       }
       const { tokenSealed, ...rest } = stored;
-      this.config = { ...rest, token: this.open(tokenSealed) };
+      try {
+        this.config = { ...rest, token: this.open(tokenSealed) };
+      } catch {
+        // Sealed with another secret (changed, or mistyped): the server still starts.
+        console.error("[team] the repo token doesn't open with this BRAIN_TEAM_SECRET (changed since it was sealed?): repo sync is off until the secret is right or the repo is connected again");
+        this.config = null;
+      }
       return;
     }
     this.config = stored;
