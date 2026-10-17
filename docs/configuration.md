@@ -62,6 +62,7 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 | `PORT` | `8090` | |
 | `BRAIN_LISTEN_HOST` | `127.0.0.1` | `0.0.0.0` in the Docker image. |
 | `ANTHROPIC_API_KEY` | none | For the nightly consolidation. In Docker: `TEAM_ANTHROPIC_API_KEY`, or else `ANTHROPIC_API_KEY`. |
+| `BRAIN_TEAM_SECRET` | none | Seals the team repo's access token in `remote.json`, so a backup or copy of the data directory alone holds no usable token. Any long random string (`openssl rand -base64 32`); keep it in the env file, not the data directory. In Docker: `TEAM_SECRET`, which `init.sh` generates. A token saved before it was set is sealed the next time the server starts. |
 | `BRAIN_CONSOLIDATE_MODEL` | `claude-haiku-4-5` | |
 | `BRAIN_CONSOLIDATE_AT` | `02:00` | Docker only: when the nightly job runs, in `TZ`. |
 

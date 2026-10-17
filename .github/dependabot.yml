@@ -1,0 +1,17 @@
+# Keeps the pinned image digests (Dockerfile, docker-compose.yml) and the workflows' actions
+# current: pinned so a moved tag can't change what runs, bumped here so pins don't go stale.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5

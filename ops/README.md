@@ -63,6 +63,7 @@ ssh root@<ip> 'cat > /etc/brain/team.env' <<EOF
 BRAIN_SERVER_ID=pool-1
 BRAIN_GATEWAY_ISSUER=https://mcp.<domain>
 ANTHROPIC_API_KEY=<key with a spend limit; the server keeps it once claimed>
+BRAIN_TEAM_SECRET=<openssl rand -base64 32: seals the team repo's token in /srv/brain>
 PORT=8090
 EOF
 ssh root@<ip> 'printf "BRAIN_HOST=t-pool-1.<domain>\nBRAIN_GATEWAY_IP=<core ip>\n" > /etc/brain/host.env; chown root:brain /etc/brain/*.env; chmod 640 /etc/brain/*.env'

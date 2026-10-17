@@ -1,6 +1,7 @@
 # One image for every part of a self-hosted server: the gateway, a team server, their scheduled
 # jobs, the setup step and the admin CLI. docker-compose.yml picks the command for each.
-FROM node:24-slim AS build
+# Pinned by digest (Dependabot bumps it, .github/dependabot.yml): a tag can be moved under us.
+FROM node:24-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS build
 # better-sqlite3 compiles from source where no prebuilt binary fits.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ \
@@ -15,7 +16,7 @@ COPY gateway/package.json gateway/
 RUN npm ci --no-audit --no-fund --loglevel=error
 COPY . .
 
-FROM node:24-slim
+FROM node:24-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
 # git: team wikis and connected repos are git repositories. tini: signals and zombie reaping.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates tini \

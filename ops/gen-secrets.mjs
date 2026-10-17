@@ -18,7 +18,8 @@ BRAIN_MASTER_KEY=${randomBytes(32).toString("base64")}
 BRAIN_SERVICE_SECRET=${randomBytes(32).toString("hex")}`;
 
 if (process.argv.includes("--env")) {
-  console.log(secrets);
+  // Docker: the team server's secret too (BRAIN_TEAM_SECRET in docker-compose.yml).
+  console.log(`${secrets}\nTEAM_SECRET=${randomBytes(32).toString("base64url")}`);
 } else {
   console.log(`# Brain gateway secrets, generated ${new Date().toISOString()}
 ${secrets}

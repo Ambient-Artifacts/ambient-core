@@ -17,6 +17,8 @@ export interface TeamConfig {
   /** Behind Caddy on the same machine by default; in a container, 0.0.0.0. */
   host: string;
   anthropicApiKey: string | null;
+  /** BRAIN_TEAM_SECRET: seals the team repo's token in remote.json. */
+  teamSecret: string | null;
   model: string;
   version: string;
 }
@@ -56,6 +58,8 @@ export function loadTeamConfig(env: NodeJS.ProcessEnv = process.env): TeamConfig
     port: Number(env.PORT ?? 8090),
     host: env.BRAIN_LISTEN_HOST || "127.0.0.1",
     anthropicApiKey: env.ANTHROPIC_API_KEY ?? null,
+    /** Seals the team repo's token in remote.json (TeamRemote); optional, for servers set up before it. */
+    teamSecret: env.BRAIN_TEAM_SECRET || null,
     model: env.BRAIN_CONSOLIDATE_MODEL ?? "claude-haiku-4-5",
     version: env.BRAIN_VERSION ?? "0.1.0",
   };
