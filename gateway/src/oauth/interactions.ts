@@ -251,9 +251,9 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
    * token: it can't be told apart from another server's nonce, so until nonces are required such
    * a Microsoft token is taken. Returns why it's refused, or null.
    */
-  const nonceRefusal = (token: string | undefined, legacy?: string): string | null => {
+  const nonceRefusal = async (token: string | undefined, legacy?: string): Promise<string | null> => {
     if (token !== undefined) {
-      const check = app.nonces.check(token);
+      const check = await app.nonces.check(token);
       if (check === "ok") return null;
       if (check === "expired" || check === "used") return check;
       if (legacy === undefined || token !== legacy) return check;
@@ -282,7 +282,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         res.status(401).json({ error: "invalid_apple_token" });
         return;
       }
-      const appleRefusal = nonceRefusal(identity.nonce);
+      const appleRefusal = await nonceRefusal(identity.nonce);
       if (appleRefusal) return refuseNonce(res, appleRefusal);
       let user;
       try {
@@ -331,7 +331,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         res.status(401).json({ error: "invalid_microsoft_token" });
         return;
       }
-      const microsoftRefusal = nonceRefusal(identity.nonce, body.data.nonce);
+      const microsoftRefusal = await nonceRefusal(identity.nonce, body.data.nonce);
       if (microsoftRefusal) return refuseNonce(res, microsoftRefusal);
       let user;
       try {

@@ -1,7 +1,7 @@
 // /v1/app/*: the iOS app's API. In the MVP the app talks only to the gateway;
 // Convex sits behind it.
 import { randomInt } from "node:crypto";
-import express, { type NextFunction, type Request, type Response, type Router } from "express";
+import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { z } from "zod";
 import { SyncRequest, TeamNoteV1, parsePage, slugify } from "@brain/spec";
 import { GitError, QueryRequest, dispatchQuery, fileLinks, renderListing, type WikiReader } from "@brain/wiki";
@@ -12,7 +12,7 @@ import type { PatService } from "./auth/pats.ts";
 import { api, type Control } from "./control.ts";
 import { sha256Hex } from "./crypto.ts";
 import type { Directory } from "./directory.ts";
-import { addressKey, limiter } from "./limiter.ts";
+import { addressKey, inFlight, limiter } from "./limiter.ts";
 import { MAX_ABOUT, ME_PATH, writeAbout } from "./me.ts";
 import { appStores, meetingBrief, waitingOn } from "./briefs.ts";
 import { localDay, validZone } from "./digest.ts";
@@ -81,8 +81,19 @@ export const MAX_STREAMS = 8;
 export function appApiRouter(d: AppApiDeps): Router {
   const r = express.Router();
   // Sync batches may carry transcripts; the app splits batches well below this. Routes put `auth`
-  // before `json`, so nobody can make the gateway inflate and buffer a body without signing in.
-  const json = express.json({ limit: "8mb" });
+  // before `json`, so nobody can make the gateway inflate and buffer a body without signing in,
+  // and an account has a few bodies in the works at a time (its devices), not hundreds at 8 MB.
+  const parse = express.json({ limit: "8mb" });
+  const bodies = inFlight(6);
+  const json: RequestHandler = (req, res, next) => {
+    const release = bodies((res.locals.uid as string | undefined) ?? addressKey(req.ip));
+    if (!release) {
+      res.status(429).json({ error: "slow_down" });
+      return;
+    }
+    res.on("close", release);
+    parse(req, res, next);
+  };
   const authLimit = limiter(30);
   const userLimit = limiter(240);
 

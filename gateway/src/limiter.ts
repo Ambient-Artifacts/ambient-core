@@ -63,3 +63,25 @@ export function addressKey(ip: string | undefined): string {
   const groups = ip.includes("::") ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right] : left;
   return `${groups.slice(0, 4).map((g) => (g || "0").toLowerCase().replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }
+
+/**
+ * At most `max` requests per key at a time (their bodies read, buffered and handled). Returns a
+ * release to call when the request ends, or null when the key has `max` going already. A rate
+ * limit counts starts; this bounds what's held at once (large bodies, kept in memory).
+ */
+export function inFlight(max: number) {
+  const n = new Map<string, number>();
+  return (key: string): (() => void) | null => {
+    const c = n.get(key) ?? 0;
+    if (c >= max) return null;
+    n.set(key, c + 1);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      const left = (n.get(key) ?? 1) - 1;
+      if (left <= 0) n.delete(key);
+      else n.set(key, left);
+    };
+  };
+}

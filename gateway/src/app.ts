@@ -14,7 +14,7 @@ import { createBearerVerifier } from "./auth/bearer.ts";
 import { Pairing } from "./auth/pairing.ts";
 import { PatService } from "./auth/pats.ts";
 import type { GatewayConfig } from "./config.ts";
-import { Control, type ConvexCaller } from "./control.ts";
+import { api, Control, type ConvexCaller } from "./control.ts";
 import { Directory } from "./directory.ts";
 import type { ReaderSource } from "./mcp/tools.ts";
 import { contextRouter } from "./context/route.ts";
@@ -60,7 +60,7 @@ export function createApp(deps: AppDeps) {
   const directory = new Directory(control, config.directoryTtlMs);
   const pats = new PatService(control);
   const codeHasher = new CodeHasher(config.masterKey);
-  const signInNonces = new SignInNonces(config.masterKey);
+  const signInNonces = new SignInNonces(config.masterKey, async (key, expiresAt) => (await control.m(api.oauth.useOnce, { model: "SignInNonce", key, expiresAt })).first);
   const pairing = new Pairing(control, codeHasher);
   const personal = new PersonalStore(control, config.masterKey);
   const repos = new PersonalRepos(control, personal, { allowFile: config.allowFileRepos });

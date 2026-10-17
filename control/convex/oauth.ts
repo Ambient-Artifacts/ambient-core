@@ -119,6 +119,20 @@ export const destroy = mutation({
   },
 });
 
+/**
+ * Marks `key` (of `model`) as used; `first` false when it was already. In one mutation, so of two
+ * requests with the same key only one gets true. Swept with the rest when it expires.
+ */
+export const useOnce = mutation({
+  args: { ...secretArg, model: v.string(), key: v.string(), expiresAt: v.number() },
+  handler: async (ctx, { secret, model, key, expiresAt }) => {
+    assertService(secret);
+    if (await ctx.db.query("oauth").withIndex("by_model_key", (q) => q.eq("model", model).eq("key", key)).unique()) return { first: false };
+    await ctx.db.insert("oauth", { model, key, payload: "{}", expiresAt });
+    return { first: true };
+  },
+});
+
 export const revokeByGrantId = mutation({
   args: { ...secretArg, grantId: v.string() },
   handler: async (ctx, { secret, grantId }) => {

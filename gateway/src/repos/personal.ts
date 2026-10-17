@@ -8,7 +8,7 @@
 // Every sync works in a throwaway shallow clone; nothing stays on disk.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { mergeLiving } from "@brain/spec";
@@ -198,10 +198,16 @@ export class PersonalRepos {
   }
 }
 
+/** Files a repo's wiki/ and raw/ may hold; more and the sync stops with a sentence. */
+const MAX_REPO_FILES = 50_000;
+/** Larger files aren't read: no page or transcript the app writes is that big. */
+const MAX_REPO_FILE_BYTES = 600_000;
+
 /**
  * The repo's wiki pages and transcripts (generated files excluded), path → text. Regular files
  * only: a symlink (git checks them out as plain files, but never trust that alone) would read a
- * file of the gateway's own into the user's wiki.
+ * file of the gateway's own into the user's wiki. A file too large to be one of ours is left out
+ * (so it's never imported; one Ambient has is written back over it).
  */
 async function readRepo(dir: string): Promise<Map<string, string>> {
   const out = new Map<string, string>();
@@ -213,7 +219,10 @@ async function readRepo(dir: string): Promise<Map<string, string>> {
       else if (e.isFile() && e.name.endsWith(".md")) {
         const rel = relative(dir, p).split(sep).join("/");
         const generated = rel === "AGENTS.md" || rel === "wiki/index.md" || rel === "wiki/log.md" || e.name === "_index.md";
-        if (!generated && (rel.startsWith("wiki/") || rel.startsWith("raw/"))) out.set(rel, await readFile(p, "utf8"));
+        if (generated || !(rel.startsWith("wiki/") || rel.startsWith("raw/"))) continue;
+        if ((await stat(p)).size > MAX_REPO_FILE_BYTES) continue;
+        if (out.size >= MAX_REPO_FILES) throw new GitError(`The repo has more than ${MAX_REPO_FILES} pages. Use a repo for the wiki alone.`, "too_large");
+        out.set(rel, await readFile(p, "utf8"));
       }
     }
   };

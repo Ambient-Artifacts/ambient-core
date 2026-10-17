@@ -12,7 +12,9 @@
 //   or write a file outside the wiki (/etc/brain/*.env, for one).
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { BlockList, isIP } from "node:net";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -26,7 +28,7 @@ export interface RemoteRepo {
 export class GitError extends Error {
   constructor(
     message: string,
-    readonly code: "bad_url" | "auth" | "not_found" | "not_empty" | "conflict" | "failed" = "failed",
+    readonly code: "bad_url" | "auth" | "not_found" | "not_empty" | "conflict" | "too_large" | "failed" = "failed",
   ) {
     super(message);
   }
@@ -35,6 +37,8 @@ export class GitError extends Error {
 export interface GitOptions {
   /** Tests use local bare repos (file://). Never set in production. */
   allowFile?: boolean;
+  /** What a clone may take on disk; MAX_CLONE_BYTES unless set (tests set less). */
+  maxCloneBytes?: number;
 }
 
 export const BOT_AUTHOR = { name: "Ambient Bot", email: "bot@ambient.invalid" };
@@ -126,20 +130,62 @@ function env(remote?: RemoteRepo, opts: GitOptions = {}, pin?: string): NodeJS.P
   return out;
 }
 
-/** Run git. Errors are mapped to plain-language GitErrors; the token never appears in them. */
-export async function git(args: string[], o: { cwd?: string; remote?: RemoteRepo; timeoutMs?: number } & GitOptions = {}): Promise<string> {
+/** What a clone may take on disk (pack and working copy), checked while it runs. */
+export const MAX_CLONE_BYTES = 512 * 1024 * 1024;
+
+/** Bytes of regular files under `dir` (links not followed). */
+async function dirBytes(dir: string): Promise<number> {
+  let total = 0;
+  for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) total += await dirBytes(p);
+    else if (e.isFile()) total += (await lstat(p).catch(() => ({ size: 0 }))).size;
+  }
+  return total;
+}
+
+/**
+ * Run git. Errors are mapped to plain-language GitErrors; the token never appears in them.
+ * `limit`: a folder git writes into and the most it may hold. The repo is someone's own, as big as
+ * they like, and the gateway's disk is everyone's: past the limit, git is stopped.
+ */
+export async function git(
+  args: string[],
+  o: { cwd?: string; remote?: RemoteRepo; timeoutMs?: number; limit?: { dir: string; bytes: number } } & GitOptions = {},
+): Promise<string> {
   // A call that talks to the remote checks its address again, now, and git connects only there.
   const pin = o.remote ? (await resolveRepoUrl(o.remote.url, o)).pin : undefined;
+  const p = run("git", o.cwd ? ["-C", o.cwd, ...args] : args, {
+    env: env(o.remote, o, pin),
+    timeout: o.timeoutMs ?? 120_000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  let tooLarge = false;
+  let measuring = false;
+  const watch = o.limit
+    ? setInterval(() => {
+        if (measuring) return;
+        measuring = true;
+        void dirBytes(o.limit!.dir)
+          .then((n) => {
+            if (n > o.limit!.bytes) {
+              tooLarge = true;
+              p.child.kill("SIGKILL");
+            }
+          })
+          .finally(() => (measuring = false));
+      }, 250)
+    : undefined;
   try {
-    const { stdout } = await run("git", o.cwd ? ["-C", o.cwd, ...args] : args, {
-      env: env(o.remote, o, pin),
-      timeout: o.timeoutMs ?? 120_000,
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    return stdout;
+    const { stdout } = await p;
+    // Done before a check came round (a fast clone): measured once more.
+    if (o.limit && (await dirBytes(o.limit.dir)) > o.limit.bytes) tooLarge = true;
+    if (!tooLarge) return stdout;
+    throw new Error("too large");
   } catch (err) {
     const e = err as { stderr?: string; message: string; killed?: boolean };
     const text = `${e.stderr ?? ""} ${e.message}`.replace(/Authorization: Basic \S+/g, "Authorization: …");
+    if (tooLarge) throw new GitError(`This repo is too large for Ambient (more than ${Math.round(o.limit!.bytes / 1024 / 1024)} MB). Use a repo for the wiki alone.`, "too_large");
     if (e.killed) throw new GitError("The repo took too long to answer.");
     if (/Authentication failed|could not read Username|403|401|Invalid username or password|access denied|not authorized/i.test(text)) {
       throw new GitError("The token was refused. Check that it can read and write this repo.", "auth");
@@ -147,6 +193,8 @@ export async function git(args: string[], o: { cwd?: string; remote?: RemoteRepo
     if (/not found|does not exist|Repository not found|404/i.test(text)) throw new GitError("Repo not found. Check the URL and that the token can see it.", "not_found");
     if (/non-fast-forward|\[rejected\]|fetch first|conflict/i.test(text)) throw new GitError("The repo changed at the same time; will retry.", "conflict");
     throw new GitError(`git failed: ${text.trim().split("\n").slice(-3).join(" ").slice(0, 300)}`);
+  } finally {
+    clearInterval(watch);
   }
 }
 
@@ -173,7 +221,7 @@ export async function checkout(remote: RemoteRepo, dir: string, opts: GitOptions
     await git(["init", "-q", "-b", info.branch, dir], opts);
     await git(["remote", "add", "origin", remote.url], { cwd: dir, ...opts });
   } else {
-    await git(["clone", "-q", "--depth", "1", "--branch", info.branch, remote.url, dir], { remote, ...opts });
+    await git(["clone", "-q", "--depth", "1", "--branch", info.branch, remote.url, dir], { remote, limit: { dir, bytes: opts.maxCloneBytes ?? MAX_CLONE_BYTES }, ...opts });
   }
   return info;
 }
