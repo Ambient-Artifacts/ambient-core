@@ -165,6 +165,24 @@ describe("oauth storage", () => {
     expect((await t.mutation(api.oauth.destroyByAccount, { secret, accountId: "u1" })).removed).toBe(1);
   });
 
+  it("sweeps registered clients nobody connected with, and keeps the ones in use", async () => {
+    const { t } = await setup();
+    const NEVER = 8_640_000_000_000_000;
+    const client = (key: string, clientId?: string) => t.mutation(api.oauth.upsert, { secret, model: "Client", key, payload: "v1.c", expiresAt: NEVER, clientId });
+    await client("h1:unused", "app-unused");
+    await client("h1:used", "app-used");
+    await client("h1:old-row");
+    await t.mutation(api.oauth.upsert, { secret, model: "Grant", key: "h1:g-used", payload: "v1.g", expiresAt: 9e15, grantId: "g-used", clientId: "app-used", accountId: "u1" });
+    // Not a week old yet: nothing goes.
+    expect(await t.mutation(internal.oauth.sweepUnusedClients, {})).toEqual({ removed: 0 });
+    const later = Date.now() + 8 * 24 * 60 * 60_000;
+    expect(await t.mutation(internal.oauth.sweepUnusedClients, { now: later })).toEqual({ removed: 1 });
+    const left = await t.run(async (ctx) => (await ctx.db.query("oauth").collect()).filter((r) => r.model === "Client").map((r) => r.key).sort());
+    expect(left).toEqual(["h1:old-row", "h1:used"]);
+    expect(await t.query(api.oauth.find, { secret, model: "Client", key: "h1:used", now: later })).toMatchObject({ payload: "v1.c" });
+    expect(await t.mutation(internal.oauth.sweepUnusedClients, { now: later })).toEqual({ removed: 0 });
+  });
+
   it("never takes a sealed row's stored key, uid or user code as a raw id", async () => {
     const { t } = await setup();
     await t.mutation(api.oauth.upsert, { secret, model: "RefreshToken", key: "h1:r9", payload: "v1.x", expiresAt: 10_000, uid: "h1:u9", userCode: "h1:c9" });
