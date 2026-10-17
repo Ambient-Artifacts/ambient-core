@@ -210,9 +210,9 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function noteRefs(n: Page, extra: string[] = []): string[] {
+function noteRefs(n: Page): string[] {
   const fm = n.frontmatter;
-  const all = [fm.recorded_by, ...(["people", "orgs", "projects", "topics"] as const).flatMap((k) => (Array.isArray(fm[k]) ? fm[k] : [])), ...extra];
+  const all = [fm.recorded_by, ...(["people", "orgs", "projects", "topics"] as const).flatMap((k) => (Array.isArray(fm[k]) ? fm[k] : []))];
   return [...new Set(all.filter((r): r is string => typeof r === "string" && r.split("/")[0]! in FOLDER_TYPE))];
 }
 
@@ -350,7 +350,8 @@ export async function consolidatePages(run: ConsolidateRun): Promise<Consolidate
 
   const byTarget = new Map<string, { notes: Page[]; known: boolean }>();
   for (const n of fresh) {
-    for (const r of noteRefs(n, run.extraRefs?.get(n.ref))) {
+    // Its front matter's pages, and the ones findEntities named for a work note that lists none.
+    for (const r of new Set([...noteRefs(n), ...(run.extraRefs?.get(n.ref) ?? [])])) {
       if (mode === "personal" && !store.getByRef(r)) continue;
       byTarget.set(r, { notes: [...(byTarget.get(r)?.notes ?? []), n], known: false });
     }
