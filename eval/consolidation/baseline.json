@@ -1,0 +1,47 @@
+{
+  "model": "claude-haiku-4-5",
+  "at": "2026-10-17T10:11:14.246Z",
+  "summary": {
+    "categories": {
+      "entity recall": {
+        "passed": 7,
+        "of": 7,
+        "score": 1
+      },
+      "fact recall": {
+        "passed": 6,
+        "of": 6,
+        "score": 1
+      },
+      "decision recall": {
+        "passed": 2,
+        "of": 2,
+        "score": 1
+      },
+      "decision precision": {
+        "passed": 2,
+        "of": 2,
+        "score": 1
+      },
+      "supersession": {
+        "passed": 1,
+        "of": 2,
+        "score": 0.5
+      },
+      "untouched": {
+        "passed": 3,
+        "of": 3,
+        "score": 1
+      },
+      "link validity": {
+        "passed": 13,
+        "of": 13,
+        "score": 1
+      }
+    },
+    "total": 0.9285714285714286,
+    "failed": [
+      "s1"
+    ]
+  }
+}

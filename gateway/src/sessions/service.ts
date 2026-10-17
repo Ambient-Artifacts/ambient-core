@@ -248,10 +248,12 @@ export class SessionService {
     // Full names of others only: never the person working, never a description in a name's place.
     const fullNames = noteNames(s.people, user?.name ?? null);
     const projectNames = s.projects.map((n) => entityName("projects", n)).filter((n): n is string => n !== null);
+    const orgNames = (s.orgs ?? []).map((n) => entityName("orgs", n)).filter((n): n is string => n !== null);
     if (spec.personal) {
       const reader = await this.d.personal.reader(uid);
       const people = await resolve(reader, fullNames, "person");
       const projects = await resolve(reader, projectNames, "project");
+      const orgs = await resolve(reader, orgNames, "org");
       path ||= `wiki/sessions/${day.slice(0, 4)}/${day.slice(5, 7)}/${day}-${slugify(s.title).slice(0, 50) || "session"}-${noteId.slice(-6).toLowerCase()}.md`;
       const legacy = path.startsWith("wiki/notes/") ? path : null;
       if (legacy) path = legacy.replace(/^wiki\/notes\//, "wiki/sessions/");
@@ -269,6 +271,7 @@ export class SessionService {
           consent: { mode: "solo" },
           people,
           projects,
+          ...(orgs.length ? { orgs } : {}),
           work,
           source: spec.source,
           compile: { engine: "server", status: "compiled", fallback: "none" },
@@ -299,6 +302,7 @@ export class SessionService {
             summary: s.summary,
             people: fullNames.map((n) => `people/${slugify(n)}`).filter((r) => r.length > 7),
             projects: projectNames.map((n) => `projects/${slugify(n)}`).filter((r) => r.length > 9),
+            orgs: orgNames.map((n) => `orgs/${slugify(n)}`).filter((r) => r.length > 5),
             work,
           },
           body_md: body,
@@ -395,7 +399,7 @@ export function noteNames(names: string[], self: string | null): string[] {
   return out;
 }
 
-async function resolve(reader: WikiReader, names: string[], kind: "person" | "project"): Promise<string[]> {
+async function resolve(reader: WikiReader, names: string[], kind: "person" | "project" | "org"): Promise<string[]> {
   const refs = new Set<string>();
   for (const name of names) {
     const page = await reader.resolveEntity(name, kind).catch(() => undefined);

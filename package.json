@@ -17,7 +17,8 @@
     "test": "vitest run",
     "typecheck": "tsc -p spec && tsc -p wiki && tsc -p control && tsc -p team && tsc -p gateway && tsc -p eval",
     "schemas": "npm run export-json-schema -w @brain/spec",
-    "eval": "tsx eval/run.ts"
+    "eval": "tsx eval/run.ts",
+    "eval:consolidation": "tsx eval/consolidation/run.ts"
   },
   "devDependencies": {
     "@types/node": "^24.19.1",

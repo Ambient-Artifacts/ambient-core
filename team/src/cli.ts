@@ -1,6 +1,6 @@
 // Jobs run by systemd timers. Exit code 1 on failed/partial so OnFailure fires;
 // the result JSON in out/consolidate/ is the source of truth either way.
-import { AnthropicDecisionFiler, AnthropicOverviewWriter, AnthropicResearcher, AnthropicUpdater } from "./anthropic.ts";
+import { AnthropicDecisionFiler, AnthropicEntityFinder, AnthropicOverviewWriter, AnthropicResearcher, AnthropicUpdater } from "./anthropic.ts";
 import { loadTeamConfig } from "./config.ts";
 import { consolidate, type PageUpdater } from "./consolidate.ts";
 import { join } from "node:path";
@@ -40,6 +40,7 @@ if (cmd === "consolidate" || cmd === "rewrite") {
   const result = await consolidate(wiki, updater, {
     overview: cfg.anthropicApiKey ? new AnthropicOverviewWriter(cfg.anthropicApiKey, cfg.model) : undefined,
     decisions: cfg.anthropicApiKey ? new AnthropicDecisionFiler(cfg.anthropicApiKey, cfg.model) : undefined,
+    finder: cfg.anthropicApiKey ? new AnthropicEntityFinder(cfg.anthropicApiKey, cfg.model) : undefined,
     outDir: cfg.outDir,
     version: cfg.version,
     rewrite,

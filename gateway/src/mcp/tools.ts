@@ -375,18 +375,19 @@ export function buildMcpServer({ principal, readers, routines, version, personal
           title: z.string().min(1).max(60).describe("What was worked on or achieved."),
           summary: z.string().min(1).max(200).describe("One sentence: what was done and how it ended."),
           worked_on: List(8, "Concrete things done, outcome first."),
-          decisions: List(8, "Decisions made, with the reason when given."),
+          decisions: List(8, "Decisions made, with the reason when given: also choices like tracking a competitor, dropping a feature or picking a supplier."),
           next_steps: List(8, 'What is left to do; "Name: task" when someone owns it, ending in "(due YYYY-MM-DD)" when a date was set.'),
           open_questions: List(6, "What is still unresolved."),
           people: z.array(z.string().min(1).max(80)).max(10).optional().describe("Full names of other people the work was for or about (not the user); names only."),
-          projects: z.array(z.string().min(1).max(80)).max(6).optional().describe("Projects, products or clients it was about."),
+          projects: z.array(z.string().min(1).max(80)).max(6).optional().describe("Projects or products it was about."),
+          orgs: z.array(z.string().min(1).max(80)).max(5).optional().describe("Companies or organizations it was about: customers, competitors, suppliers, partners. Proper names only."),
           app: z.string().max(40).optional().describe("Your app's name, e.g. Claude, ChatGPT, Copilot."),
           ...(teamOnly ? {} : { share_with_team: z.string().max(80).optional().describe("Team slug. Only when the user asks to share this with their team.") }),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       },
       async (args) => {
-        const a = args as { title: string; summary: string; worked_on?: string[]; decisions?: string[]; next_steps?: string[]; open_questions?: string[]; people?: string[]; projects?: string[]; app?: string; share_with_team?: string };
+        const a = args as { title: string; summary: string; worked_on?: string[]; decisions?: string[]; next_steps?: string[]; open_questions?: string[]; people?: string[]; projects?: string[]; orgs?: string[]; app?: string; share_with_team?: string };
         let team: Team | null = teamOnly ?? null;
         if (!teamOnly && a.share_with_team) {
           team = principal.teams.find((t) => t.slug === a.share_with_team) ?? null;
@@ -413,6 +414,7 @@ export function buildMcpServer({ principal, readers, routines, version, personal
             openQuestions: a.open_questions ?? [],
             people: a.people ?? [],
             projects: a.projects ?? [],
+            orgs: a.orgs ?? [],
             language: /[äöüß]|\b(und|der|die|das|nicht)\b/i.test(`${a.title} ${a.summary}`) ? "de" : "en",
           },
           startedAt: null,
