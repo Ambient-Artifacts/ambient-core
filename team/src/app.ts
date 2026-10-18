@@ -5,10 +5,10 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JWK, type JWTPayload } from "jose";
-import { clock, MicrosoftConnection, TeamNoteV1, TeamSettings, WorkDestination } from "@brain/spec";
+import { clock, MicrosoftConnection, TeamNoteV1, TeamSettings, withKind, WorkDestination } from "@brain/spec";
 import { dispatchQuery, GitError, HasContent, LocalReader, QueryRequest, type WikiStore } from "@brain/wiki";
 import type { Deliverer } from "./destination.ts";
-import { GraphError, MicrosoftGraph, type DriveFolder } from "./graph.ts";
+import { GraphError, graphFor as defaultGraphFor, GraphTokens, type DriveFolder, type MicrosoftGraph } from "./graph.ts";
 import { destinationFiles, IngestError, ingestNote } from "./ingest.ts";
 import type { TeamSettingsStore } from "./settings.ts";
 import { ReadOnlyWiki, type TeamWiki } from "./wiki.ts";
@@ -25,6 +25,8 @@ export interface TeamAppConfig {
   /** Team settings and delivery to the team's destinations (product/sources.md). */
   settings?: TeamSettingsStore;
   deliverer?: Deliverer;
+  /** Tokens the gateway pushes for Ambient's own Microsoft app ("Connect Microsoft 365"). */
+  graphTokens?: GraphTokens;
   /** Builds the Graph client for a Microsoft 365 connection (tests inject a fake fetch). */
   graphFor?: (conn: MicrosoftConnection) => MicrosoftGraph;
 }
@@ -35,7 +37,7 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
   app.disable("x-powered-by");
 
   /** The gateway's token for this team and `purpose`, or null. */
-  const verified = async (req: Request, purpose: "query" | "inbox" | "repo" | "settings" | "health") => {
+  const verified = async (req: Request, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health") => {
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ")) return null;
     try {
@@ -74,7 +76,7 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     });
   });
 
-  const auth = (purpose: "query" | "inbox" | "repo" | "settings") => async (req: Request, res: Response, next: NextFunction) => {
+  const auth = (purpose: "query" | "inbox" | "repo" | "settings" | "graph") => async (req: Request, res: Response, next: NextFunction) => {
     if (!req.headers.authorization?.startsWith("Bearer ")) {
       res.status(401).json({ error: "missing token" });
       return;
@@ -179,6 +181,29 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     }
   });
 
+  // A token for Ambient's own Microsoft app, for one company: the gateway holds the app's
+  // credential and sends a fresh token every 20 minutes (and right after "Connect Microsoft 365").
+  app.put("/v1/graph-token", express.json({ limit: "16kb" }), auth("graph"), (req, res) => {
+    if (!cfg.graphTokens) {
+      res.status(501).json({ error: "unsupported" });
+      return;
+    }
+    const b = (req.body ?? {}) as { tenant_id?: unknown; access_token?: unknown; expires_at?: unknown };
+    const now = Date.now();
+    if (
+      typeof b.tenant_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(b.tenant_id) ||
+      typeof b.access_token !== "string" || b.access_token.length < 20 || b.access_token.length > 12_000 ||
+      typeof b.expires_at !== "number" || b.expires_at <= now || b.expires_at > now + 24 * 3600_000
+    ) {
+      res.status(400).json({ error: "bad token" });
+      return;
+    }
+    cfg.graphTokens.set(b.tenant_id, b.access_token, b.expires_at);
+    res.status(204).end();
+    // Files that waited for the token go out now.
+    void cfg.deliverer?.tokenArrived().catch((err) => console.error("[team] delivery", err));
+  });
+
   // Team settings (product/sources.md): where transcripts and copies of work logs go, and the
   // Microsoft 365 connection. Members read them through the gateway, owners and admins change
   // them (the gateway checks the role). Secrets go in, never out.
@@ -207,7 +232,8 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
     const next: TeamSettings = structuredClone(store.get());
-    const graphFor = cfg.graphFor ?? ((conn: MicrosoftConnection) => new MicrosoftGraph(conn));
+    const tokens = cfg.graphTokens ?? new GraphTokens();
+    const graphFor = cfg.graphFor ?? ((conn: MicrosoftConnection) => defaultGraphFor(conn, tokens));
     /** A folder from a pasted link, or from its drive and item IDs (all a single-folder grant allows). */
     const pick = async (t: Record<string, unknown>): Promise<DriveFolder> => {
       if (!next.microsoft) throw new SettingsError("Connect Microsoft 365 first, then choose a folder.");
@@ -221,9 +247,12 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     try {
       if (body.microsoft === null) next.microsoft = null;
       else if (body.microsoft !== undefined) {
-        const conn = MicrosoftConnection.safeParse(body.microsoft);
+        // Apps from before Ambient's own Microsoft app send the company's app without `kind`.
+        const conn = MicrosoftConnection.safeParse(withKind(body.microsoft));
         if (!conn.success) throw new SettingsError("Microsoft 365 needs the tenant ID, the app (client) ID and a client secret.");
-        await graphFor(conn.data).accessToken(); // proves the credentials before they're stored
+        // Proves the credentials before they're stored; for Ambient's app, that the gateway has
+        // sent a token for this company (only its "Connect Microsoft 365" flow sets this kind).
+        await graphFor(conn.data).accessToken();
         next.microsoft = conn.data;
       }
       const t = body.transcripts as Record<string, unknown> | undefined;

@@ -1,6 +1,7 @@
 import { exportJWK, generateKeyPair, type JWK } from "jose";
 import type { AppleRevokeConfig } from "./auth/apple-revoke.ts";
 import { parseMasterKey, type MasterKey } from "./crypto.ts";
+import { loadMicrosoftConnect, type MicrosoftConnectConfig } from "./microsoft-connect.ts";
 import type { ApnsConfig } from "./push.ts";
 
 export interface GatewayConfig {
@@ -41,6 +42,12 @@ export interface GatewayConfig {
    * the one the apps use). Optional: without one the apps show only Sign in with Apple.
    */
   microsoftClientIds?: string[];
+  /**
+   * "Connect Microsoft 365": Ambient's own multi-tenant Microsoft app (a confidential client of
+   * its own, not the apps' sign-in app) and its credential. Optional: without it, teams connect
+   * their own Entra app.
+   */
+  microsoftConnect?: MicrosoftConnectConfig;
   /**
    * A self-hosted server whose admin hands out AI-app sign-in codes (`admin connect-code`): the
    * sign-in page mentions it next to the app's codes.
@@ -115,6 +122,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     minAppVersion: env.BRAIN_MIN_APP_VERSION || undefined,
     appUpdateUrl: env.BRAIN_APP_UPDATE_URL || undefined,
     microsoftClientIds: env.BRAIN_MICROSOFT_CLIENT_IDS?.split(",").map((s) => s.trim()).filter(Boolean),
+    microsoftConnect: loadMicrosoftConnect(env),
     adminCodes: env.BRAIN_ADMIN_CODES === "true",
     signups: parseSignups(env.BRAIN_SIGNUPS),
     requireSignInNonce: env.BRAIN_SIGNIN_NONCE === "required",

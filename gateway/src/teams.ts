@@ -74,7 +74,7 @@ export class TeamLink {
     this.keyPromise = importJWK(signingKey, "ES256");
   }
 
-  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "settings" | "health", subject?: string, extra: Record<string, string> = {}): Promise<string> {
+  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health", subject?: string, extra: Record<string, string> = {}): Promise<string> {
     return new SignJWT({ ...extra, purpose, team_slug: team.slug })
       .setProtectedHeader({ alg: "ES256", kid: this.kid, typ: TEAM_TOKEN_TYP })
       .setIssuer(this.issuer)
@@ -182,6 +182,23 @@ export class TeamLink {
     }
     if (res.status >= 500) throw new TeamServerError(503, `team server answered ${res.status}`);
     return { status: res.status, json: await readJson(res) };
+  }
+
+  /** A token for Ambient's own Microsoft app, for the team's company (microsoft-connect.ts). */
+  async pushGraphToken(team: Pick<Team, "id" | "slug" | "serverUrl">, body: { tenant_id: string; access_token: string; expires_at: number }): Promise<void> {
+    if (!team.serverUrl) throw new TeamServerError(503, `team ${team.slug} has no server yet`);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${team.serverUrl}/v1/graph-token`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", authorization: `Bearer ${await this.token(team, "graph")}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (err) {
+      throw new TeamServerError(503, `team server unreachable: ${(err as Error).message}`);
+    }
+    if (!res.ok) throw new TeamServerError(res.status >= 500 ? 503 : res.status, `team server answered ${res.status}`);
   }
 
   reader(team: Team, uid: string): WikiReader {

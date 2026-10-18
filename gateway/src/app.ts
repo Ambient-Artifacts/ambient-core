@@ -30,6 +30,7 @@ import { RoutineKeys } from "./routines/keys.ts";
 import { loadRunner, RoutineService } from "./routines/service.ts";
 import { sessionUploadRouter } from "./sessions/route.ts";
 import { SessionService } from "./sessions/service.ts";
+import { MicrosoftConnectFlow, MicrosoftConnector } from "./microsoft-connect.ts";
 import { TeamLink } from "./teams.ts";
 
 export const VERSION = "0.1.0";
@@ -52,6 +53,8 @@ export interface AppDeps {
   /** Tests: how often the polling source asks, and how long an event stream stays open. */
   revisionPollMs?: number;
   streamMaxMs?: number;
+  /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
+  microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
 
 export function createApp(deps: AppDeps) {
@@ -68,6 +71,17 @@ export function createApp(deps: AppDeps) {
   const teams = new TeamLink(config.origin, config.signingKeys[0]!, deps.fetchImpl, (team) => revisions.teamChanged(team.id));
   const events = new EventHub(deps.revisionSource ?? new PollingRevisionSource(revisions, deps.revisionPollMs ?? 5_000));
   const microsoft = deps.microsoft ?? (config.microsoftClientIds?.length ? microsoftVerifier(config.microsoftClientIds) : undefined);
+  const connector = deps.microsoftConnect?.connector ?? (config.microsoftConnect ? new MicrosoftConnector(config.microsoftConnect) : undefined);
+  const microsoftConnect = connector
+    ? new MicrosoftConnectFlow({
+        origin: config.origin,
+        connector,
+        control,
+        teams,
+        fetchImpl: deps.microsoftConnect?.fetchImpl,
+        propagationDelayMs: deps.microsoftConnect?.propagationDelayMs,
+      })
+    : undefined;
   const provider: Provider = createProvider(config, directory, control);
   const verify = createBearerVerifier({ issuer: config.origin, signingKeys: config.signingKeys, directory, pats });
   const sessions = new SessionService({ control, personal, directory, teams });
@@ -130,6 +144,7 @@ export function createApp(deps: AppDeps) {
       appleRevoke: deps.appleRevoke ?? appleRevoker(config.appleRevoke, deps.fetchImpl),
       microsoftClientId: microsoft ? config.microsoftClientIds?.[0] : undefined,
       appleSignIn: config.appleAudiences.length > 0,
+      microsoftConnect,
       appConfig: { minimumVersion: config.minAppVersion, updateUrl: config.appUpdateUrl },
       revisions,
       events,
@@ -137,6 +152,7 @@ export function createApp(deps: AppDeps) {
     }),
   );
   app.use(joinRouter());
+  if (microsoftConnect) app.use(microsoftConnect.router());
   // Where people get the code for an AI app: from the app; without Apple or Microsoft sign-in
   // there's no app to show one, so from the admin CLI; on a self-hosted server, either.
   const appSignIn = config.appleAudiences.length > 0 || !!microsoft;
@@ -160,5 +176,5 @@ export function createApp(deps: AppDeps) {
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });
 
-  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, revisions, events, notifier, teams };
+  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, revisions, events, notifier, teams, microsoftConnect };
 }

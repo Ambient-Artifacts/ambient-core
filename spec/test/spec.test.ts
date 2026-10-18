@@ -280,3 +280,13 @@ describe("destination files", () => {
     expect(TeamSettings.safeParse({ work: { kind: "repo" } }).success).toBe(false);
   });
 });
+
+describe("the transcript fixture (shared with the app)", () => {
+  it("renders spec/fixtures/transcript byte for byte", async () => {
+    const { renderTranscript, destinationFileName } = await import("../src/index.ts");
+    const dir = join(FIXTURES, "transcript");
+    const f = JSON.parse(readFileSync(join(dir, "kickoff.json"), "utf8"));
+    expect(renderTranscript(f.meta, f.segments)).toBe(readFileSync(join(dir, "kickoff.md"), "utf8"));
+    expect(destinationFileName(f.meta)).toBe(f.file);
+  });
+});

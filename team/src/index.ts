@@ -13,5 +13,5 @@ export { moveSessionNotes } from "./sessions-folder.ts";
 export { TeamWiki } from "./wiki.ts";
 export { TeamRemote, type RemoteStatus } from "./remote.ts";
 export { Deliverer, TranscriptOutbox, type DeliveryStatus } from "./destination.ts";
-export { GraphError, MicrosoftGraph } from "./graph.ts";
+export { ClientCredentials, GraphError, graphFor, GraphTokens, MicrosoftGraph, PushedToken, staticToken, type DriveFolder, type TokenSource } from "./graph.ts";
 export { TeamSettingsStore, type PublicTeamSettings } from "./settings.ts";

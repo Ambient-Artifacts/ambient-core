@@ -26,7 +26,9 @@ function refs(v: unknown): string[] {
 }
 
 function str(v: unknown, max: number): string {
-  return typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
+  // A cut through an emoji (or any character outside the BMP) would leave half of it, which
+  // JSON writes as "\udxxx": drop the half, as the app does.
+  return typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max).replace(/[\uD800-\uDBFF]$/, "") : "";
 }
 
 /** A work session's tool and place, from untrusted front matter. */
