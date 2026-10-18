@@ -303,6 +303,17 @@ describe("a OneDrive/SharePoint folder", () => {
     expect(page.body).not.toContain("## Related");
   });
 
+  it("never cuts a title through an emoji", async () => {
+    calls.length = 0;
+    const title = `${"a".repeat(59)}🙂 rest`; // the 60-character cut falls inside the emoji
+    const n = note("t_acme", "01JDESTEMOJI00000000000009", { meeting: undefined, entry_page: { frontmatter: { title, summary: "x" }, body_md: "# x" } });
+    expect((await two.call("POST", "/v1/inbox", "inbox", n)).status).toBe(201);
+    await two.deliverer.run();
+    const put = calls.find((c) => c.method === "PUT");
+    expect(put?.body).toContain(`title: "${"a".repeat(59)}"`);
+    expect(put?.body).not.toMatch(/\\ud[89ab]/i);
+  });
+
   it("writes nothing when transcripts are switched off", async () => {
     await two.call("PUT", "/v1/settings", "settings", { transcripts: { kind: "none" } });
     await two.call("POST", "/v1/inbox", "inbox", note("t_acme", "01JDESTNONE000000000000005"));
