@@ -1,6 +1,8 @@
-// Microsoft Graph for the team server: app-only access (client credentials) with the team's own
-// Entra app, for OneDrive/SharePoint folders. Plain fetch, injectable for tests; errors carry a
-// sentence an admin can act on.
+// Microsoft Graph for OneDrive/SharePoint folders. Where its token comes from is a TokenSource:
+// the team's own Entra app (client credentials, secret on the team server), tokens the gateway
+// pushes for Ambient's own app (its credential never leaves the gateway), or a person's sign-in
+// while the gateway sets up "Connect Microsoft 365". Plain fetch, injectable for tests; errors
+// carry a sentence an admin can act on.
 import type { MicrosoftConnection } from "@brain/spec";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
@@ -36,18 +38,28 @@ function friendly(status: number, body: string): string {
 
 const segments = (path: string) => path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
 
-export class MicrosoftGraph {
+/** Where a Graph token comes from. */
+export interface TokenSource {
+  token(): Promise<string>;
+  /** Microsoft answered 401: drop a cached token, so the next call gets a fresh one. */
+  forget(): void;
+}
+
+/** The team's own Entra app: client credentials. Cached until two minutes before expiry. */
+export class ClientCredentials implements TokenSource {
   private cached: { value: string; until: number } | null = null;
 
   constructor(
-    private conn: MicrosoftConnection,
+    private conn: { tenant_id: string; client_id: string; client_secret: string },
     private fetchImpl: typeof fetch = fetch,
-    private graph = GRAPH,
     private login = LOGIN,
   ) {}
 
-  /** An app-only token; cached until two minutes before it expires. */
-  async accessToken(): Promise<string> {
+  forget(): void {
+    this.cached = null;
+  }
+
+  async token(): Promise<string> {
     if (this.cached && this.cached.until > Date.now()) return this.cached.value;
     const body = new URLSearchParams({
       client_id: this.conn.client_id,
@@ -73,6 +85,61 @@ export class MicrosoftGraph {
     this.cached = { value: json.access_token, until: Date.now() + Math.max(60, (json.expires_in ?? 3600) - 120) * 1000 };
     return json.access_token;
   }
+}
+
+/** Tokens for Ambient's own Microsoft app, per tenant, as the gateway pushes them (every 20 minutes). */
+export class GraphTokens {
+  private byTenant = new Map<string, { value: string; until: number }>();
+
+  set(tenantId: string, value: string, expiresAt: number): void {
+    this.byTenant.set(tenantId.toLowerCase(), { value, until: expiresAt });
+  }
+
+  /** A token still good for two minutes, or null. */
+  get(tenantId: string, now = Date.now()): string | null {
+    const t = this.byTenant.get(tenantId.toLowerCase());
+    return t && t.until - 120_000 > now ? t.value : null;
+  }
+}
+
+export const WAITING_FOR_TOKEN = "Waiting for Ambient's Microsoft access for this company (the gateway renews it every 20 minutes).";
+
+/** A tenant's token from GraphTokens. */
+export class PushedToken implements TokenSource {
+  constructor(
+    private tokens: GraphTokens,
+    private tenantId: string,
+  ) {}
+
+  forget(): void {
+    // A 401 with a fresh pushed token means access was taken away; the next push will tell.
+  }
+
+  async token(): Promise<string> {
+    const t = this.tokens.get(this.tenantId);
+    if (!t) throw new GraphError(503, WAITING_FOR_TOKEN);
+    return t;
+  }
+}
+
+/** A token someone already has (the admin's sign-in during "Connect Microsoft 365"). */
+export const staticToken = (value: string): TokenSource => ({ token: async () => value, forget: () => undefined });
+
+/** The Graph client for a team's connection: its own app, or Ambient's app through pushed tokens. */
+export function graphFor(conn: MicrosoftConnection, tokens: GraphTokens, fetchImpl: typeof fetch = fetch): MicrosoftGraph {
+  return conn.kind === "ambient" ? new MicrosoftGraph(new PushedToken(tokens, conn.tenant_id), fetchImpl) : new MicrosoftGraph(new ClientCredentials(conn, fetchImpl), fetchImpl);
+}
+
+export class MicrosoftGraph {
+  constructor(
+    private source: TokenSource,
+    private fetchImpl: typeof fetch = fetch,
+    private graph = GRAPH,
+  ) {}
+
+  accessToken(): Promise<string> {
+    return this.source.token();
+  }
 
   async request(method: string, path: string, init: { body?: string; contentType?: string } = {}, retry = 2): Promise<Response> {
     const res = await this.fetchImpl(path.startsWith("http") ? path : `${this.graph}${path}`, {
@@ -91,9 +158,9 @@ export class MicrosoftGraph {
       await new Promise((r) => setTimeout(r, wait * 1000));
       return this.request(method, path, init, retry - 1);
     }
-    if (res.status === 401 && retry > 0 && this.cached) {
-      this.cached = null;
-      return this.request(method, path, init, retry - 1);
+    if (res.status === 401 && retry > 1) {
+      this.source.forget();
+      return this.request(method, path, init, 1);
     }
     if (!res.ok) throw new GraphError(res.status, friendly(res.status, await res.text()));
     return res;

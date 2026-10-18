@@ -5,17 +5,18 @@
 // server: the API returns public().
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { TeamSettings, type TranscriptDestination } from "@brain/spec";
+import { TeamSettings, withKind, type TranscriptDestination } from "@brain/spec";
 import { sealer, type Sealer } from "./seal.ts";
 
 export interface PublicTeamSettings {
   transcripts: TeamSettings["transcripts"];
   work: TeamSettings["work"];
-  microsoft: { tenant_id: string; client_id: string } | null;
+  microsoft: { kind: "own"; tenant_id: string; client_id: string } | { kind: "ambient"; tenant_id: string; tenant_name: string } | null;
 }
 
+/** On disk: the own app's secret sealed; older files have no `kind` (withKind). */
 type Stored = Omit<TeamSettings, "microsoft"> & {
-  microsoft: (Omit<NonNullable<TeamSettings["microsoft"]>, "client_secret"> & { client_secret?: string; client_secret_sealed?: string }) | null;
+  microsoft: { kind?: string; tenant_id: string; client_id?: string; client_secret?: string; client_secret_sealed?: string; tenant_name?: string } | null;
 };
 
 export class TeamSettingsStore {
@@ -37,7 +38,7 @@ export class TeamSettingsStore {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error(`[team] can't read ${this.file}: ${(err as Error).message}`);
       return this.current;
     }
-    let microsoft = stored.microsoft;
+    let microsoft: Stored["microsoft"] = stored.microsoft ? (withKind(stored.microsoft) as Stored["microsoft"]) : null;
     if (microsoft?.client_secret_sealed) {
       const { client_secret_sealed, ...rest } = microsoft;
       try {
@@ -57,7 +58,7 @@ export class TeamSettingsStore {
     }
     this.current = parsed.data;
     // Written before the secret was set: seal it now.
-    if (this.key && stored.microsoft?.client_secret) await this.save(this.current);
+    if (this.key && stored.microsoft?.client_secret && this.current.microsoft?.kind === "own") await this.save(this.current);
     return this.current;
   }
 
@@ -70,8 +71,8 @@ export class TeamSettingsStore {
     const { microsoft, ...rest } = valid;
     const stored: Stored = {
       ...rest,
-      microsoft: microsoft && this.key
-        ? { tenant_id: microsoft.tenant_id, client_id: microsoft.client_id, client_secret_sealed: this.key.seal(microsoft.client_secret) }
+      microsoft: microsoft?.kind === "own" && this.key
+        ? { kind: "own", tenant_id: microsoft.tenant_id, client_id: microsoft.client_id, client_secret_sealed: this.key.seal(microsoft.client_secret) }
         : microsoft,
     };
     await mkdir(dirname(this.file), { recursive: true });
@@ -92,6 +93,11 @@ export class TeamSettingsStore {
 
   public(readOnly: boolean): PublicTeamSettings {
     const { transcripts, work, microsoft } = this.effective(readOnly);
-    return { transcripts, work, microsoft: microsoft ? { tenant_id: microsoft.tenant_id, client_id: microsoft.client_id } : null };
+    const m: PublicTeamSettings["microsoft"] = !microsoft
+      ? null
+      : microsoft.kind === "own"
+        ? { kind: "own", tenant_id: microsoft.tenant_id, client_id: microsoft.client_id }
+        : { kind: "ambient", tenant_id: microsoft.tenant_id, tenant_name: microsoft.tenant_name };
+    return { transcripts, work, microsoft: m };
   }
 }

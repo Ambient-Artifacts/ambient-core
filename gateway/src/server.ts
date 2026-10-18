@@ -1,6 +1,7 @@
 // Gateway entry point (systemd: brain-gateway.service, behind Caddy on :443).
 import { ConvexClient, ConvexHttpClient } from "convex/browser";
 import { createApp, VERSION } from "./app.ts";
+import { TOKEN_PUSH_MS } from "./microsoft-connect.ts";
 import { appleVerifier } from "./auth/apple.ts";
 import { loadConfig } from "./config.ts";
 import { ConvexRevisionSource } from "./revisions.ts";
@@ -9,7 +10,7 @@ const config = loadConfig();
 const convex = new ConvexHttpClient(config.convexUrl);
 // One WebSocket to Convex for the apps' live revisions (Node has WebSocket built in).
 const live = new ConvexClient(config.convexUrl);
-const { app } = createApp({
+const { app, microsoftConnect } = createApp({
   config,
   convex: { query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args) },
   apple: appleVerifier(config.appleAudiences),
@@ -32,4 +33,19 @@ app.listen(port, host, () => {
     console.log(`[gateway] sign-in nonces: ${config.requireSignInNonce ? "required" : "checked when the app sends one (BRAIN_SIGNIN_NONCE=required makes them mandatory)"}`);
   }
   console.log(`[gateway] push notifications ${config.apns ? `on (APNs key ${config.apns.keyId}, topic ${config.apns.topic})` : "off: no APNs key in the env"}`);
+  console.log(`[gateway] Connect Microsoft 365 ${microsoftConnect ? `on (app ${config.microsoftConnect!.clientId}, ${config.microsoftConnect!.secret ? "secret" : "certificate"})` : "off: teams use their own Entra app"}`);
 });
+
+// Teams connected with Ambient's own Microsoft app get a fresh token for their company's tenant
+// (Microsoft's last about an hour): right away, then every 20 minutes.
+if (microsoftConnect) {
+  const push = () =>
+    microsoftConnect
+      .pushTokens()
+      .then((results) => {
+        for (const r of results.filter((x) => !x.ok)) console.error(`[gateway] Microsoft token for ${r.slug}: ${r.error}`);
+      })
+      .catch((err) => console.error("[gateway] Microsoft tokens", err));
+  setTimeout(push, 5_000).unref();
+  setInterval(push, TOKEN_PUSH_MS).unref();
+}

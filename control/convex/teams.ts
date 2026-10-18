@@ -47,7 +47,9 @@ export const active = query({
   handler: async (ctx, { secret }) => {
     assertService(secret);
     const teams = await ctx.db.query("teams").collect();
-    return teams.filter((t) => t.status === "active" && t.serverUrl).map((t) => ({ id: t._id, slug: t.slug, name: t.name, serverUrl: t.serverUrl! }));
+    return teams
+      .filter((t) => t.status === "active" && t.serverUrl)
+      .map((t) => ({ id: t._id, slug: t.slug, name: t.name, serverUrl: t.serverUrl!, microsoftTenantId: t.microsoftTenantId ?? null }));
   },
 });
 
@@ -113,6 +115,31 @@ export const create = internalMutation({
     const clash = await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
     if (clash) throw new ConvexError(`team ${slug} exists`);
     return ctx.db.insert("teams", { slug, name, status: "active", serverUrl, createdAt: Date.now() });
+  },
+});
+
+/** The Microsoft 365 tenant a team connected with Ambient's own Microsoft app, or null. */
+export const microsoftTenant = query({
+  args: { ...secretArg, slug: v.string() },
+  handler: async (ctx, { secret, slug }) => {
+    assertService(secret);
+    const team = await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+    return team?.microsoftTenantId ?? null;
+  },
+});
+
+/**
+ * The Microsoft 365 tenant connected with Ambient's own Microsoft app (null: disconnected). Only
+ * the gateway sets it, at the end of "Connect Microsoft 365" or when the team disconnects.
+ */
+export const setMicrosoftTenant = mutation({
+  args: { ...secretArg, slug: v.string(), tenantId: v.union(v.string(), v.null()) },
+  handler: async (ctx, { secret, slug, tenantId }) => {
+    assertService(secret);
+    if (tenantId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(tenantId)) throw new ConvexError("bad tenant id");
+    const team = await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+    if (!team) throw new ConvexError(`no team ${slug}`);
+    await ctx.db.patch(team._id, { microsoftTenantId: tenantId ?? undefined });
   },
 });
 

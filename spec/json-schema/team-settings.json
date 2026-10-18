@@ -120,26 +120,57 @@
       "default": null,
       "anyOf": [
         {
-          "type": "object",
-          "properties": {
-            "tenant_id": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "own"
+                },
+                "tenant_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "client_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "client_secret": {
+                  "type": "string",
+                  "minLength": 10,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "kind",
+                "tenant_id",
+                "client_id",
+                "client_secret"
+              ]
             },
-            "client_id": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-            },
-            "client_secret": {
-              "type": "string",
-              "minLength": 10,
-              "maxLength": 300
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "ambient"
+                },
+                "tenant_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "tenant_name": {
+                  "default": "",
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "kind",
+                "tenant_id"
+              ]
             }
-          },
-          "required": [
-            "tenant_id",
-            "client_id",
-            "client_secret"
           ]
         },
         {

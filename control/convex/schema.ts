@@ -153,6 +153,11 @@ export default defineSchema({
     status: teamStatus,
     /** Base URL of the team server, e.g. https://t-acme.fleet.example.com */
     serverUrl: v.optional(v.string()),
+    /**
+     * The company's Microsoft 365 tenant, once an admin connected it with Ambient's own Microsoft
+     * app. The gateway gets tokens for this tenant only and hands them to this team's server.
+     */
+    microsoftTenantId: v.optional(v.string()),
     createdAt: v.number(),
   }).index("by_slug", ["slug"]),
 

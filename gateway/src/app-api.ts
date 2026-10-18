@@ -24,6 +24,7 @@ import type { SessionService } from "./sessions/service.ts";
 import type { EventHub, Revisions } from "./revisions.ts";
 import { TeamServerError, type TeamLink } from "./teams.ts";
 import type { CodeHasher } from "./auth/codes.ts";
+import type { MicrosoftConnectFlow } from "./microsoft-connect.ts";
 import type { SignInNonces } from "./auth/signin-nonce.ts";
 
 export interface AppApiDeps {
@@ -49,6 +50,8 @@ export interface AppApiDeps {
   microsoftClientId?: string;
   /** Whether the apps can sign in with Apple here (a self-hosted server may take only Microsoft, or neither). */
   appleSignIn: boolean;
+  /** "Connect Microsoft 365" with Ambient's own Microsoft app, when this server has it. */
+  microsoftConnect?: MicrosoftConnectFlow;
   /** What the app checks at launch, before anyone signs in. */
   appConfig: { minimumVersion?: string; updateUrl?: string };
   revisions: Revisions;
@@ -137,6 +140,8 @@ export function appApiRouter(d: AppApiDeps): Router {
       microsoftClientId: d.microsoftClientId ?? null,
       // and "Continue with Apple" unless this is false (apps before it always show it).
       appleSignIn: d.appleSignIn,
+      // Team settings offer "Connect Microsoft 365" (Ambient's own Microsoft app) when true.
+      microsoftConnect: !!d.microsoftConnect,
     });
   });
 
@@ -825,10 +830,21 @@ export function appApiRouter(d: AppApiDeps): Router {
     }
     try {
       const b = (req.body ?? {}) as Record<string, unknown>;
+      // Ambient's own Microsoft app is connected only through "Connect Microsoft 365", where an
+      // admin of that company approved it: never by naming a tenant here.
+      const m = b.microsoft as { kind?: unknown } | null | undefined;
+      if (method === "PUT" && m && typeof m === "object" && m.kind === "ambient") {
+        res.status(400).json({ error: "settings", message: "Use Connect Microsoft 365 to connect Ambient's Microsoft app." });
+        return;
+      }
       const body = method === "PUT"
         ? Object.fromEntries((["transcripts", "work", "microsoft"] as const).filter((k) => k in b).map((k) => [k, b[k]]))
         : undefined;
       const out = await d.teams.settings(team, uid, method, body);
+      // Disconnected (or switched to the company's own app): no more tokens for that tenant.
+      if (method === "PUT" && out.status === 200 && "microsoft" in b) {
+        await d.control.m(api.teams.setMicrosoftTenant, { slug: team.slug, tenantId: null });
+      }
       res.status(out.status).json(out.json);
     } catch (err) {
       if (err instanceof TeamServerError) {
@@ -838,6 +854,30 @@ export function appApiRouter(d: AppApiDeps): Router {
       throw err;
     }
   };
+  // "Connect Microsoft 365": the address the app opens in a browser sheet, for an owner or admin.
+  r.post("/v1/app/teams/:slug/microsoft/connect", auth, json, async (req, res) => {
+    if (!d.microsoftConnect) {
+      res.status(501).json({ error: "unavailable", message: "This server has no Microsoft app for Connect Microsoft 365. Use your company's own Entra app instead." });
+      return;
+    }
+    const uid = uidOf(res);
+    const team = await d.directory.freshMembership(uid, String(req.params.slug));
+    if (!team || team.status !== "active") {
+      res.status(403).json({ error: "not_a_member" });
+      return;
+    }
+    if (team.role !== "owner" && team.role !== "admin") {
+      res.status(403).json({ error: "admins_only", message: "Only team owners and admins can connect Microsoft 365." });
+      return;
+    }
+    if (!team.serverUrl) {
+      res.status(503).json({ error: "team_unavailable", message: "The team's server isn't ready yet." });
+      return;
+    }
+    const requester = (await d.directory.user(uid))?.name ?? "a team admin";
+    const purpose = req.body?.for === "work" ? "work" : "transcripts";
+    res.json({ url: d.microsoftConnect.start({ uid, team, requester, purpose }) });
+  });
   r.get("/v1/app/teams/:slug/settings", auth, teamSettings("GET"));
   r.put("/v1/app/teams/:slug/settings", auth, json, teamSettings("PUT"));
 

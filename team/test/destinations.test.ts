@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parsePage, type MicrosoftConnection, type TeamNoteV1 } from "@brain/spec";
 import { createTeamApp } from "../src/app.ts";
 import { Deliverer, TranscriptOutbox } from "../src/destination.ts";
-import { MicrosoftGraph } from "../src/graph.ts";
+import { graphFor as realGraphFor, GraphTokens, type MicrosoftGraph } from "../src/graph.ts";
 import { TeamRemote } from "../src/remote.ts";
 import { TeamSettingsStore } from "../src/settings.ts";
 import { TeamWiki } from "../src/wiki.ts";
@@ -27,7 +27,7 @@ let privateKey: CryptoKey;
 let jwk: JWK;
 
 // A fake Microsoft: token endpoint, folder lookups, uploads. Records every call.
-const calls: { method: string; url: string; body?: string }[] = [];
+const calls: { method: string; url: string; body?: string; auth?: string }[] = [];
 let uploadStatus = 201;
 const FOLDERS: Record<string, { name: string; path: string }> = {
   "01FOLDER0001": { name: "Meetings", path: "/drives/b!drive-0001/root:/Company/Unternehmen" },
@@ -37,7 +37,7 @@ const fakeFetch = (async (input: string | URL, init: RequestInit = {}) => {
   const url = String(input);
   const method = init.method ?? "GET";
   const body = typeof init.body === "string" ? init.body : init.body instanceof URLSearchParams ? init.body.toString() : undefined;
-  calls.push({ method, url, body });
+  calls.push({ method, url, body, auth: (init.headers as Record<string, string> | undefined)?.authorization });
   const json = (status: number, data: unknown) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
   const folder = (id: string) => json(200, { id, name: FOLDERS[id]!.name, folder: {}, parentReference: { driveId: "b!drive-0001", path: FOLDERS[id]!.path } });
   if (url.startsWith(`https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`)) {
@@ -53,7 +53,9 @@ const fakeFetch = (async (input: string | URL, init: RequestInit = {}) => {
   }
   return json(404, { error: { message: "not found" } });
 }) as typeof fetch;
-const graphFor = (conn: MicrosoftConnection) => new MicrosoftGraph(conn, fakeFetch);
+const graphTokensFor = new Map<string, GraphTokens>();
+/** Each test server has its own pushed-token store, as on a real team server. */
+const graphForTeam = (teamId: string) => (conn: MicrosoftConnection): MicrosoftGraph => realGraphFor(conn, graphTokensFor.get(teamId)!, fakeFetch);
 
 async function token(teamId: string, purpose: string) {
   return new SignJWT({ purpose })
@@ -84,10 +86,13 @@ async function start(teamId: string, remote?: (dataDir: string) => TeamRemote, p
   await prepare?.(wiki);
   const settings = new TeamSettingsStore(join(dataDir, "settings.json"), TEAM_SECRET);
   await settings.load();
+  const graphTokens = new GraphTokens();
+  graphTokensFor.set(teamId, graphTokens);
+  const graphFor = graphForTeam(teamId);
   const deliverer = new Deliverer(new TranscriptOutbox(join(dataDir, "outbox")), settings, wiki, graphFor);
   const app = createTeamApp(wiki, {
     teamId, gatewayIssuer: ISSUER, gatewayJwks: { keys: [jwk] }, rawDir: join(dataDir, "raw"), version: "test",
-    outDir: join(dataDir, "out"), settings, deliverer, graphFor,
+    outDir: join(dataDir, "out"), settings, deliverer, graphTokens, graphFor,
   });
   const server = createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -232,7 +237,8 @@ describe("team settings", () => {
     expect(readFileSync(file, "utf8")).not.toContain(SECRET);
     expect(JSON.parse(readFileSync(file, "utf8")).microsoft.client_secret_sealed).toMatch(/^v1\./);
     // Opens again with the same secret; with another one the server starts without the connection.
-    expect((await new TeamSettingsStore(file, TEAM_SECRET).load()).microsoft?.client_secret).toBe(SECRET);
+    const reloaded = (await new TeamSettingsStore(file, TEAM_SECRET).load()).microsoft;
+    expect(reloaded?.kind === "own" ? reloaded.client_secret : null).toBe(SECRET);
     expect((await new TeamSettingsStore(file, "another-secret-entirely-xx").load()).microsoft).toBeNull();
   });
 
@@ -365,5 +371,60 @@ describe("a repo kept by another tool (connected read-only)", () => {
     const res = await ro.call("POST", "/v1/inbox", "inbox", session("t_ro", "01JDESTRO00000000000000003"));
     expect(res).toMatchObject({ status: 201, json: { path: "drive:2026-10/2026-10-12-pricing-page-rewrite-000003.md" } });
     expect((await ro.health()).consolidate?.pendingNotes ?? 0).toBe(0);
+  });
+});
+
+describe("Ambient's own Microsoft app (Connect Microsoft 365)", () => {
+  let amb: Server;
+  const TENANT_B = "00000000-0000-4000-8000-0000000000cc";
+  beforeAll(async () => {
+    amb = await start("t_amb");
+  });
+  afterAll(() => amb.close());
+
+  it("takes tokens only from the gateway's graph purpose, and checks them", async () => {
+    const good = { tenant_id: TENANT_B, access_token: "pushed-token-for-tenant-b-0001", expires_at: Date.now() + 3600_000 };
+    expect((await amb.call("PUT", "/v1/graph-token", "settings", good)).status).toBe(401);
+    expect((await amb.call("PUT", "/v1/graph-token", "graph", { ...good, tenant_id: "not-a-tenant" })).status).toBe(400);
+    expect((await amb.call("PUT", "/v1/graph-token", "graph", { ...good, expires_at: Date.now() - 1 })).status).toBe(400);
+  });
+
+  it("connects only once the gateway has sent a token for that company, and writes with it", async () => {
+    const conn = { microsoft: { kind: "ambient", tenant_id: TENANT_B, tenant_name: "Example Ltd" } };
+    const early = await amb.call("PUT", "/v1/settings", "settings", conn);
+    expect(early.status).toBe(400);
+    expect(early.json.message).toContain("Waiting for Ambient's Microsoft access");
+    expect((await amb.call("PUT", "/v1/graph-token", "graph", { tenant_id: TENANT_B, access_token: "pushed-token-for-tenant-b-0001", expires_at: Date.now() + 3600_000 })).status).toBe(204);
+    calls.length = 0;
+    const ok = await amb.call("PUT", "/v1/settings", "settings", { ...conn, transcripts: { kind: "drive", drive_id: "b!drive-0001", folder_id: "01FOLDER0001" } });
+    expect(ok.status).toBe(200);
+    expect(ok.json.settings).toMatchObject({
+      microsoft: { kind: "ambient", tenant_id: TENANT_B, tenant_name: "Example Ltd" },
+      transcripts: { kind: "drive", folder_id: "01FOLDER0001", label: "Company / Unternehmen / Meetings" },
+    });
+    expect(calls.every((c) => c.auth === "Bearer pushed-token-for-tenant-b-0001")).toBe(true);
+    expect(calls.some((c) => c.url.includes("login.microsoftonline.com"))).toBe(false); // no credential on the team server
+    const stored = JSON.parse(readFileSync(join(amb.dataDir, "settings.json"), "utf8"));
+    expect(stored.microsoft).toEqual({ kind: "ambient", tenant_id: TENANT_B, tenant_name: "Example Ltd" });
+
+    calls.length = 0;
+    expect((await amb.call("POST", "/v1/inbox", "inbox", note("t_amb", "01JDESTAMB0000000000000001"))).status).toBe(201);
+    await amb.deliverer.run();
+    const put = calls.find((c) => c.method === "PUT");
+    expect(put?.url).toContain("/items/01FOLDER0001:/2026-10/2026-10-12-kickoff-mit-acme-000001.md:");
+    expect(put?.auth).toBe("Bearer pushed-token-for-tenant-b-0001");
+  });
+
+  it("keeps files waiting while the token is missing or expired, and sends them when it comes", async () => {
+    graphTokensFor.get("t_amb")!.set(TENANT_B, "expired-token-xxxxxxxxxxxx", Date.now() + 60_000); // inside the 2-minute margin
+    calls.length = 0;
+    expect((await amb.call("POST", "/v1/inbox", "inbox", note("t_amb", "01JDESTAMB0000000000000002"))).status).toBe(201);
+    await amb.deliverer.run();
+    const [waiting] = await amb.deliverer.outbox.all();
+    expect(waiting?.last_error).toContain("Waiting for Ambient's Microsoft access");
+    expect(calls.filter((c) => c.method === "PUT")).toEqual([]);
+    expect((await amb.call("PUT", "/v1/graph-token", "graph", { tenant_id: TENANT_B, access_token: "pushed-token-for-tenant-b-0002", expires_at: Date.now() + 3600_000 })).status).toBe(204);
+    await amb.deliverer.tokenArrived(); // also what the token route starts; resolves once it's done
+    expect(await amb.deliverer.outbox.all()).toEqual([]);
   });
 });

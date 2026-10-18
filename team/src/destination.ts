@@ -6,7 +6,7 @@
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { MicrosoftConnection, TeamSettings } from "@brain/spec";
-import { GraphError, MicrosoftGraph } from "./graph.ts";
+import { GraphError, graphFor, GraphTokens, MicrosoftGraph, WAITING_FOR_TOKEN } from "./graph.ts";
 import type { TeamSettingsStore } from "./settings.ts";
 import type { TeamWiki } from "./wiki.ts";
 
@@ -151,7 +151,8 @@ export class Deliverer {
     readonly outbox: TranscriptOutbox,
     private settings: TeamSettingsStore,
     private wiki: TeamWiki,
-    private graphFor: (conn: MicrosoftConnection) => MicrosoftGraph = (conn) => new MicrosoftGraph(conn),
+    /** The Graph client for a connection (server.ts shares one GraphTokens with the app; tests inject a fake). */
+    private makeGraph: (conn: MicrosoftConnection) => MicrosoftGraph = (conn) => graphFor(conn, new GraphTokens()),
   ) {}
 
   private current(): TeamSettings {
@@ -165,22 +166,31 @@ export class Deliverer {
     if (d.kind === "none") return null;
     if (d.kind === "repo") return new RepoDestination(this.wiki, d.folder);
     if (!s.microsoft) return "Microsoft 365 isn't connected; connect it again in the team settings.";
-    const key = `${s.microsoft.tenant_id}/${s.microsoft.client_id}/${s.microsoft.client_secret}`;
-    if (!this.graphs.has(key)) this.graphs.set(key, this.graphFor(s.microsoft));
+    const m = s.microsoft;
+    const key = m.kind === "own" ? `own/${m.tenant_id}/${m.client_id}/${m.client_secret}` : `ambient/${m.tenant_id}`;
+    if (!this.graphs.has(key)) this.graphs.set(key, this.makeGraph(m));
     return new DriveDestination(this.graphs.get(key)!, d);
   }
 
   /** Deliver everything that's due. Concurrent calls share one run. */
   run(now = Date.now()): Promise<{ delivered: number; failed: number }> {
-    if (!this.running) this.running = this.deliver(now).finally(() => (this.running = null));
+    if (!this.running) this.running = this.deliver(now, false).finally(() => (this.running = null));
     return this.running;
   }
 
-  private async deliver(now: number): Promise<{ delivered: number; failed: number }> {
+  /** A Microsoft token arrived: what waited only for it goes out now, whatever its backoff says. */
+  async tokenArrived(now = Date.now()): Promise<{ delivered: number; failed: number }> {
+    await this.run(now).catch(() => undefined); // what's due anyway, first
+    while (this.running) await this.running.catch(() => undefined);
+    this.running = this.deliver(now, true).finally(() => (this.running = null));
+    return this.running;
+  }
+
+  private async deliver(now: number, waitingForToken: boolean): Promise<{ delivered: number; failed: number }> {
     let delivered = 0;
     let failed = 0;
     for (const item of await this.outbox.all()) {
-      if (item.next_at > now) continue;
+      if (waitingForToken ? item.last_error !== WAITING_FOR_TOKEN : item.next_at > now) continue;
       const kind = item.kind ?? "transcript";
       const dest = this.destination(kind);
       if (dest === null) {

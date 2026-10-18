@@ -168,13 +168,34 @@ export type TranscriptDestination = z.infer<typeof TranscriptDestination>;
 export const WorkDestination = z.discriminatedUnion("kind", [z.object({ kind: z.literal("none") }), DriveFolder]);
 export type WorkDestination = z.infer<typeof WorkDestination>;
 
-/** App-only access with the team's own Entra app (client credentials). */
-export const MicrosoftConnection = z.object({
+/** App-only access with the team's own Entra app (client credentials, the secret on the team server). */
+export const OwnMicrosoftApp = z.object({
+  kind: z.literal("own"),
   tenant_id: guid,
   client_id: guid,
   client_secret: z.string().min(10).max(300),
 });
+
+/**
+ * App-only access with Ambient's own Microsoft app, which the company's admin approved and gave
+ * one folder ("Connect Microsoft 365"). Its credential lives only on the gateway; the team server
+ * gets short-lived tokens for this tenant from it.
+ */
+export const AmbientMicrosoftApp = z.object({
+  kind: z.literal("ambient"),
+  tenant_id: guid,
+  /** The company's name in Microsoft 365, for the settings screen. */
+  tenant_name: z.string().max(200).default(""),
+});
+
+/** Settings written before there were two kinds have no `kind`: those are "own" (see withKind). */
+export const MicrosoftConnection = z.discriminatedUnion("kind", [OwnMicrosoftApp, AmbientMicrosoftApp]);
 export type MicrosoftConnection = z.infer<typeof MicrosoftConnection>;
+
+/** A connection as older settings files and apps send it, without `kind`: the company's own app. */
+export function withKind(v: unknown): unknown {
+  return v && typeof v === "object" && !Array.isArray(v) && !("kind" in v) ? { ...(v as object), kind: "own" } : v;
+}
 
 /**
  * Per-team settings, kept on the team server (0600, the secret sealed). Who maintains the wiki
