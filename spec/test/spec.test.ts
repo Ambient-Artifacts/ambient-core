@@ -220,4 +220,17 @@ describe("forgetNote", () => {
     forgetNotes(gone, many);
     expect(performance.now() - started).toBeLessThan(2000);
   });
+  it("stays fast on pages built to be slow: long lines of slashes, made-up names", () => {
+    const hostile = new Map(pages);
+    for (let i = 0; i < 20; i++) hostile.set(`wiki/topics/h${i}.md`, `---\ntitle: H${i}\ntype: topic\n---\n# H\n\n## Timeline\n${"/".repeat(200_000)}.md\n`);
+    let started = performance.now();
+    const r = forgetNotes(["wiki/notes/2026/10/2026-10-08-test-bbbbbb.md"], hostile);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(r.deletes).toContain("wiki/people/johann-beurich.md");
+    // Names unlike the app's (a delete can name any path under wiki/notes/) aren't searched for.
+    const odd = Array.from({ length: 500 }, (_, i) => `wiki/notes/odd-${i}`);
+    started = performance.now();
+    forgetNotes(odd, hostile);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
 });
