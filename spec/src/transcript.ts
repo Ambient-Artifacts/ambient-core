@@ -71,7 +71,7 @@ export function transcriptLines(segments: TranscriptSegment[]): string[] {
   return segments
     .filter((s) => s.text.trim())
     .map((s) => {
-      const speaker = s.speaker?.replace(/[\r\n:]+/g, " ").trim();
+      const speaker = s.speaker?.replace(/[\r\n:]+/g, " ").replace(/\s+/g, " ").trim();
       return `[${clock(s.t0)}] ${speaker ? `${speaker}: ` : ""}${s.text.replace(/\s+/g, " ").trim()}`;
     });
 }
