@@ -10,9 +10,9 @@
 // (`keep`). The token lives only on this server, in a file only the service user can read, and
 // sealed there with BRAIN_TEAM_SECRET (from the env file, not the data directory) when it's set,
 // so a backup or copy of the data alone doesn't hand out push access to the team's repo.
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { checkRepoUrl, git, GitError, HasContent, remoteInfo, type GitOptions, type RemoteRepo } from "@brain/wiki";
+import { sealer, type Sealer } from "./seal.ts";
 
 export type RepoMode = "two-way" | "read-only";
 
@@ -35,7 +35,7 @@ export type RemoteStatus = Omit<RemoteConfig, "token">;
 export class TeamRemote {
   private config: RemoteConfig | null = null;
 
-  private key: Buffer | null;
+  private key: Sealer | null;
 
   constructor(
     private file: string,
@@ -43,7 +43,7 @@ export class TeamRemote {
     private opts: GitOptions = {},
     secret?: string | null,
   ) {
-    this.key = secret ? Buffer.from(hkdfSync("sha256", secret, Buffer.alloc(0), "ambient team repo token", 32)) : null;
+    this.key = sealer(secret, "ambient team repo token");
   }
 
   async load(): Promise<void> {
@@ -62,7 +62,7 @@ export class TeamRemote {
       }
       const { tokenSealed, ...rest } = stored;
       try {
-        this.config = { ...rest, token: this.open(tokenSealed) };
+        this.config = { ...rest, token: this.key.open(tokenSealed) };
       } catch {
         // Sealed with another secret (changed, or mistyped): the server still starts.
         console.error("[team] the repo token doesn't open with this BRAIN_TEAM_SECRET (changed since it was sealed?): repo sync is off until the secret is right or the repo is connected again");
@@ -73,21 +73,6 @@ export class TeamRemote {
     this.config = stored;
     // Written before the secret was set: seal it now.
     if (this.key && this.config.token) await this.save();
-  }
-
-  private seal(token: string): string {
-    const iv = randomBytes(12);
-    const c = createCipheriv("aes-256-gcm", this.key!, iv);
-    const body = Buffer.concat([c.update(token, "utf8"), c.final(), c.getAuthTag()]);
-    return `v1.${iv.toString("base64url")}.${body.toString("base64url")}`;
-  }
-
-  private open(sealed: string): string {
-    const [, iv, body] = sealed.split(".");
-    const raw = Buffer.from(body ?? "", "base64url");
-    const d = createDecipheriv("aes-256-gcm", this.key!, Buffer.from(iv ?? "", "base64url"));
-    d.setAuthTag(raw.subarray(raw.length - 16));
-    return Buffer.concat([d.update(raw.subarray(0, raw.length - 16)), d.final()]).toString("utf8");
   }
 
   get connected(): boolean {
@@ -117,7 +102,7 @@ export class TeamRemote {
   private async save(): Promise<void> {
     if (!this.config) return;
     const { token, ...rest } = this.config;
-    const stored = this.key ? { ...rest, tokenSealed: this.seal(token) } : this.config;
+    const stored = this.key ? { ...rest, tokenSealed: this.key.seal(token) } : this.config;
     await writeFile(this.file, JSON.stringify(stored, null, 2), { mode: 0o600 });
   }
 

@@ -74,7 +74,7 @@ export class TeamLink {
     this.keyPromise = importJWK(signingKey, "ES256");
   }
 
-  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "health", subject?: string, extra: Record<string, string> = {}): Promise<string> {
+  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "settings" | "health", subject?: string, extra: Record<string, string> = {}): Promise<string> {
     return new SignJWT({ ...extra, purpose, team_slug: team.slug })
       .setProtectedHeader({ alg: "ES256", kid: this.kid, typ: TEAM_TOKEN_TYP })
       .setIssuer(this.issuer)
@@ -149,15 +149,33 @@ export class TeamLink {
   }
 
   /** The team repo endpoints, passed through with their status (400s carry a message for the user). */
-  async repo(team: Team, uid: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<{ status: number; json: unknown }> {
+  repo(team: Team, uid: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<{ status: number; json: unknown }> {
+    return this.passThrough(team, uid, "repo", "/v1/repo", method, body, 120_000);
+  }
+
+  /** Team settings: destinations and the Microsoft 365 connection (the secret never comes back). */
+  settings(team: Team, uid: string, method: "GET" | "PUT", body?: unknown): Promise<{ status: number; json: unknown }> {
+    // Choosing a folder asks Microsoft up to three times, each with retries on throttling.
+    return this.passThrough(team, uid, "settings", "/v1/settings", method, body, 90_000);
+  }
+
+  private async passThrough(
+    team: Team,
+    uid: string,
+    purpose: "repo" | "settings",
+    path: string,
+    method: string,
+    body: unknown,
+    timeoutMs: number,
+  ): Promise<{ status: number; json: unknown }> {
     if (!team.serverUrl) throw new TeamServerError(503, `team ${team.slug} has no server yet`);
     let res: Response;
     try {
-      res = await this.fetchImpl(`${team.serverUrl}/v1/repo`, {
+      res = await this.fetchImpl(`${team.serverUrl}${path}`, {
         method,
-        headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), authorization: `Bearer ${await this.token(team, "repo", uid)}` },
+        headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), authorization: `Bearer ${await this.token(team, purpose, uid)}` },
         body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       throw new TeamServerError(503, `team server unreachable: ${(err as Error).message}`);

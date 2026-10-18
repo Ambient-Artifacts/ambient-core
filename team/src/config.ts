@@ -11,6 +11,10 @@ export interface TeamConfig {
   wikiDir: string;
   rawDir: string;
   outDir: string;
+  /** Team settings (0600): destinations and the Microsoft 365 connection. */
+  settingsFile: string;
+  /** Files waiting for delivery to the team's destinations. */
+  outboxDir: string;
   gatewayIssuer: string;
   gatewayJwksUrl: string;
   port: number;
@@ -53,6 +57,8 @@ export function loadTeamConfig(env: NodeJS.ProcessEnv = process.env): TeamConfig
     wikiDir: join(dataDir, "wiki"),
     rawDir: join(dataDir, "raw"),
     outDir: join(dataDir, "out"),
+    settingsFile: join(dataDir, "settings.json"),
+    outboxDir: join(dataDir, "outbox"),
     gatewayIssuer: issuer,
     gatewayJwksUrl: env.BRAIN_GATEWAY_JWKS ?? `${issuer}/oauth/jwks`,
     port: Number(env.PORT ?? 8090),

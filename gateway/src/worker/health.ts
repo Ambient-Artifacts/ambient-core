@@ -52,6 +52,8 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
         pages: number;
         consolidate: null | { lastStatus: string | null; lastRunAt: string | null; pendingNotes: number; oldestPending: string | null };
         repo?: null | { status: string; lastError: string | null };
+        /** Delivery to the team's destinations (team servers from 2026-10-18 on). */
+        delivery?: null | { destination: string; waiting: number; failing: boolean; last_error: string | null };
         /** The wiki's git head (team servers from 2026-10-13 on). */
         head?: string | null;
       };
@@ -59,6 +61,12 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
       // move its head: tell the apps. Delivered notes already did.
       if (h.head && (await revisions.teamHead(team.id, h.head))) summary.push(`${team.slug}: wiki changed on the server`);
       if (h.repo?.status === "error") problems.push({ key: `team:${team.slug}:repo`, text: `Team ${team.name}: repo sync failing: ${h.repo.lastError ?? "unknown error"}` });
+      if (h.delivery?.failing) {
+        problems.push({
+          key: `team:${team.slug}:delivery`,
+          text: `Team ${team.name}: ${h.delivery.waiting} file(s) not reaching the team's folder: ${h.delivery.last_error ?? "unknown error"}`,
+        });
+      }
       const c = h.consolidate;
       if (c?.lastStatus === "failed" || c?.lastStatus === "partial") {
         problems.push({ key: `team:${team.slug}:run`, text: `Team ${team.name}: last nightly run was ${c.lastStatus} (${c.lastRunAt}).` });

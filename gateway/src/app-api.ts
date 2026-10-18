@@ -810,6 +810,37 @@ export function appApiRouter(d: AppApiDeps): Router {
   r.post("/v1/app/teams/:slug/repo", auth, json, teamRepo("POST"));
   r.delete("/v1/app/teams/:slug/repo", auth, teamRepo("DELETE"));
 
+  // Team settings (product/sources.md): where transcripts and copies of work logs go, and the
+  // Microsoft 365 connection. Members see them (never the secret); owners and admins change them.
+  const teamSettings = (method: "GET" | "PUT") => async (req: Request, res: Response) => {
+    const uid = uidOf(res);
+    const team = method === "GET" ? await d.directory.membership(uid, String(req.params.slug)) : await d.directory.freshMembership(uid, String(req.params.slug));
+    if (!team || team.status !== "active") {
+      res.status(403).json({ error: "not_a_member" });
+      return;
+    }
+    if (method !== "GET" && team.role !== "owner" && team.role !== "admin") {
+      res.status(403).json({ error: "admins_only", message: "Only team owners and admins can change the team settings." });
+      return;
+    }
+    try {
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const body = method === "PUT"
+        ? Object.fromEntries((["transcripts", "work", "microsoft"] as const).filter((k) => k in b).map((k) => [k, b[k]]))
+        : undefined;
+      const out = await d.teams.settings(team, uid, method, body);
+      res.status(out.status).json(out.json);
+    } catch (err) {
+      if (err instanceof TeamServerError) {
+        res.status(err.status).json({ error: "team_unavailable", message: "The team server didn't answer. Try again in a minute." });
+        return;
+      }
+      throw err;
+    }
+  };
+  r.get("/v1/app/teams/:slug/settings", auth, teamSettings("GET"));
+  r.put("/v1/app/teams/:slug/settings", auth, json, teamSettings("PUT"));
+
   return r;
 }
 
