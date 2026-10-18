@@ -211,7 +211,7 @@ export class PersonalRepos {
       if (agents.includes(MARKER)) return [];
       if (!existing) {
         const files = (await git(["ls-files"], { cwd: dir, ...this.opts })).split("\n").filter(Boolean);
-        throw new HasContent(files.length, files.slice(0, 5));
+        throw HasContent.of(files);
       }
       return ["AGENTS.md", "wiki/index.md"].filter((p) => existsSync(join(dir, p)));
     } finally {

@@ -57,7 +57,7 @@ describe("a team repo with files of its own", () => {
     const { remote } = await freshWiki();
     const asked = await remote.connect(theirs.url, "t", { mode: "read-only" }).catch((e: unknown) => e);
     expect(asked).toBeInstanceOf(HasContent);
-    expect(asked).toMatchObject({ files: 2, sample: ["AGENTS.md", "clients/acme.md"] });
+    expect(asked).toMatchObject({ files: 2, sample: ["clients/acme.md", "AGENTS.md"] });
     expect(remote.connected).toBe(false);
     expect(commits(theirs.url)).toBe(1);
   });

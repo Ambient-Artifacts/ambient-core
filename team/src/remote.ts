@@ -142,7 +142,7 @@ export class TeamRemote {
         const files = (await g(["ls-tree", "-r", "--name-only", "FETCH_HEAD"])).split("\n").filter(Boolean);
         if (!opts.existing) {
           await forget();
-          throw new HasContent(files.length, files.slice(0, 5));
+          throw HasContent.of(files);
         }
         if (mode === "read-only") {
           const notes = (await g(["ls-files", "--", "notes"])).trim();
