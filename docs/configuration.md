@@ -58,7 +58,7 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 | `BRAIN_TEAM_ID`, `BRAIN_TEAM_NAME` | | Instead of `BRAIN_SERVER_ID`: a server set up by hand for one team (its Convex id). |
 | `BRAIN_GATEWAY_ISSUER` | required | The gateway's `BRAIN_ORIGIN`. Only tokens it signed are accepted. |
 | `BRAIN_GATEWAY_JWKS` | `$BRAIN_GATEWAY_ISSUER/oauth/jwks` | Where to fetch the gateway's public keys. The compose file uses the internal `http://gateway:8080/oauth/jwks`. |
-| `BRAIN_DATA_DIR` | `/srv/brain` (`/data` in Docker) | `wiki/` (the git repo), `raw/` (transcripts, outside git), `out/` (job results), `team.json`, `remote.json`. |
+| `BRAIN_DATA_DIR` | `/srv/brain` (`/data` in Docker) | `wiki/` (the git repo), `raw/` (the server's copy of transcripts, outside git), `out/` (job results), `outbox/` (files waiting for the team's destinations), `team.json`, `remote.json`, `settings.json` (destinations, Microsoft 365 connection). |
 | `PORT` | `8090` | |
 | `BRAIN_LISTEN_HOST` | `127.0.0.1` | `0.0.0.0` in the Docker image. |
 | `ANTHROPIC_API_KEY` | none | For the nightly consolidation. In Docker: `TEAM_ANTHROPIC_API_KEY`, or else `ANTHROPIC_API_KEY`. |

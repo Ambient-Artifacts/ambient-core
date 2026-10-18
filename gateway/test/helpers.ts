@@ -14,7 +14,7 @@ import { convexTest } from "convex-test";
 import { calculateJwkThumbprint, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { api, internal } from "@brain/control/api";
 import schema from "../../control/convex/schema.js";
-import { TeamRemote, createTeamApp, createUnclaimedApp, TeamWiki } from "@brain/team";
+import { Deliverer, TeamRemote, TeamSettingsStore, TranscriptOutbox, createTeamApp, createUnclaimedApp, TeamWiki } from "@brain/team";
 import { createApp } from "../src/app.ts";
 import { appleVerifier } from "../src/auth/apple.ts";
 import { microsoftVerifier } from "../src/auth/microsoft.ts";
@@ -90,8 +90,10 @@ export async function startStack(opts: { revisionPollMs?: number; streamMaxMs?: 
   cpSync(join(FIXTURES, "wiki-team"), join(dataDir, "wiki"), { recursive: true });
   const teamId = await t.mutation(internal.teams.create, { slug: "acme", name: "Acme" });
   const wiki = await TeamWiki.open(join(dataDir, "wiki"), String(teamId), "Acme", new TeamRemote(join(dataDir, "remote.json"), join(dataDir, "wiki"), { allowFile: true }));
+  const settings = new TeamSettingsStore(join(dataDir, "settings.json"));
+  const deliverer = new Deliverer(new TranscriptOutbox(join(dataDir, "outbox")), settings, wiki);
   const teamServer = createServer(
-    createTeamApp(wiki, { teamId: String(teamId), gatewayIssuer: origin, gatewayJwks: publicJwks([signingKey]), rawDir: join(dataDir, "raw"), version: "test" }),
+    createTeamApp(wiki, { teamId: String(teamId), gatewayIssuer: origin, gatewayJwks: publicJwks([signingKey]), rawDir: join(dataDir, "raw"), version: "test", settings, deliverer }),
   );
   const teamUrl = await listen(teamServer);
   await t.mutation(internal.teams.setServerUrl, { slug: "acme", serverUrl: teamUrl });

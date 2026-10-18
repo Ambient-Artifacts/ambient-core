@@ -3,8 +3,19 @@
 // input: only known fields survive, links are sanitized, size is capped.
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { NoteFrontmatter, NoteId, renderPage, slugify, type TeamNoteV1 } from "@brain/spec";
+import {
+  destinationFileName,
+  NoteFrontmatter,
+  NoteId,
+  renderPage,
+  renderTranscript,
+  renderWorkLog,
+  slugify,
+  type TeamNoteV1,
+  type TeamSettings,
+} from "@brain/spec";
 import { EntityIndex } from "@brain/wiki";
+import type { OutboxKind, TranscriptOutbox } from "./destination.ts";
 import type { TeamWiki } from "./wiki.ts";
 
 const REF = /^(people|orgs|projects|topics)\/[a-z0-9][a-z0-9-]{0,79}$/;
@@ -48,14 +59,102 @@ export interface IngestResult {
   path: string;
 }
 
+export interface IngestOptions {
+  rawDir: string;
+  recordedBySlug: string | null;
+  /** The team's settings as they apply now (TeamSettingsStore.effective). Defaults when absent. */
+  settings?: TeamSettings;
+  /** Where files wait for delivery to their destination. Without it, nothing is delivered. */
+  outbox?: TranscriptOutbox;
+  /** The team's repo is kept by another tool: only files for the destinations, no pages. */
+  readOnly?: boolean;
+}
+
+interface DestinationFile {
+  kind: OutboxKind;
+  title: string;
+  file: string;
+  text: string;
+}
+
+/**
+ * The files this note sends to the team's destinations: its transcript (a recording, unless
+ * transcripts go nowhere) or a copy of the work log (a work session, when the team set a folder).
+ */
+export function destinationFiles(wiki: TeamWiki, note: TeamNoteV1, settings: TeamSettings): DestinationFile[] {
+  const fm = note.entry_page.frontmatter;
+  const title = str(fm.title, 60) || "Untitled note";
+  const recordedBy = note.recorded_by_name ? str(note.recorded_by_name, 80) : undefined;
+  const segments = note.transcript?.segments ?? [];
+  const out: DestinationFile[] = [];
+  if (settings.transcripts.kind !== "none" && segments.some((s) => s.text.trim())) {
+    const m = note.meeting;
+    const meetingTitle = str(m?.title, 200);
+    const meta = {
+      id: note.note_id,
+      title: meetingTitle || title,
+      recorded_at: note.recorded_at,
+      ...(note.ended_at ? { ended_at: note.ended_at } : {}),
+      duration_s: note.duration_s,
+      locale: note.language,
+      team: wiki.teamName,
+      ...(recordedBy ? { recorded_by: recordedBy } : {}),
+      ...(m
+        ? {
+          meeting: {
+            title: meetingTitle || title,
+            ...(m.start ? { start: m.start } : {}),
+            ...(m.end ? { end: m.end } : {}),
+            attendees: m.attendees.map((a) => str(a, 120)).filter(Boolean),
+          },
+        }
+        : {}),
+      speakers: (note.speakers ?? [...new Set(segments.map((s) => s.speaker).filter((x): x is string => !!x))]).map((a) => str(a, 80)).filter(Boolean),
+    };
+    out.push({ kind: "transcript", title: meta.title, file: destinationFileName(meta), text: renderTranscript(meta, segments) });
+  }
+  if (settings.work.kind !== "none" && note.kind === "session") {
+    const w = work(fm.work);
+    const meta = {
+      id: note.note_id,
+      title,
+      summary: str(fm.summary, 200) || title,
+      recorded_at: note.recorded_at,
+      ...(w?.ended_at ? { ended_at: w.ended_at } : {}),
+      team: wiki.teamName,
+      ...(recordedBy ? { recorded_by: recordedBy } : {}),
+      ...(w ? { tool: w.tool, ...(w.repo ? { repo: w.repo } : {}), ...(w.branch ? { branch: w.branch } : {}) } : {}),
+    };
+    // The phone's and the gateway's links point into their own wikis: not into the team's folder.
+    const body = cleanBody(note.entry_page.body_md).replace(/\n## Related\n[\s\S]*?(?=\n## |$)/, "").trimEnd();
+    out.push({ kind: "work", title, file: destinationFileName(meta), text: renderWorkLog(meta, body.startsWith("# ") ? body : `# ${title}\n\n${body}`) });
+  }
+  return out;
+}
+
 export async function ingestNote(
   wiki: TeamWiki,
   note: TeamNoteV1,
-  opts: { rawDir: string; recordedBySlug: string | null },
+  opts: IngestOptions,
 ): Promise<IngestResult & { commit?: string | null }> {
   const recordedBy = opts.recordedBySlug && REF.test(opts.recordedBySlug) ? opts.recordedBySlug : undefined;
   // The id names the raw transcript's file: never a path (the schema says so too).
   if (!NoteId.safeParse(note.note_id).success) throw new IngestError(422, "invalid note: note_id");
+  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null };
+  const files = opts.outbox ? destinationFiles(wiki, note, settings) : [];
+
+  if (opts.readOnly) {
+    // Another tool keeps the wiki: Ambient adds no page, and its copy of the transcript would be
+    // out of reach (the MCP finds transcripts through their note), so only the files go out.
+    if (!files.length) throw new IngestError(409, "read_only");
+    const where = (f: DestinationFile) => `drive:${f.file}`;
+    if ((await Promise.all(files.map((f) => opts.outbox!.seen(note.note_id, f.kind)))).every(Boolean)) {
+      return { status: "duplicate", path: where(files[0]!) };
+    }
+    for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f });
+    return { status: "stored", path: where(files[0]!) };
+  }
+
   const existing = wiki.store.findById(note.note_id);
   // A note the team already has stays as it is, except one Apple's model didn't write (quotes
   // or a list of its parts) that the same person's device has now summarized again (the app's
@@ -64,6 +163,12 @@ export async function ingestNote(
   const replacing = !!existing && compile?.fallback !== undefined && compile.fallback !== "none"
     && !!recordedBy && existing.frontmatter.recorded_by === recordedBy;
   if (existing && !replacing) return { status: "duplicate", path: existing.path };
+
+  // Queued before the page is written: if a later step fails, the phone retries, and the same
+  // note is queued again into the same file.
+  for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f });
+  const transcript = files.find((f) => f.kind === "transcript");
+  const rawPath = transcript && settings.transcripts.kind === "repo" ? `${settings.transcripts.folder}/${transcript.file}` : undefined;
 
   const fm = note.entry_page.frontmatter;
   const title = str(fm.title, 60) || "Untitled note";
@@ -94,6 +199,7 @@ export async function ingestNote(
     projects: canon(fm.projects),
     topics: canon(fm.topics),
     ...(work(fm.work) ? { work: work(fm.work) } : {}),
+    ...(rawPath ? { raw: rawPath } : {}),
     compile: note.client.compiler === "extractive"
       ? { engine: "fm-ondevice", status: "partial", fallback: "extractive" }
       : note.client.compiler === "session-summary"

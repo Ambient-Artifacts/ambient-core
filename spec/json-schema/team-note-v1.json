@@ -8,7 +8,7 @@
     },
     "note_id": {
       "type": "string",
-      "minLength": 10
+      "pattern": "^[0-9A-Za-z_-]{10,64}$"
     },
     "team_id": {
       "type": "string",
@@ -34,7 +34,8 @@
     },
     "language": {
       "type": "string",
-      "minLength": 2
+      "minLength": 2,
+      "maxLength": 35
     },
     "kind": {
       "type": "string",
@@ -108,7 +109,8 @@
                     "type": "number"
                   },
                   "text": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 20000
                   },
                   "speaker": {
                     "type": "string",
@@ -137,20 +139,24 @@
       "maxItems": 50,
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "maxLength": 120
       }
     },
     "client": {
       "type": "object",
       "properties": {
         "app": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 200
         },
         "transcriber": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 200
         },
         "compiler": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 200
         }
       },
       "required": [
@@ -158,6 +164,50 @@
         "transcriber",
         "compiler"
       ]
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "meeting": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "attendees": {
+          "default": [],
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 120
+          }
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "speakers": {
+      "maxItems": 50,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 80
+      }
     }
   },
   "required": [

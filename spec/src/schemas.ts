@@ -127,8 +127,65 @@ export const TeamNoteV1 = z.object({
     .nullable(),
   participants_hint: z.array(z.string().max(120)).max(50).default([]),
   client: z.object({ app: z.string().max(200), transcriber: z.string().max(200), compiler: z.string().max(200) }),
+  /** When the recording ended. Optional: older apps don't send it. */
+  ended_at: isoDateTime.optional(),
+  /** The calendar event the recording matched: names only, never the call link. */
+  meeting: z
+    .object({
+      title: z.string().max(200),
+      start: isoDateTime.optional(),
+      end: isoDateTime.optional(),
+      attendees: z.array(z.string().max(120)).max(50).default([]),
+    })
+    .optional(),
+  /** Speaker labels as used in the transcript ("Lena Vogel", "Speaker 1"). */
+  speakers: z.array(z.string().max(80)).max(50).optional(),
 });
 export type TeamNoteV1 = z.infer<typeof TeamNoteV1>;
+
+const guid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+/** A OneDrive or SharePoint folder, written through the team's Microsoft 365 connection. */
+const DriveFolder = z.object({
+  kind: z.literal("drive"),
+  drive_id: z.string().min(5).max(300),
+  folder_id: z.string().min(5).max(300),
+  /** What people see, e.g. "Documents / Meetings". */
+  label: z.string().max(300).default(""),
+});
+
+/** Where a team's meeting transcripts go (product/sources.md in the team wiki). */
+export const TranscriptDestination = z.discriminatedUnion("kind", [
+  /** `raw/` in the team's repository, committed with the note (and kept out of the page index). The default. */
+  z.object({ kind: z.literal("repo"), folder: z.literal("raw").default("raw") }),
+  DriveFolder,
+  /** Kept only on the team server, as before destinations existed. */
+  z.object({ kind: z.literal("none") }),
+]);
+export type TranscriptDestination = z.infer<typeof TranscriptDestination>;
+
+/** Where copies of shared work logs (agent sessions, log_work) go. Off by default. */
+export const WorkDestination = z.discriminatedUnion("kind", [z.object({ kind: z.literal("none") }), DriveFolder]);
+export type WorkDestination = z.infer<typeof WorkDestination>;
+
+/** App-only access with the team's own Entra app (client credentials). */
+export const MicrosoftConnection = z.object({
+  tenant_id: guid,
+  client_id: guid,
+  client_secret: z.string().min(10).max(300),
+});
+export type MicrosoftConnection = z.infer<typeof MicrosoftConnection>;
+
+/**
+ * Per-team settings, kept on the team server (0600, the secret sealed). Who maintains the wiki
+ * isn't one of them: a repo connected read-only means another tool does.
+ */
+export const TeamSettings = z.object({
+  transcripts: TranscriptDestination.default({ kind: "repo", folder: "raw" }),
+  work: WorkDestination.default({ kind: "none" }),
+  microsoft: MicrosoftConnection.nullable().default(null),
+});
+export type TeamSettings = z.infer<typeof TeamSettings>;
 
 /** Phone → personal store sync (one-way). Ops are idempotent on (path, hash). hash = sha256(content). */
 export const SyncOp = z.discriminatedUnion("op", [
@@ -221,6 +278,7 @@ export const schemas = {
   "living-page-frontmatter": LivingPageFrontmatter,
   "decision-frontmatter": DecisionFrontmatter,
   "team-note-v1": TeamNoteV1,
+  "team-settings": TeamSettings,
   "sync-request": SyncRequest,
   "sync-response": SyncResponse,
   "job-result": JobResult,

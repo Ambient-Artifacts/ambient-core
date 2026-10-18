@@ -33,7 +33,7 @@ export class Repo {
     if (existsSync(join(this.dir, ".git"))) return;
     await run("git", ["init", "-q", "-b", "main", this.dir]);
     await writeFile(join(this.dir, "AGENTS.md"), agentsDoc({ kind: "team", name: `${teamName} wiki` }));
-    await writeFile(join(this.dir, ".gitignore"), "raw/\nout/\n.brain/\n");
+    await writeFile(join(this.dir, ".gitignore"), "out/\n.brain/\n");
     // Adopt pages already in the folder (e.g. a wiki moved onto this server), not just AGENTS.md.
     await this.git("add", "-A");
     await this.git("commit", "-q", "-m", "init: team wiki");
@@ -41,7 +41,8 @@ export class Repo {
 
   async commit(paths: string[], message: string): Promise<string | null> {
     if (paths.length === 0) return null;
-    await this.git("add", "--", ...paths);
+    // -f: only files Ambient just wrote are listed, and a team's own .gitignore may name raw/.
+    await this.git("add", "-f", "--", ...paths);
     const { stdout: staged } = await this.git("diff", "--cached", "--name-only");
     if (!staged.trim()) return null;
     await this.git("commit", "-q", "-m", message);
