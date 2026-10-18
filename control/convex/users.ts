@@ -110,6 +110,66 @@ export const upsertMicrosoft = mutation({
   },
 });
 
+/**
+ * Sign in with Google: find or create the user for this Google account ("sub"). Its own account,
+ * like Microsoft's: not joined by email to an Apple or Microsoft sign-in of the same person. Where
+ * Google vouches for the email (`emailTrusted`: a Gmail address, or one in the account's Google
+ * Workspace domain), it counts like Apple's on a server whose sign-ups aren't open: it takes over
+ * the admin's account for that email, or passes the allow list.
+ */
+export const upsertGoogle = mutation({
+  args: {
+    ...secretArg,
+    googleSub: v.string(),
+    email: v.optional(v.string()),
+    emailTrusted: v.optional(v.boolean()),
+    name: v.optional(v.string()),
+    signups: signupsArg,
+    now: v.number(),
+  },
+  handler: async (ctx, { secret, googleSub, email, emailTrusted, name, signups, now }) => {
+    assertService(secret);
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_googleSub", (q) => q.eq("googleSub", googleSub))
+      .unique();
+    if (existing) {
+      // Google sends name and email every time; fill gaps, never overwrite what the user set.
+      const patch: { email?: string; name?: string } = {};
+      if (email && !existing.email) patch.email = email;
+      if (name?.trim() && (existing.name === "Ambient user" || existing.name === "Brain user")) patch.name = name.trim().slice(0, 80);
+      if (existing.deletingAt) return null;  // being deleted; a new account once it's gone
+      if (Object.keys(patch).length) await ctx.db.patch(existing._id, patch);
+      if (existing.disabled) return null;
+      return { uid: existing._id, name: patch.name ?? existing.name, email: patch.email ?? existing.email ?? null, created: false };
+    }
+    if (signups) {
+      const vouched = emailTrusted && email ? email.toLowerCase() : null;
+      const local = vouched
+        ? await ctx.db
+            .query("users")
+            .withIndex("by_localId", (q) => q.eq("localId", vouched))
+            .unique()
+        : null;
+      if (local && vouched && !local.googleSub) {
+        if (local.disabled || local.deletingAt) return null;
+        const better = name?.trim() && local.name === vouched.split("@")[0] ? name.trim().slice(0, 80) : undefined;
+        await ctx.db.patch(local._id, better ? { googleSub, name: better } : { googleSub });
+        return { uid: local._id, name: better ?? local.name, email: local.email ?? vouched, created: false };
+      }
+      if (!vouched || !allowed(vouched, signups.allow)) throw new ConvexError({ code: "not_invited" });
+    }
+    const uid = await ctx.db.insert("users", {
+      googleSub,
+      email,
+      name: name?.trim().slice(0, 80) || "Ambient user",
+      personalSeq: 0,
+      createdAt: now,
+    });
+    return { uid, name: name?.trim().slice(0, 80) || "Ambient user", email: email ?? null, created: true };
+  },
+});
+
 export const get = query({
   args: { ...secretArg, uid: v.string() },
   handler: async (ctx, { secret, uid }) => {

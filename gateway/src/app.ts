@@ -9,6 +9,7 @@ import { CodeHasher } from "./auth/codes.ts";
 import { SignInNonces } from "./auth/signin-nonce.ts";
 import { appAccess } from "./auth/app-access.ts";
 import type { AppleVerifier } from "./auth/apple.ts";
+import { googleVerifier, type GoogleVerifier } from "./auth/google.ts";
 import { microsoftVerifier, type MicrosoftVerifier } from "./auth/microsoft.ts";
 import { createBearerVerifier } from "./auth/bearer.ts";
 import { Pairing } from "./auth/pairing.ts";
@@ -44,6 +45,8 @@ export interface AppDeps {
   push?: PushSender;
   /** Tests: checks Microsoft ID tokens against local keys. */
   microsoft?: MicrosoftVerifier;
+  /** Tests: checks Google ID tokens against local keys. */
+  google?: GoogleVerifier;
   fetchImpl?: typeof fetch;
   /** Where ambient-runner.mjs lives (the repo's runner/ by default). */
   runnerDir?: string;
@@ -68,6 +71,7 @@ export function createApp(deps: AppDeps) {
   const teams = new TeamLink(config.origin, config.signingKeys[0]!, deps.fetchImpl, (team) => revisions.teamChanged(team.id));
   const events = new EventHub(deps.revisionSource ?? new PollingRevisionSource(revisions, deps.revisionPollMs ?? 5_000));
   const microsoft = deps.microsoft ?? (config.microsoftClientIds?.length ? microsoftVerifier(config.microsoftClientIds) : undefined);
+  const google = deps.google ?? (config.googleClientIds?.length ? googleVerifier(config.googleClientIds) : undefined);
   const provider: Provider = createProvider(config, directory, control);
   const verify = createBearerVerifier({ issuer: config.origin, signingKeys: config.signingKeys, directory, pats });
   const sessions = new SessionService({ control, personal, directory, teams });
@@ -129,6 +133,7 @@ export function createApp(deps: AppDeps) {
       routines,
       appleRevoke: deps.appleRevoke ?? appleRevoker(config.appleRevoke, deps.fetchImpl),
       microsoftClientId: microsoft ? config.microsoftClientIds?.[0] : undefined,
+      googleClientId: google ? config.googleClientIds?.[0] : undefined,
       appleSignIn: config.appleAudiences.length > 0,
       appConfig: { minimumVersion: config.minAppVersion, updateUrl: config.appUpdateUrl },
       revisions,
@@ -137,11 +142,11 @@ export function createApp(deps: AppDeps) {
     }),
   );
   app.use(joinRouter());
-  // Where people get the code for an AI app: from the app; without Apple or Microsoft sign-in
+  // Where people get the code for an AI app: from the app; without Apple, Microsoft or Google sign-in
   // there's no app to show one, so from the admin CLI; on a self-hosted server, either.
-  const appSignIn = config.appleAudiences.length > 0 || !!microsoft;
+  const appSignIn = config.appleAudiences.length > 0 || !!microsoft || !!google;
   const codes = !appSignIn ? "admin" : config.adminCodes ? "both" : "app";
-  app.use(interactionRouter(provider, directory, pairing, control, { apple: deps.apple, microsoft, codes, signups: config.signups, nonces: signInNonces, requireNonce: config.requireSignInNonce }));
+  app.use(interactionRouter(provider, directory, pairing, control, { apple: deps.apple, microsoft, google, codes, signups: config.signups, nonces: signInNonces, requireNonce: config.requireSignInNonce }));
 
   // Client registration and the authorize step are open to anyone and each stores rows in Convex.
   // A registered client is kept for good, so registering is limited tightly per address; the

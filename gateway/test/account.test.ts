@@ -3,7 +3,7 @@
 import { exportPKCS8, generateKeyPair, decodeJwt, decodeProtectedHeader } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appleRevoker } from "../src/auth/apple-revoke.ts";
-import { appCall, fixturePersonalOps, INVITE, MICROSOFT_CLIENT, signIn, startStack, type Stack } from "./helpers.ts";
+import { appCall, fixturePersonalOps, INVITE, MICROSOFT_CLIENT, GOOGLE_CLIENT, signIn, startStack, type Stack } from "./helpers.ts";
 
 let s: Stack;
 beforeAll(async () => {
@@ -94,7 +94,7 @@ describe("launch config and invite links", () => {
   it("serves the minimum app version without sign-in", async () => {
     const res = await fetch(`${s.origin}/v1/app/config`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ minimumVersion: null, updateUrl: null, microsoftClientId: MICROSOFT_CLIENT, appleSignIn: true });
+    expect(await res.json()).toEqual({ minimumVersion: null, updateUrl: null, microsoftClientId: MICROSOFT_CLIENT, googleClientId: GOOGLE_CLIENT, appleSignIn: true });
   });
 
   it("serves a page that opens the app on a team invite, and nothing for junk", async () => {

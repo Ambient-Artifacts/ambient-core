@@ -33,7 +33,7 @@ This repository is Ambient's server: the MCP gateway, the personal and team wiki
 
 ### Ambient Cloud
 
-The fastest way: install the app, sign in with Apple or Microsoft, and connect your AI apps. No servers. Personal wikis are free; teams get a managed team server in Germany. See [ambientartifacts.si](https://ambientartifacts.si).
+The fastest way: install the app, sign in with Apple, Microsoft or Google, and connect your AI apps. No servers. Personal wikis are free; teams get a managed team server in Germany. See [ambientartifacts.si](https://ambientartifacts.si).
 
 ### Self-host Ambient
 
@@ -56,7 +56,7 @@ Then add `https://ambient.example.com/mcp` as a connector in Claude (Settings �
 | Work-session notes, nightly upkeep, overviews | ✓, included | ✓, with your Anthropic API key |
 | Loops | ✓ | ✓ |
 | iPhone and Mac apps: recording, on-device transcription | ✓ | ✓, "Use your own server" at sign-in |
-| Sign-in | Apple, Microsoft; anyone can sign up | Apple; only people you add or allow |
+| Sign-in | Apple, Microsoft, Google; anyone can sign up | Apple; only people you add or allow |
 | Push notifications | ✓ | – |
 | Updates, backups, monitoring | We run them | You run them |
 

@@ -24,6 +24,7 @@ app.listen(port, host, () => {
   const signIn = [
     config.appleAudiences.length ? `Apple (${config.appleAudiences.join(", ")})` : null,
     config.microsoftClientIds?.length ? "Microsoft" : null,
+    config.googleClientIds?.length ? "Google" : null,
   ].filter(Boolean);
   console.log(`[gateway] app sign-in: ${signIn.length ? signIn.join(", ") : "none (accounts and AI-app codes come from the admin CLI)"}`);
   // Unset BRAIN_SIGNUPS means open: say so, so a server meant to be private doesn't stay open unnoticed.
