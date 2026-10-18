@@ -80,6 +80,37 @@ export class HasContent extends GitError {
   ) {
     super(`This repo already has ${files} ${files === 1 ? "file" : "files"} of its own.`, "has_content");
   }
+
+  /** From the repo's file list, with a sample that shows what's in it (see sampleFiles). */
+  static of(files: string[]): HasContent {
+    return new HasContent(files.length, sampleFiles(files));
+  }
+}
+
+/**
+ * A few file names that show what a repo holds, for the "connect it anyway?" question. Git lists
+ * files sorted, which puts hidden folders (`.azuredevops/`, `.claude/`) first; people recognise a
+ * repo by its pages. So: Markdown pages in folders first, one per folder, then pages at the top,
+ * then other files, hidden ones last; then more of the same order to fill up.
+ */
+export function sampleFiles(files: string[], n = 5): string[] {
+  const rank = (f: string) => {
+    if (f.split("/").some((part) => part.startsWith("."))) return 3;
+    if (!f.toLowerCase().endsWith(".md")) return 2;
+    return f.includes("/") ? 0 : 1;
+  };
+  const ordered = files.map((f, i) => ({ f, r: rank(f), i })).sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.f);
+  const picked: string[] = [];
+  const folders = new Set<string>();
+  for (const f of ordered) {
+    const top = f.includes("/") ? f.split("/")[0]! : f;
+    if (picked.length < n && !folders.has(top)) {
+      folders.add(top);
+      picked.push(f);
+    }
+  }
+  for (const f of ordered) if (picked.length < n && !picked.includes(f)) picked.push(f);
+  return picked;
 }
 
 export interface GitOptions {
