@@ -10,7 +10,7 @@ import {
   firstHeading,
   foldText,
   parseActionItems,
-  parsePage,
+  parsePageLenient,
   section,
   splitCompiled,
 } from "@brain/spec";
@@ -134,8 +134,15 @@ export class WikiStore {
     return `${this.prefix}${ref}.md`;
   }
 
+  /** Pages whose front matter couldn't be read, by path. They're indexed without front matter. */
+  readonly invalid = new Map<string, string>();
+
   upsert(path: string, text: string): void {
-    const { frontmatter: fm, body } = parsePage(text);
+    const { frontmatter: fm, body, error } = parsePageLenient(text);
+    if (error) {
+      this.invalid.set(path, error);
+      console.warn(`wiki: front matter of ${path} isn't valid YAML (${error}); indexed without it`);
+    } else this.invalid.delete(path);
     const fileTitle = path.split("/").pop()!.replace(/\.md$/, "").replace(/-/g, " ");
     const title = asString(fm.title) || firstHeading(body) || fileTitle;
     const summary = asString(fm.summary);
@@ -171,6 +178,7 @@ export class WikiStore {
   }
 
   remove(path: string): void {
+    this.invalid.delete(path);
     this.db.transaction(() => this.removeRows(path))();
   }
 

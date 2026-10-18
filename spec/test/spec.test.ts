@@ -221,3 +221,16 @@ describe("forgetNote", () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 });
+
+describe("parsePageLenient", () => {
+  it("returns the error instead of throwing, and keeps the body", async () => {
+    const { parsePage, parsePageLenient } = await import("../src/index.ts");
+    const bad = "---\ntitle: A\ntitle: B\n---\n# Body\n";
+    expect(() => parsePage(bad)).toThrow();
+    const p = parsePageLenient(bad);
+    expect(p.frontmatter).toEqual({});
+    expect(p.body).toBe("# Body\n");
+    expect(p.error).toMatch(/unique/i);
+    expect(parsePageLenient("---\ntitle: A\n---\nx").error).toBeUndefined();
+  });
+});
