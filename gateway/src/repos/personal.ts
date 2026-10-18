@@ -224,6 +224,11 @@ export class PersonalRepos {
 const MAX_REPO_FILES = 50_000;
 /** Larger files aren't read: no page or transcript the app writes is that big. */
 const MAX_REPO_FILE_BYTES = 600_000;
+/**
+ * All of them together, as read into memory. A few KB of git pack can check out as hundreds of
+ * MB of pages (text compresses that well), each under the size above.
+ */
+export const MAX_REPO_READ_BYTES = 128 * 1024 * 1024;
 
 /**
  * The repo's wiki pages and transcripts (generated files excluded), path → text. Regular files
@@ -231,8 +236,9 @@ const MAX_REPO_FILE_BYTES = 600_000;
  * file of the gateway's own into the user's wiki. A file too large to be one of ours is left out
  * (so it's never imported; one Ambient has is written back over it).
  */
-async function readRepo(dir: string): Promise<Map<string, string>> {
+export async function readRepo(dir: string, maxBytes = MAX_REPO_READ_BYTES): Promise<Map<string, string>> {
   const out = new Map<string, string>();
+  let total = 0;
   const walk = async (d: string): Promise<void> => {
     for (const e of await readdir(d, { withFileTypes: true }).catch(() => [])) {
       if (e.name.startsWith(".")) continue;
@@ -242,8 +248,11 @@ async function readRepo(dir: string): Promise<Map<string, string>> {
         const rel = relative(dir, p).split(sep).join("/");
         const generated = rel === "AGENTS.md" || rel === "wiki/index.md" || rel === "wiki/log.md" || e.name === "_index.md";
         if (generated || !(rel.startsWith("wiki/") || rel.startsWith("raw/"))) continue;
-        if ((await stat(p)).size > MAX_REPO_FILE_BYTES) continue;
+        const size = (await stat(p)).size;
+        if (size > MAX_REPO_FILE_BYTES) continue;
         if (out.size >= MAX_REPO_FILES) throw new GitError(`The repo has more than ${MAX_REPO_FILES} pages. Use a repo for the wiki alone.`, "too_large");
+        total += size;
+        if (total > maxBytes) throw new GitError(`The repo's pages come to more than ${Math.round(maxBytes / 1024 / 1024)} MB. Use a repo for the wiki alone.`, "too_large");
         out.set(rel, await readFile(p, "utf8"));
       }
     }

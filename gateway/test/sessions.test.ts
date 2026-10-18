@@ -3,15 +3,18 @@
 // and a session in a team's folder reaches the team server only after the 30-minute hold,
 // unless the user keeps it personal. Plus `log_work` for AI apps over MCP.
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { Readable } from "node:stream";
+import { createGzip, gzipSync } from "node:zlib";
 import type { SessionSummarizer, SessionSummaryInput } from "@brain/team";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parsePage } from "@brain/spec";
 import { appCall, INVITE, mcpClient, signIn, startStack, text, type Stack } from "./helpers.ts";
 import { MAX_BLOCKS } from "../src/sessions/service.ts";
+import { MAX_UPLOAD_BYTES } from "../src/sessions/route.ts";
 
 const SCRIPT = join(import.meta.dirname, "..", "..", "integrations", "claude-code", "scripts", "capture.sh");
 const HOLD = 30 * 60_000;
@@ -214,6 +217,60 @@ describe("Claude Code sessions", () => {
     expect(await upload()).toMatchObject({ status: "queued", blocks: 2, queued: 1 });
     await s.sessions.process(model);
     expect(await upload()).toMatchObject({ status: "skipped", queued: 0 });
+  });
+
+  it("streams an upload: skips a line too long to matter, refuses one too large, and one account's slow uploads don't hold up another's", async () => {
+    const id = "5f0c2a9e-bbbb-4c4c-8888-000000000031";
+    const base = { sessionId: id, cwd: "/opt/workspace", gitBranch: "main", entrypoint: "sdk-cli" };
+    const prompt = { ...base, type: "user", timestamp: "2026-10-09T08:00:00Z", origin: { kind: "human" }, message: { role: "user", content: "Write down why the upload limit is 150 MB and what happens past it." } };
+    const screenshot = { ...base, type: "user", timestamp: "2026-10-09T08:01:00Z", message: { role: "user", content: [{ type: "tool_result", content: "x".repeat(9 * 1024 * 1024) }] } };
+    const send = (body: Buffer, auth = token) =>
+      fetch(`${s.origin}/v1/sessions`, { method: "POST", headers: { authorization: `Bearer ${auth}`, "content-encoding": "gzip" }, body: new Uint8Array(body) });
+    const meta = JSON.stringify({ session_id: id, cwd: "/opt/workspace", ambient: { home } });
+    const ok = await send(gzipSync(`${meta}\n${JSON.stringify(prompt)}\n${JSON.stringify(screenshot)}\n`));
+    expect(ok.status).toBe(202);
+    expect(await ok.json()).toMatchObject({ status: "queued", queued: 1 });
+    await s.t.run(async (ctx) => {
+      for (const r of await ctx.db.query("sessionInbox").collect()) if (r.sessionId.startsWith(id)) await ctx.db.delete(r._id);
+    });
+
+    // Past the limit once inflated: refused, without buffering it.
+    // Compressed from a stream, a megabyte at a time: the test never holds the inflated size either.
+    const mb = Buffer.alloc(1024 * 1024, 0x20);
+    const parts: Buffer[] = [];
+    const zip = Readable.from((function* () {
+      yield Buffer.from(`${meta}\n`);
+      for (let i = 0; i <= MAX_UPLOAD_BYTES / mb.length; i++) yield mb;
+    })()).pipe(createGzip({ level: 1 }));
+    for await (const part of zip) parts.push(part as Buffer);
+    const bomb = Buffer.concat(parts);
+    expect((await send(bomb)).status).toBe(413);
+
+    // Three other accounts trickle two uploads each (what used to take every shared slot); this
+    // one's upload still goes through.
+    const others: string[] = [];
+    for (const n of [1, 2, 3]) {
+      const other = await signIn(s, `apple-trickle-${n}`, `Tara Trickle ${n}`);
+      others.push(String((await appCall(s, other.access_token, "POST", "/v1/app/pats", { label: "Claude Code", purpose: "claude-code" })).json.token));
+    }
+    const otherToken = others[0]!;
+    const url = new URL(`${s.origin}/v1/sessions`);
+    const trickles = others.flatMap((t) =>
+      [0, 1].map(() => {
+        const req = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: "POST", headers: { authorization: `Bearer ${t}` } });
+        req.on("error", () => undefined);
+        req.write(`${meta}\n`);
+        return req;
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    expect((await send(gzipSync(`${meta}\n${JSON.stringify(prompt)}\n`))).status).toBeLessThan(300);
+    // Its own third one waits its turn.
+    expect((await send(gzipSync(`${meta}\n`), otherToken)).status).toBe(429);
+    for (const req of trickles) req.destroy();
+    await s.t.run(async (ctx) => {
+      for (const r of await ctx.db.query("sessionInbox").collect()) if (r.sessionId.startsWith(id)) await ctx.db.delete(r._id);
+    });
   });
 
   it("queues at most MAX_BLOCKS blocks from one upload, the latest", async () => {
