@@ -1,12 +1,13 @@
 // Personal wikis in the user's own git repo, end to end against local bare repos.
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parsePage, splitCompiled } from "@brain/spec";
 import { checkout } from "@brain/wiki";
+import { readRepo } from "../src/repos/personal.ts";
 import { appCall, fixturePersonalOps, signIn, startStack, type Stack } from "./helpers.ts";
 
 let s: Stack;
@@ -198,6 +199,27 @@ describe("personal repo", () => {
     const into = mkdtempSync(join(tmpdir(), "ambient-big-"));
     await expect(checkout({ url: bigUrl, token: "t" }, join(into, "c"), { allowFile: true, maxCloneBytes: 512 * 1024 })).rejects.toMatchObject({ code: "too_large" });
     await expect(checkout({ url: bigUrl, token: "t" }, join(into, "d"), { allowFile: true })).resolves.toMatchObject({ branch: "main" });
+    rmSync(into, { recursive: true, force: true });
+  });
+
+  it("stops reading a checkout whose pages come to more than allowed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ambient-read-"));
+    mkdirSync(join(dir, "wiki", "topics"), { recursive: true });
+    for (const name of ["a", "b"]) writeFileSync(join(dir, "wiki", "topics", `${name}.md`), "x".repeat(400));
+    await expect(readRepo(dir, 500)).rejects.toMatchObject({ code: "too_large" });
+    expect((await readRepo(dir, 1000)).size).toBe(2);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("stops a clone with more files than allowed, even empty ones", async () => {
+    const manyUrl = bare("many");
+    const work = clone(manyUrl, "many-work");
+    for (let i = 0; i < 300; i++) writeFileSync(join(work, `f${i}`), "");
+    sh(["add", "-A"], work);
+    sh(["commit", "-q", "-m", "many"], work);
+    sh(["-c", "protocol.file.allow=always", "push", "-q", "origin", "HEAD:main"], work);
+    const into = mkdtempSync(join(tmpdir(), "ambient-many-"));
+    await expect(checkout({ url: manyUrl, token: "t" }, join(into, "c"), { allowFile: true, maxCloneFiles: 100 })).rejects.toMatchObject({ code: "too_large" });
     rmSync(into, { recursive: true, force: true });
   });
 

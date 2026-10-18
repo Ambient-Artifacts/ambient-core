@@ -130,14 +130,19 @@ export function forgetNotes(notePaths: string[], pages: Map<string, string>): { 
     const raw = note ? parsePage(note).frontmatter.raw : undefined;
     if (typeof raw === "string" && raw) deletes.push(raw);
   }
-  // Whether a timeline line points at one of the files: "/<file>" somewhere in it.
-  const plainNames = [...files].every((f) => !f.includes("/") && f.endsWith(".md") && f.indexOf(".md") === f.length - 3);
+  // Whether a timeline line points at one of the files: "/<file>" somewhere in it. Only names like
+  // the app's notes count (no "/", ".md" once, at the end): then the text from the last "/" before
+  // an ".md" through that ".md" is the name, and one pass over the line finds every candidate. A
+  // made-up delete path can't make this slow, and no timeline line links anything else.
+  const names = new Set([...files].filter((f) => f.length > 3 && !f.includes("/") && f.indexOf(".md") === f.length - 3));
+  const longest = Math.max(0, ...[...names].map((f) => f.length));
   const pointsAt = (line: string): boolean => {
-    if (!plainNames) return [...files].some((f) => line.includes(`/${f}`));
-    for (let i = line.indexOf("/"); i >= 0; i = line.indexOf("/", i + 1)) {
-      const end = line.indexOf(".md", i + 1);
-      if (end < 0) return false;
-      if (files.has(line.slice(i + 1, end + 3))) return true;
+    if (names.size === 0) return false;
+    let slash = -1;
+    for (let i = 0; i < line.length; i++) {
+      const c = line.charCodeAt(i);
+      if (c === 47) slash = i;
+      else if (c === 46 && slash >= 0 && i + 3 - slash - 1 <= longest && line.startsWith(".md", i) && names.has(line.slice(slash + 1, i + 3))) return true;
     }
     return false;
   };
