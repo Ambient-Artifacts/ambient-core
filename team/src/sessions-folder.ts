@@ -3,6 +3,7 @@
 import type { TeamWiki } from "./wiki.ts";
 
 export async function moveSessionNotes(wiki: TeamWiki): Promise<number> {
+  if (wiki.remote?.readOnly) return 0;  // the repo is another tool's: nothing to move here
   const legacy = wiki.store.ofType("note").filter((p) => p.path.startsWith("notes/") && p.frontmatter.kind === "session");
   if (!legacy.length) return 0;
   await wiki.write(async (put, remove) => {

@@ -62,9 +62,23 @@ export interface RemoteRepo {
 export class GitError extends Error {
   constructor(
     message: string,
-    readonly code: "bad_url" | "auth" | "not_found" | "not_empty" | "conflict" | "too_large" | "failed" = "failed",
+    readonly code: "bad_url" | "auth" | "not_found" | "not_empty" | "has_content" | "conflict" | "too_large" | "failed" = "failed",
   ) {
     super(message);
+  }
+}
+
+/**
+ * A repo that already has files of its own, and wasn't written by Ambient: connected only once
+ * someone has seen what's in it and said so (`existing`). `files` and `sample` are for that
+ * question.
+ */
+export class HasContent extends GitError {
+  constructor(
+    readonly files: number,
+    readonly sample: string[],
+  ) {
+    super(`This repo already has ${files} ${files === 1 ? "file" : "files"} of its own.`, "has_content");
   }
 }
 

@@ -123,8 +123,11 @@ In the Ambient app go to **Settings → Connect an AI app** and keep the 8-chara
 
 ## Wikis in a user's or team's own repo
 - **Personal:** the user connects a repo in the app (Settings → Wiki repo). The token and sync state are stored in Convex, encrypted with the user's key. `brain-personal.timer` syncs every connected repo every 15 minutes in a throwaway clone: pages go to `wiki/`, transcripts to `raw/`, edits made in the repo come back. Sync by hand: `systemctl start brain-personal`.
-- **Team:** an owner or admin connects it (Settings → Teams → <team> repo). The token stays on the team server in `/srv/brain/remote.json` (mode 600). The server pushes after every commit and pulls before every write.
-- **Both:** only `https://` URLs to public hosts. A non-empty repo must already be an Ambient wiki or share the team wiki's history. Failures show up in the health check.
+- **Team:** an owner or admin connects it (Settings → Teams → <team> repo). The token stays on the team server in `/srv/brain/remote.json` (mode 600). Two ways:
+  - **Ambient keeps this wiki (two-way):** the server pushes after every commit and pulls before every write.
+  - **Another tool keeps it (read-only):** for a company whose own pipeline writes the wiki. The server follows the repo (fetch, reset, every few minutes as it's read) and never writes, commits or pushes; the nightly upkeep skips the team, and notes shared to it are turned away (403 to the app, kept personal for work sessions). Only for a team without notes yet: the repo's content replaces the new team's empty wiki. A Code (Read) token is enough.
+  - By hand: `admin team repo <slug> <url> [--existing] [--read-only] < token.txt`.
+- **Both:** only `https://` URLs to public hosts. A repo with files of its own (not an Ambient wiki, no shared history) is connected only once someone has seen what's in it: the first try answers 409 `has_content` with the file count and a few names, and the app asks; the second sends `existing: true`. Two-way, Ambient then never writes the repo's own `AGENTS.md` or `index.md` (personal: `wiki/index.md`), and keeps the folder catalogs (`_index.md`) and, for personal repos, `wiki/` and `raw/`. Failures show up in the health check.
 
 ## Operating it
 - **Logs:** `journalctl -u brain-gateway -f` on the core VM, `journalctl -u brain-team -u brain-consolidate` on a team VM.

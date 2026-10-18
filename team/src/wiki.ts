@@ -7,6 +7,13 @@ import { attention, LocalReader, indexFilesIn, renderIndexFiles, WikiStore } fro
 import type { TeamRemote } from "./remote.ts";
 import { Repo } from "./repo.ts";
 
+/** A write to a team wiki whose repo another tool keeps (read-only): refused, never queued. */
+export class ReadOnlyWiki extends Error {
+  constructor() {
+    super("This team's wiki is kept by another tool. Ambient only reads it, so nothing can be added here.");
+  }
+}
+
 export class TeamWiki {
   readonly repo: Repo;
   store: WikiStore;
@@ -43,8 +50,9 @@ export class TeamWiki {
       wiki.remote = remote;
     }
     wiki.knownHead = await wiki.repo.head();
-    // Repos from before index pages existed (or edited by hand) get them now.
-    await wiki.write(async () => ({ message: "index: rebuild", result: {} }));
+    // Repos from before index pages existed (or edited by hand) get them now; a read-only
+    // wiki is the repo's, as it is.
+    if (!remote?.readOnly) await wiki.write(async () => ({ message: "index: rebuild", result: {} }));
     return wiki;
   }
 
@@ -80,6 +88,7 @@ export class TeamWiki {
   write<T>(
     fn: (put: (path: string, text: string) => Promise<void>, remove: (path: string) => Promise<void>) => Promise<{ message: string; result: T }>,
   ): Promise<T & { commit: string | null }> {
+    if (this.remote?.readOnly) return Promise.reject(new ReadOnlyWiki());
     const next = this.chain.then(async () => {
       // Start from the repo's latest state, so edits made there aren't overwritten.
       if (this.remote?.connected && (await this.remote.pull())) this.reload();
@@ -135,7 +144,10 @@ export class TeamWiki {
   private async writeIndexes(): Promise<string[]> {
     const changed: string[] = [];
     const rendered = renderIndexFiles(this.store.entries(), `${this.teamName} wiki`, attention(this.store.lint()));
+    const keep = new Set(this.remote?.keep ?? []);
     for (const [path, text] of rendered) {
+      // The repo's own index.md (it had one when it was connected) stays as its people wrote it.
+      if (keep.has(path)) continue;
       // A folder from the repo that can't be written to (a link on the way, say) gets no index,
       // rather than every write failing, and the server with it (it writes at startup).
       const file = insideOrNull(this.dir, path);

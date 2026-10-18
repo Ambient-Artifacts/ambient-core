@@ -14,7 +14,7 @@ import type { WikiReader } from "@brain/wiki";
 import { api, type Control } from "../control.ts";
 import type { Directory, Team } from "../directory.ts";
 import type { PersonalStore } from "../personal.ts";
-import type { TeamLink } from "../teams.ts";
+import { TeamServerError, type TeamLink } from "../teams.ts";
 import { condense, homeRelative, matchBudget, normalizeRemote, parseClaudeCode, pickTeam, splitBlocks, type ParsedSession, type SessionPlace, type SessionRule } from "./condense.ts";
 
 /** How long a team copy waits, so the user can keep a session personal. */
@@ -373,6 +373,13 @@ export class SessionService {
         await this.d.control.m(api.sessions.shareDelivered, { id: s.id, now });
         results.push({ sessionId: s.sessionId, status: "delivered" });
       } catch (err) {
+        // The team's repo is kept by another tool (connected read-only): the note stays personal
+        // rather than being tried again every minute.
+        if (err instanceof TeamServerError && err.status === 409) {
+          await this.d.control.m(api.sessions.keepPersonal, { uid: uid as never, sessionId: s.sessionId, now });
+          results.push({ sessionId: s.sessionId, status: "dropped" });
+          continue;
+        }
         await this.d.control.m(api.sessions.shareFailed, { id: s.id, now });
         results.push({ sessionId: s.sessionId, status: "failed", error: (err as Error).message });
       }

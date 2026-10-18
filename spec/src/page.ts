@@ -19,6 +19,20 @@ export function parsePage(text: string): ParsedPage {
   return { frontmatter, body: text.slice(m[0].length) };
 }
 
+/**
+ * parsePage for text Ambient didn't write (a team's own repository): a front matter block that isn't
+ * valid YAML (a typo, a duplicate key) yields an empty front matter and the error instead of throwing.
+ * Writers keep using parsePage, so they never rewrite a page whose front matter they couldn't read.
+ */
+export function parsePageLenient(text: string): ParsedPage & { error?: string } {
+  try {
+    return parsePage(text);
+  } catch (e) {
+    const m = FRONTMATTER.exec(text);
+    return { frontmatter: {}, body: m ? text.slice(m[0].length) : text, error: (e as Error).message.split("\n")[0] };
+  }
+}
+
 export function renderPage(page: ParsedPage): string {
   const yaml = stringifyYaml(page.frontmatter, { lineWidth: 0 }).trimEnd();
   return `---\n${yaml}\n---\n${page.body.startsWith("\n") ? page.body.slice(1) : page.body}`;

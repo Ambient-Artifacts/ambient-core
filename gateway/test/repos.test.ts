@@ -63,7 +63,29 @@ describe("personal repo", () => {
     sh(["commit", "-q", "-m", "init"], work);
     sh(["-c", "protocol.file.allow=always", "push", "-q", "origin", "HEAD:main"], work);
     const r = await appCall(s, token, "POST", "/v1/app/repo", { url: foreign, token: "t" });
-    expect(r).toMatchObject({ status: 400, json: { error: "not_empty" } });
+    expect(r).toMatchObject({ status: 409, json: { error: "has_content", files: 1, sample: ["README.md"] } });
+  });
+
+  it("connects a repo with files of its own once asked to, and leaves its own AGENTS.md alone", async () => {
+    const theirs = bare("theirs");
+    const work = clone(theirs, "theirs-work");
+    writeFileSync(join(work, "README.md"), "my notes\n");
+    writeFileSync(join(work, "AGENTS.md"), "# My agent rules\n");
+    sh(["add", "-A"], work);
+    sh(["commit", "-q", "-m", "init"], work);
+    sh(["-c", "protocol.file.allow=always", "push", "-q", "origin", "HEAD:main"], work);
+    const other = await signIn(s, "apple-existing-repo", "Erik Existing");
+    expect((await appCall(s, other.access_token, "POST", "/v1/app/repo", { url: theirs, token: "t" })).status).toBe(409);
+    await appCall(s, other.access_token, "POST", "/v1/app/personal/sync", { device_id: "iphone", ops: fixturePersonalOps() });
+    const r = await appCall(s, other.access_token, "POST", "/v1/app/repo", { url: theirs, token: "t", existing: true });
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    const after = clone(theirs, "theirs-check");
+    expect(readFileSync(join(after, "AGENTS.md"), "utf8")).toBe("# My agent rules\n");
+    expect(readFileSync(join(after, "README.md"), "utf8")).toBe("my notes\n");
+    expect(existsSync(join(after, "wiki/index.md"))).toBe(true);
+    // And on the next sync too.
+    expect((await appCall(s, other.access_token, "POST", "/v1/app/repo/sync")).status).toBe(200);
+    expect(readFileSync(join(clone(theirs, "theirs-check2"), "AGENTS.md"), "utf8")).toBe("# My agent rules\n");
   });
 
   it("connects and pushes the whole wiki: pages, transcripts, indexes and AGENTS.md", async () => {
