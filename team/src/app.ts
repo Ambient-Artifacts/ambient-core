@@ -6,9 +6,9 @@ import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JWK, type JWTPayload } from "jose";
 import { TeamNoteV1 } from "@brain/spec";
-import { dispatchQuery, GitError, LocalReader, QueryRequest, type WikiStore } from "@brain/wiki";
+import { dispatchQuery, GitError, HasContent, LocalReader, QueryRequest, type WikiStore } from "@brain/wiki";
 import { IngestError, ingestNote } from "./ingest.ts";
-import type { TeamWiki } from "./wiki.ts";
+import { ReadOnlyWiki, type TeamWiki } from "./wiki.ts";
 
 export interface TeamAppConfig {
   teamId: string;
@@ -102,14 +102,21 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     }
     const url = typeof req.body?.url === "string" ? req.body.url : "";
     const token = typeof req.body?.token === "string" ? req.body.token : "";
+    const mode = req.body?.mode === "read-only" ? "read-only" : "two-way";
+    const existing = req.body?.existing === true;
     try {
       const repo = await wiki.exclusive(async () => {
-        const status = await remote.connect(url, token);
+        const status = await remote.connect(url, token, { mode, existing });
         wiki.reload();
         return status;
       });
       res.json({ repo });
     } catch (err) {
+      // Files of its own: the app shows what's there and asks before connecting it.
+      if (err instanceof HasContent) {
+        res.status(409).json({ error: err.code, message: err.message, files: err.files, sample: err.sample });
+        return;
+      }
       if (err instanceof GitError) {
         res.status(400).json({ error: err.code, message: err.message });
         return;
@@ -133,6 +140,11 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
       res.status(400).json({ error: "wrong team" });
       return;
     }
+    // Before anything is stored (the raw transcript too): another tool keeps this wiki.
+    if (wiki.remote?.readOnly) {
+      res.status(409).json({ error: "read_only", message: new ReadOnlyWiki().message });
+      return;
+    }
     const token = res.locals.token as JWTPayload & { recorded_by_slug?: string };
     try {
       const out = await ingestNote(wiki, parsed.data, {
@@ -150,6 +162,10 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
   });
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof ReadOnlyWiki) {
+      if (!res.headersSent) res.status(409).json({ error: "read_only", message: err.message });
+      return;
+    }
     console.error("[team] unhandled", err);
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });

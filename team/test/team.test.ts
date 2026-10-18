@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { JobResult, parsePage, splitCompiled, type TeamNoteV1 } from "@brain/spec";
 import { createTeamApp } from "../src/app.ts";
 import { consolidate, type PageUpdateInput, type PageUpdater } from "../src/consolidate.ts";
+import { TeamRemote } from "../src/remote.ts";
 import { TeamWiki } from "../src/wiki.ts";
 import { moveSessionNotes } from "../src/sessions-folder.ts";
 import type { OverviewInput, OverviewWriter } from "../src/overview.ts";
@@ -394,6 +395,24 @@ describe("paths", () => {
     } finally {
       rmSync(join(dataDir, "wiki", "projects", "v1..v2"), { recursive: true, force: true });
       wiki.reload();
+    }
+  });
+});
+
+describe("a team whose repo another tool keeps (read-only)", () => {
+  it("turns notes away before storing anything, the transcript included", async () => {
+    const file = join(dataDir, "remote-read-only.json");
+    writeFileSync(file, JSON.stringify({ url: "https://example.com/wiki.git", token: "t", branch: "main", status: "ok", lastPushAt: null, lastPullAt: null, lastError: null, mode: "read-only" }));
+    const readOnly = new TeamRemote(file, join(dataDir, "wiki"), {});
+    await readOnly.load();
+    const before = wiki.remote;
+    wiki.remote = readOnly;
+    try {
+      const res = await post("/v1/inbox", note("01JREADONLYNOTE00000000001"), await token("inbox"));
+      expect(res).toMatchObject({ status: 409, json: { error: "read_only" } });
+      expect(existsSync(join(dataDir, "raw", "01JREADONLYNOTE00000000001.json"))).toBe(false);
+    } finally {
+      wiki.remote = before;
     }
   });
 });

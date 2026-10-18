@@ -4,7 +4,7 @@ import { randomInt } from "node:crypto";
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { z } from "zod";
 import { SyncRequest, TeamNoteV1, parsePage, slugify } from "@brain/spec";
-import { GitError, QueryRequest, dispatchQuery, fileLinks, renderListing, type WikiReader } from "@brain/wiki";
+import { GitError, HasContent, QueryRequest, dispatchQuery, fileLinks, renderListing, type WikiReader } from "@brain/wiki";
 import type { AppAccess } from "./auth/app-access.ts";
 import type { AppleRevoker } from "./auth/apple-revoke.ts";
 import type { Pairing } from "./auth/pairing.ts";
@@ -630,6 +630,12 @@ export function appApiRouter(d: AppApiDeps): Router {
     try {
       res.json(await d.teams.deliver(team, parsed.data, uid, team.peopleSlug ?? null));
     } catch (err) {
+      if (err instanceof TeamServerError && err.status === 409) {
+        // The team's repo is kept by another tool (connected read-only): it takes no notes. 403,
+        // so the phone sets the note aside instead of retrying it (and holding up the rest).
+        res.status(403).json({ error: "read_only", message: "This team's wiki is kept by another tool, so Ambient can't add notes to it. Record it as Personal." });
+        return;
+      }
       if (err instanceof TeamServerError) {
         // 503: the phone keeps the note in its outbox and retries later.
         res.status(err.status).json({ error: "team_server_unavailable" });
@@ -725,6 +731,11 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // The personal wiki's own git repo (optional). Errors carry a sentence for the user.
   const repoError = (res: Response, err: unknown) => {
+    // Files of its own: the app shows what's there and asks before connecting it.
+    if (err instanceof HasContent) {
+      res.status(409).json({ error: err.code, message: err.message, files: err.files, sample: err.sample });
+      return;
+    }
     if (err instanceof GitError) {
       res.status(400).json({ error: err.code, message: err.message });
       return;
@@ -740,7 +751,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     const url = typeof req.body?.url === "string" ? req.body.url : "";
     const token = typeof req.body?.token === "string" ? req.body.token : "";
     try {
-      res.json({ repo: await d.repos.connect(uidOf(res), url, token) });
+      res.json({ repo: await d.repos.connect(uidOf(res), url, token, { existing: req.body?.existing === true }) });
     } catch (err) {
       repoError(res, err);
     }
@@ -773,7 +784,17 @@ export function appApiRouter(d: AppApiDeps): Router {
       return;
     }
     try {
-      const body = method === "POST" ? { url: String(req.body?.url ?? ""), token: String(req.body?.token ?? "") } : undefined;
+      const body =
+        method === "POST"
+          ? {
+              url: String(req.body?.url ?? ""),
+              token: String(req.body?.token ?? ""),
+              // How: Ambient keeps the wiki (two-way), or another tool does and Ambient only reads.
+              mode: req.body?.mode === "read-only" ? "read-only" : "two-way",
+              // The person saw what the repo already holds (the 409 has_content answer) and connects it anyway.
+              existing: req.body?.existing === true,
+            }
+          : undefined;
       const out = await d.teams.repo(team, uid, method, body);
       if (out.status === 204) res.status(204).end();
       else res.status(out.status).json(out.json);
