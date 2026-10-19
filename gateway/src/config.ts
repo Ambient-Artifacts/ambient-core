@@ -42,6 +42,8 @@ export interface GatewayConfig {
    * the one the apps use). Optional: without one the apps show only Sign in with Apple.
    */
   microsoftClientIds?: string[];
+  /** Sign in with Google: the apps' OAuth client ids in Google Cloud (the first is the one the apps use). */
+  googleClientIds?: string[];
   /**
    * "Connect Microsoft 365": Ambient's own multi-tenant Microsoft app (a confidential client of
    * its own, not the apps' sign-in app) and its credential. Optional: without it, teams connect
@@ -60,7 +62,7 @@ export interface GatewayConfig {
    */
   signups?: { allow: string[] };
   /**
-   * Refuse Apple and Microsoft sign-ins whose ID token doesn't carry a nonce this server issued
+   * Refuse Apple, Microsoft and Google sign-ins whose ID token doesn't carry a nonce this server issued
    * (auth/signin-nonce.ts). Off until every app in use sends one (set BRAIN_MIN_APP_VERSION to
    * the first that does); until then a token without a nonce is still taken.
    */
@@ -122,6 +124,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     minAppVersion: env.BRAIN_MIN_APP_VERSION || undefined,
     appUpdateUrl: env.BRAIN_APP_UPDATE_URL || undefined,
     microsoftClientIds: env.BRAIN_MICROSOFT_CLIENT_IDS?.split(",").map((s) => s.trim()).filter(Boolean),
+    googleClientIds: env.BRAIN_GOOGLE_CLIENT_IDS?.split(",").map((s) => s.trim()).filter(Boolean),
     microsoftConnect: loadMicrosoftConnect(env),
     adminCodes: env.BRAIN_ADMIN_CODES === "true",
     signups: parseSignups(env.BRAIN_SIGNUPS),

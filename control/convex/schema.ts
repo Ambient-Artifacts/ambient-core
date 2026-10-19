@@ -25,6 +25,8 @@ export default defineSchema({
      * the key: Microsoft lets it change and doesn't always verify it.
      */
     microsoftId: v.optional(v.string()),
+    /** Sign in with Google: the account's id ("sub"), stable and never reused. Email isn't the key either. */
+    googleSub: v.optional(v.string()),
     /**
      * An account made by a self-hosted server's admin (`admin user add`), for servers without
      * the apps' Apple or Microsoft sign-in: the lowercased email.
@@ -59,6 +61,7 @@ export default defineSchema({
   })
     .index("by_appleSub", ["appleSub"])
     .index("by_microsoftId", ["microsoftId"])
+    .index("by_googleSub", ["googleSub"])
     .index("by_localId", ["localId"]),
 
   /**

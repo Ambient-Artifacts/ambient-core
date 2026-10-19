@@ -19,6 +19,7 @@ import type { MicrosoftConnector } from "../src/microsoft-connect.ts";
 import type { MicrosoftConnection } from "@brain/spec";
 import { createApp } from "../src/app.ts";
 import { appleVerifier } from "../src/auth/apple.ts";
+import { googleVerifier } from "../src/auth/google.ts";
 import { microsoftVerifier } from "../src/auth/microsoft.ts";
 import { publicJwks } from "../src/auth/bearer.ts";
 import { generateSigningKey, type GatewayConfig } from "../src/config.ts";
@@ -30,6 +31,7 @@ export const FIXTURES = join(import.meta.dirname, "..", "..", "spec", "fixtures"
 export const BUNDLE_ID = "com.example.brain";
 export const INVITE = "ACME-2026";
 export const MICROSOFT_CLIENT = "00000000-0000-0000-0000-00000000abcd";
+export const GOOGLE_CLIENT = "123456789012-abcdefghijklmnop.apps.googleusercontent.com";
 const modules = import.meta.glob("../../control/convex/**/*.ts");
 
 function listen(server: Server): Promise<string> {
@@ -78,6 +80,19 @@ export async function startStack(
       .setExpirationTime("5m")
       .sign(microsoft.privateKey);
 
+  // Fake Google: RS256 ID tokens for the apps' OAuth client.
+  const google = await generateKeyPair("RS256", { extractable: true });
+  const googleJwk = { ...(await exportJWK(google.publicKey)), kid: "g1", alg: "RS256", use: "sig" };
+  const googleToken = (sub: string, claims: Record<string, unknown> = {}, opts: { aud?: string; iss?: string } = {}) =>
+    new SignJWT({ ...claims })
+      .setProtectedHeader({ alg: "RS256", kid: "g1" })
+      .setIssuer(opts.iss ?? "https://accounts.google.com")
+      .setAudience(opts.aud ?? GOOGLE_CLIENT)
+      .setSubject(sub)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(google.privateKey);
+
   // Gateway (listen first: the origin is part of the config).
   const gatewayServer = createServer();
   const origin = await listen(gatewayServer);
@@ -92,6 +107,7 @@ export async function startStack(
     serviceSecret,
     appleAudiences: [BUNDLE_ID],
     microsoftClientIds: [MICROSOFT_CLIENT],
+    googleClientIds: [GOOGLE_CLIENT],
     directoryTtlMs: 0,
     allowFileRepos: true,
     signups: opts.signups,
@@ -143,6 +159,7 @@ export async function startStack(
     streamMaxMs: opts.streamMaxMs,
     push: opts.push,
     microsoft: microsoftVerifier([MICROSOFT_CLIENT], { keys: [microsoftJwk] }),
+    google: googleVerifier([GOOGLE_CLIENT], { keys: [googleJwk] }),
     microsoftConnect: opts.microsoftConnect ? { ...opts.microsoftConnect, fetchImpl: opts.microsoftFetch } : undefined,
   });
   gatewayServer.on("request", stack.app);
@@ -159,6 +176,7 @@ export async function startStack(
     poolDir,
     appleToken,
     microsoftToken,
+    googleToken,
     control: stack.control,
     personal: stack.personal,
     directory: stack.directory,
@@ -218,7 +236,7 @@ export async function tokenRequest(stack: Stack, key: CryptoKeyPair, params: Rec
   return { status: res.status, json: (await res.json()) as Record<string, string> };
 }
 
-type AppIdentity = { apple: string; name?: string } | { microsoft: string; nonce?: string; name?: string };
+type AppIdentity = { apple: string; name?: string } | { microsoft: string; nonce?: string; name?: string } | { google: string; name?: string };
 
 /**
  * The apps' sign-in, step by step: the authorization request (no browser: the app reads each
@@ -248,8 +266,8 @@ export async function appSignIn(stack: Stack, who: AppIdentity, key?: CryptoKeyP
   const interaction = start.headers.get("location");
   if (start.status !== 303 || !interaction?.startsWith("/interaction/")) return { status: start.status, step: "authorize" };
 
-  const body = "apple" in who ? { identityToken: who.apple, name: who.name } : { idToken: who.microsoft, nonce: who.nonce, name: who.name };
-  const step = await fetch(`${stack.origin}${interaction}/${"apple" in who ? "apple" : "microsoft"}`, {
+  const body = "apple" in who ? { identityToken: who.apple, name: who.name } : "google" in who ? { idToken: who.google, name: who.name } : { idToken: who.microsoft, nonce: who.nonce, name: who.name };
+  const step = await fetch(`${stack.origin}${interaction}/${"apple" in who ? "apple" : "google" in who ? "google" : "microsoft"}`, {
     method: "POST",
     headers: { cookie: jar.header(), "content-type": "application/json" },
     body: JSON.stringify(body),

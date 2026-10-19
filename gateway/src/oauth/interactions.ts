@@ -17,6 +17,7 @@ import express, { type Request, type Response, type Router } from "express";
 import type Provider from "oidc-provider";
 import { z } from "zod";
 import type { AppleVerifier } from "../auth/apple.ts";
+import type { GoogleVerifier } from "../auth/google.ts";
 import type { MicrosoftVerifier } from "../auth/microsoft.ts";
 import type { Pairing } from "../auth/pairing.ts";
 import { api, type Control } from "../control.ts";
@@ -31,11 +32,13 @@ export interface AppSignIn {
   apple: AppleVerifier;
   /** Only when the gateway has a Microsoft app registration. */
   microsoft?: MicrosoftVerifier;
+  /** Only when the gateway has a Google OAuth client. */
+  google?: GoogleVerifier;
   /** Where sign-in codes come from: the app (default), the admin CLI, or either. */
   codes?: LoginCodes;
   /** Who may make a new account from the apps (config.signups); absent: anyone. */
   signups?: { allow: string[] };
-  /** The nonces this server hands the apps for Apple and Microsoft sign-in. */
+  /** The nonces this server hands the apps for Apple, Microsoft and Google sign-in. */
   nonces: SignInNonces;
   /** config.requireSignInNonce: a token without one of them is refused. */
   requireNonce?: boolean;
@@ -63,6 +66,8 @@ const MicrosoftBody = z.object({
   nonce: z.string().min(8).max(200).optional(),
   name: z.string().max(80).optional(),
 });
+
+const GoogleBody = z.object({ idToken: z.string().min(20).max(10_000), name: z.string().max(80).optional() });
 
 const MAX_ATTEMPTS = 5;
 /** Wrong codes from one address before it has to wait. */
@@ -243,7 +248,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
   const appJson = express.json({ limit: "32kb" });
 
   /**
-   * Whether an Apple or Microsoft ID token may sign in here, by its nonce: one this server issued
+   * Whether an Apple, Microsoft or Google ID token may sign in here, by its nonce: one this server issued
    * (still valid, first use), or none at all from an app from before nonces, which is taken until
    * BRAIN_SIGNIN_NONCE=required. One of ours that expired or was used already is refused (a
    * replay), and so is an Apple token with a nonce that isn't ours: a token given to some other
@@ -339,6 +344,56 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
       } catch (err) {
         if (!isNotInvited(err)) throw err;
         res.status(403).json({ error: "not_invited", message: notInvited(undefined) });
+        return;
+      }
+      if (!user) {
+        res.status(403).json({ error: "account_disabled" });
+        return;
+      }
+      await finishAppSignIn(req, res, String(user.uid));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Also its own account (not joined by email to an Apple or Microsoft one). Unlike Microsoft's,
+  // the app sends no nonce of its own: only one this server issued, or none from an app before.
+  router.post("/interaction/:uid/google", appJson, async (req, res, next) => {
+    try {
+      if (!app.google) {
+        res.status(404).json({ error: "google_not_configured" });
+        return;
+      }
+      if (!(await appInteraction(req, res))) return;
+      const body = GoogleBody.safeParse(req.body);
+      if (!body.success) {
+        res.status(400).json({ error: "bad_request" });
+        return;
+      }
+      let identity;
+      try {
+        identity = await app.google(body.data.idToken);
+      } catch (err) {
+        // The reason only (a wrong audience, an expired token), never the token.
+        console.warn(`[gateway] google sign-in rejected: ${(err as Error).message}`);
+        res.status(401).json({ error: "invalid_google_token" });
+        return;
+      }
+      const googleRefusal = await nonceRefusal(identity.nonce);
+      if (googleRefusal) return refuseNonce(res, googleRefusal);
+      let user;
+      try {
+        user = await control.m(api.users.upsertGoogle, {
+          googleSub: identity.id,
+          email: identity.email,
+          emailTrusted: identity.emailTrusted,
+          name: identity.name ?? body.data.name,
+          signups: app.signups,
+          now: Date.now(),
+        });
+      } catch (err) {
+        if (!isNotInvited(err)) throw err;
+        res.status(403).json({ error: "not_invited", message: notInvited(identity.emailTrusted ? identity.email : undefined) });
         return;
       }
       if (!user) {

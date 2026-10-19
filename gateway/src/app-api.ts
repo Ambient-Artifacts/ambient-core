@@ -30,7 +30,7 @@ import type { SignInNonces } from "./auth/signin-nonce.ts";
 export interface AppApiDeps {
   /** An AI app's name, by its client id (oidc-provider's registered clients). */
   clientName?: (clientId: string) => Promise<string | undefined>;
-  /** Sign-in nonces for Apple and Microsoft (auth/signin-nonce.ts). */
+  /** Sign-in nonces for Apple, Microsoft and Google (auth/signin-nonce.ts). */
   signInNonces: SignInNonces;
   /** Invite codes are stored keyed (auth/codes.ts). */
   codes: CodeHasher;
@@ -48,6 +48,8 @@ export interface AppApiDeps {
   appleRevoke: AppleRevoker;
   /** Microsoft's app registration id the apps sign in with (/v1/app/config), when there is one. */
   microsoftClientId?: string;
+  /** Google's OAuth client id the apps sign in with (/v1/app/config), when there is one. */
+  googleClientId?: string;
   /** Whether the apps can sign in with Apple here (a self-hosted server may take only Microsoft, or neither). */
   appleSignIn: boolean;
   /** "Connect Microsoft 365" with Ambient's own Microsoft app, when this server has it. */
@@ -117,7 +119,7 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // ---- launch config (no sign-in needed) ----
 
-  // A nonce for Sign in with Apple or Microsoft: the app puts it into the request, they sign it
+  // A nonce for Sign in with Apple, Microsoft or Google: the app puts it into the request, they sign it
   // into the ID token, and this server's sign-in step takes only its own (auth/signin-nonce.ts).
   const nonceLimit = limiter(60);
   r.get("/v1/app/sign-in-nonce", (req, res) => {
@@ -138,6 +140,8 @@ export function appApiRouter(d: AppApiDeps): Router {
       updateUrl: d.appConfig.updateUrl ?? null,
       // The apps show "Continue with Microsoft" only when this is set,
       microsoftClientId: d.microsoftClientId ?? null,
+      // And "Continue with Google" only when this is.
+      googleClientId: d.googleClientId ?? null,
       // and "Continue with Apple" unless this is false (apps before it always show it).
       appleSignIn: d.appleSignIn,
       // Team settings offer "Connect Microsoft 365" (Ambient's own Microsoft app) when true.

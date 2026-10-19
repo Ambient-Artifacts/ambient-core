@@ -12,7 +12,7 @@ const user = (u: Doc<"users">) => ({
   uid: u._id,
   name: u.name,
   email: u.email ?? null,
-  signIn: u.appleSub ? "apple" : u.microsoftId ? "microsoft" : u.localId ? "local" : "unknown",
+  signIn: u.appleSub ? "apple" : u.microsoftId ? "microsoft" : u.googleSub ? "google" : u.localId ? "local" : "unknown",
   upkeep: u.consolidate === true,
   disabled: u.disabled === true || u.deletingAt !== undefined,
   createdAt: u.createdAt,

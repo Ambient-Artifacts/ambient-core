@@ -42,7 +42,7 @@ Claude Code ──────▶  :443     :8080  │             encrypted per
 **Compared with Ambient Cloud:** everything on the server side is the same code, and the apps work the same once they point at your server. What a self-hosted server doesn't have:
 
 - **Push notifications** to the apps. They need Ambient's own Apple key.
-- **Continue with Microsoft**, for now. People sign in to the apps with Apple; anyone can also be given an account with the admin CLI.
+- **Continue with Microsoft or Google**, for now. People sign in to the apps with Apple; anyone can also be given an account with the admin CLI.
 - **Claude usage included.** You bring your own Anthropic API key.
 
 ## What you need
