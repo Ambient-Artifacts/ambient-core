@@ -162,7 +162,7 @@ export function buildMcpServer({ principal, readers, routines, version, personal
   server.registerTool(
     "index",
     {
-      title: "Browse the wiki (table of contents)",
+      title: "Browse the brain (table of contents)",
       description:
         "The wiki's table of contents. Start here to see what exists. Without `folder` it returns the top-level index: sections with page counts, recently updated pages and the latest notes. With a folder (e.g. \"people\" or \"notes/2026/10\") it lists that folder's subfolders and pages, each with a one-line summary. In the result, links like `personal:people/anna-mueller` are page ids for `fetch`; links like `folder:people` are folders to open with another `index` call (same scope).",
       inputSchema: {
@@ -200,7 +200,7 @@ export function buildMcpServer({ principal, readers, routines, version, personal
   server.registerTool(
     "search",
     {
-      title: "Search notes and wiki pages",
+      title: "Search notes and pages",
       description:
         "Full-text search across the user's notes and wiki pages (German and English, tolerant of umlaut spellings and word fragments). Returns ids for `fetch`.",
       inputSchema: {

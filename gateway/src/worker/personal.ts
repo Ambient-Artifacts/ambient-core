@@ -76,7 +76,7 @@ async function runUser(d: WorkerDeps, uid: string, now: number): Promise<UserRun
   const wantsOverview = outcome.pagesUpdated > 0 || (outcome.fresh > 0 && outcome.failedNotes.size === 0) || !store.getByRef("overview");
   if (d.overview && wantsOverview && store.ofType("note").length > 0) {
     try {
-      const { overview: raw, usage } = await d.overview.write(overviewInput(store, { kind: "personal", title: "Your Ambient wiki", today }));
+      const { overview: raw, usage } = await d.overview.write(overviewInput(store, { kind: "personal", title: "Your brain", today }));
       outcome.requests++;
       outcome.usage.input_tokens += usage.input_tokens;
       outcome.usage.output_tokens += usage.output_tokens;

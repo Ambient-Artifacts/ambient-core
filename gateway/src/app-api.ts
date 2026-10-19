@@ -638,7 +638,7 @@ export function appApiRouter(d: AppApiDeps): Router {
       if (err instanceof TeamServerError && err.status === 409) {
         // The team's repo is kept by another tool (connected read-only): it takes no notes. 403,
         // so the phone sets the note aside instead of retrying it (and holding up the rest).
-        res.status(403).json({ error: "read_only", message: "This team's wiki is kept by another tool, so Ambient can't add notes to it. Record it as Personal." });
+        res.status(403).json({ error: "read_only", message: "Another tool keeps this team's brain, and it has no folder set for recordings. Record it as Personal, or ask an admin to set a folder under Transcripts and work logs." });
         return;
       }
       if (err instanceof TeamServerError) {
