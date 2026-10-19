@@ -77,10 +77,10 @@ const ADDRESS_WINDOW_MS = 10 * 60_000;
 const INTERACTION_MS = 3_600_000;
 
 const SCOPE_TEXT: Record<string, string> = {
-  "personal:read": "Read your personal notes and wiki",
-  "personal:write": "Save notes into your personal wiki, and draft loops that run only once you turn them on in the app",
-  "team:read": "Read the team wikis you belong to",
-  "team:write": "Log finished work to your team's wiki (after a 30-minute hold you can undo in the app), and draft team loops that run only once someone turns them on in the app",
+  "personal:read": "Read your notes and your brain",
+  "personal:write": "Save notes into your brain, and draft loops that run only once you turn them on in the app",
+  "team:read": "Read the brains of the teams you belong to",
+  "team:write": "Log finished work to your team's brain (after a 30-minute hold you can undo in the app), and draft team loops that run only once someone turns them on in the app",
   "team:review": "See and act on team review items",
   offline_access: "Stay connected without signing in again",
   openid: "Know who you are",
@@ -128,7 +128,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         const parsed = parseResource(provider.issuer, r);
         if (!parsed?.teamSlug) continue;
         const team = await directory.teamBySlug(parsed.teamSlug);
-        teamLines.push(`Only the <b>${esc(team?.name ?? parsed.teamSlug)}</b> team wiki (not your personal notes)`);
+        teamLines.push(`Only the <b>${esc(team?.name ?? parsed.teamSlug)}</b> team's brain (not your personal notes)`);
       }
       // Whose notes: so nobody approves an app for an account that isn't theirs (a shared browser).
       const who = details.session?.accountId ? await directory.user(details.session.accountId) : undefined;

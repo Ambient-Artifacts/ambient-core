@@ -148,7 +148,7 @@ export class TeamRemote {
           const notes = (await g(["ls-files", "--", "notes"])).trim();
           if (notes) {
             await forget();
-            throw new GitError("This team's wiki already has notes, which a read-only repo would replace. Connect a read-only repo to a new team.", "not_empty");
+            throw new GitError("This team's brain already has notes, which a read-only repo would replace. Connect a read-only repo to a new team.", "not_empty");
           }
         } else {
           keep = ["AGENTS.md", "index.md"].filter((f) => files.includes(f));

@@ -16,7 +16,7 @@ const LEGACY_GITIGNORE = "raw/\nout/\n.brain/\n";
 /** A write to a team wiki whose repo another tool keeps (read-only): refused, never queued. */
 export class ReadOnlyWiki extends Error {
   constructor() {
-    super("This team's wiki is kept by another tool. Ambient only reads it, so nothing can be added here.");
+    super("Another tool keeps this team's brain. Ambient only reads it, so nothing can be added here.");
   }
 }
 

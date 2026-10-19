@@ -563,7 +563,7 @@ export async function consolidate(
   if (opts.overview && (opts.forceOverview || outcome.pagesUpdated > 0 || merged.length > 0 || (outcome.fresh > 0 && outcome.failedNotes.size === 0) || (!wiki.store.getByRef("overview") && wiki.store.size > 0))) {
     try {
       const today = new Date().toISOString().slice(0, 10);
-      const { overview, usage } = await opts.overview.write(overviewInput(wiki.store, { kind: "team", title: `${wiki.teamName} wiki`, today }));
+      const { overview, usage } = await opts.overview.write(overviewInput(wiki.store, { kind: "team", title: `${wiki.teamName} brain`, today }));
       outcome.requests++;
       outcome.usage.input_tokens += usage.input_tokens;
       outcome.usage.output_tokens += usage.output_tokens;
