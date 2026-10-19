@@ -6,7 +6,7 @@ import type { ActionItemHit, WikiReader } from "@brain/wiki";
 import { nameKey } from "@brain/wiki";
 import type { Directory, Team } from "./directory.ts";
 import { ME_REF, profileOf } from "./me.ts";
-import { openActions, ownerKeys, owns, selfRefs, storeId, storeLabel, userProfile, type ContextStore, type ScopedAction } from "./mcp/context.ts";
+import { brainLabel, openActions, ownerKeys, owns, selfRefs, storeId, userProfile, type ContextStore, type ScopedAction } from "./mcp/context.ts";
 import type { PersonalStore } from "./personal.ts";
 import type { TeamLink } from "./teams.ts";
 
@@ -83,7 +83,7 @@ export async function meetingBrief(stores: ContextStore[], attendees: string[], 
       const brief = await s.reader.brief(page.ref).catch(() => undefined);
       if (!person.found) {
         const profile = profileOf(page, "team");
-        person = { name, found: true, id: storeId(s, page.ref), title: page.title, type: page.type, summary: page.summary, truth: profile?.truth ?? "", where: storeLabel(s) };
+        person = { name, found: true, id: storeId(s, page.ref), title: page.title, type: page.type, summary: page.summary, truth: profile?.truth ?? "", where: brainLabel(s) };
       }
       for (const a of brief?.openActions ?? []) actions.set(`${s.scope}:${s.team?.slug}:${a.note.ref}:${a.task}`, item(s, a));
       for (const dec of brief?.decisions ?? []) decisions.set(`${dec.date.slice(0, 10)}:${dec.text}`, { text: dec.text, date: dec.date.slice(0, 10), id: storeId(s, dec.source.ref) });
