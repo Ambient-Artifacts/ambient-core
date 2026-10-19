@@ -44,7 +44,7 @@ export function dedupPlan(store: TeamWiki["store"]): { groups: string[][]; map: 
   }
   // Links to pages that don't exist: a spelling of a page that does, or a description.
   for (const l of store.allLinks()) {
-    if (map.has(l.dst) || !ENTITY_FOLDERS.has(l.dst.split("/")[0]!) || store.getByRef(l.dst)) continue;
+    if (l.rel === "mentions" || map.has(l.dst) || !ENTITY_FOLDERS.has(l.dst.split("/")[0]!) || store.getByRef(l.dst)) continue;
     let to = index.canonical(l.dst);
     if (to && map.has(to)) to = map.get(to)!;
     if (to !== l.dst) map.set(l.dst, to);
