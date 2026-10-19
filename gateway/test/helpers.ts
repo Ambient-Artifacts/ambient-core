@@ -14,7 +14,9 @@ import { convexTest } from "convex-test";
 import { calculateJwkThumbprint, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { api, internal } from "@brain/control/api";
 import schema from "../../control/convex/schema.js";
-import { TeamRemote, createTeamApp, createUnclaimedApp, TeamWiki } from "@brain/team";
+import { Deliverer, graphFor, GraphTokens, TeamRemote, TeamSettingsStore, TranscriptOutbox, createTeamApp, createUnclaimedApp, TeamWiki, type MicrosoftGraph } from "@brain/team";
+import type { MicrosoftConnector } from "../src/microsoft-connect.ts";
+import type { MicrosoftConnection } from "@brain/spec";
 import { createApp } from "../src/app.ts";
 import { appleVerifier } from "../src/auth/apple.ts";
 import { googleVerifier } from "../src/auth/google.ts";
@@ -36,7 +38,18 @@ function listen(server: Server): Promise<string> {
   return new Promise((r) => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)));
 }
 
-export async function startStack(opts: { revisionPollMs?: number; streamMaxMs?: number; push?: PushSender; signups?: { allow: string[] }; requireSignInNonce?: boolean } = {}) {
+export async function startStack(
+  opts: {
+    revisionPollMs?: number;
+    streamMaxMs?: number;
+    push?: PushSender;
+    signups?: { allow: string[] };
+    requireSignInNonce?: boolean;
+    /** Ambient's Microsoft app against a fake Microsoft; `microsoftFetch` also serves the team server's Graph calls. */
+    microsoftConnect?: { connector: MicrosoftConnector; propagationDelayMs?: number };
+    microsoftFetch?: typeof fetch;
+  } = {},
+) {
   const serviceSecret = randomBytes(24).toString("hex");
   process.env.BRAIN_SERVICE_SECRET = serviceSecret;
   const t = convexTest(schema, modules);
@@ -106,8 +119,12 @@ export async function startStack(opts: { revisionPollMs?: number; streamMaxMs?: 
   cpSync(join(FIXTURES, "wiki-team"), join(dataDir, "wiki"), { recursive: true });
   const teamId = await t.mutation(internal.teams.create, { slug: "acme", name: "Acme" });
   const wiki = await TeamWiki.open(join(dataDir, "wiki"), String(teamId), "Acme", new TeamRemote(join(dataDir, "remote.json"), join(dataDir, "wiki"), { allowFile: true }));
+  const settings = new TeamSettingsStore(join(dataDir, "settings.json"));
+  const graphTokens = new GraphTokens();
+  const makeGraph = (conn: MicrosoftConnection): MicrosoftGraph => graphFor(conn, graphTokens, opts.microsoftFetch ?? fetch);
+  const deliverer = new Deliverer(new TranscriptOutbox(join(dataDir, "outbox")), settings, wiki, makeGraph);
   const teamServer = createServer(
-    createTeamApp(wiki, { teamId: String(teamId), gatewayIssuer: origin, gatewayJwks: publicJwks([signingKey]), rawDir: join(dataDir, "raw"), version: "test" }),
+    createTeamApp(wiki, { teamId: String(teamId), gatewayIssuer: origin, gatewayJwks: publicJwks([signingKey]), rawDir: join(dataDir, "raw"), version: "test", settings, deliverer, graphTokens, graphFor: makeGraph }),
   );
   const teamUrl = await listen(teamServer);
   await t.mutation(internal.teams.setServerUrl, { slug: "acme", serverUrl: teamUrl });
@@ -143,6 +160,7 @@ export async function startStack(opts: { revisionPollMs?: number; streamMaxMs?: 
     push: opts.push,
     microsoft: microsoftVerifier([MICROSOFT_CLIENT], { keys: [microsoftJwk] }),
     google: googleVerifier([GOOGLE_CLIENT], { keys: [googleJwk] }),
+    microsoftConnect: opts.microsoftConnect ? { ...opts.microsoftConnect, fetchImpl: opts.microsoftFetch } : undefined,
   });
   gatewayServer.on("request", stack.app);
 
@@ -167,6 +185,9 @@ export async function startStack(opts: { revisionPollMs?: number; streamMaxMs?: 
     sessions: stack.sessions,
     revisions: stack.revisions,
     events: stack.events,
+    microsoftConnect: stack.microsoftConnect,
+    graphTokens,
+    deliverer,
     close: async () => {
       await new Promise<void>((r) => gatewayServer.close(() => r()));
       await new Promise<void>((r) => teamServer.close(() => r()));

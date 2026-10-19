@@ -34,6 +34,7 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 | `BRAIN_APPLE_TEAM_ID`, `BRAIN_APPLE_KEY_ID`, `BRAIN_APPLE_PRIVATE_KEY`, `BRAIN_APPLE_CLIENT_ID` | A Sign in with Apple key, to revoke a deleted account's Apple token. The private key is the `.p8` text on one line with `\n` for newlines. |
 | `BRAIN_MICROSOFT_CLIENT_IDS` | Microsoft Entra app registration ids for "Continue with Microsoft"; the first is the one the apps use. |
 | `BRAIN_GOOGLE_CLIENT_IDS` | Google OAuth client ids (type iOS) for "Continue with Google"; the first is the one the apps use. |
+| `BRAIN_MICROSOFT_CONNECT_CLIENT_ID`, `BRAIN_MICROSOFT_CONNECT_CERT_FILE`, `BRAIN_MICROSOFT_CONNECT_SECRET` | "Connect Microsoft 365" for team folders: a multi-tenant Entra app of its own (a web app with the redirect URI `<origin>/connect/microsoft/callback`, the application permission `Files.SelectedOperations.Selected` and the delegated `Sites.FullControl.All`, `User.Read`), and its credential: a PEM file with the private key and the certificate (readable by the gateway's user), or a client secret. Unset: teams connect their own Entra app. See ops/README.md. |
 | `BRAIN_APNS_KEY_ID`, `BRAIN_APNS_PRIVATE_KEY`, `BRAIN_APNS_TEAM_ID`, `BRAIN_APNS_TOPIC` | An APNs key for push notifications. Team id defaults to `BRAIN_APPLE_TEAM_ID`, topic to the first bundle id. |
 | `BRAIN_MIN_APP_VERSION`, `BRAIN_APP_UPDATE_URL` | Older apps are asked to update, pointing at this link. |
 
@@ -59,7 +60,7 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 | `BRAIN_TEAM_ID`, `BRAIN_TEAM_NAME` | | Instead of `BRAIN_SERVER_ID`: a server set up by hand for one team (its Convex id). |
 | `BRAIN_GATEWAY_ISSUER` | required | The gateway's `BRAIN_ORIGIN`. Only tokens it signed are accepted. |
 | `BRAIN_GATEWAY_JWKS` | `$BRAIN_GATEWAY_ISSUER/oauth/jwks` | Where to fetch the gateway's public keys. The compose file uses the internal `http://gateway:8080/oauth/jwks`. |
-| `BRAIN_DATA_DIR` | `/srv/brain` (`/data` in Docker) | `wiki/` (the git repo), `raw/` (transcripts, outside git), `out/` (job results), `team.json`, `remote.json`. |
+| `BRAIN_DATA_DIR` | `/srv/brain` (`/data` in Docker) | `wiki/` (the git repo), `raw/` (the server's copy of transcripts, outside git), `out/` (job results), `outbox/` (files waiting for the team's destinations), `team.json`, `remote.json`, `settings.json` (destinations, Microsoft 365 connection). |
 | `PORT` | `8090` | |
 | `BRAIN_LISTEN_HOST` | `127.0.0.1` | `0.0.0.0` in the Docker image. |
 | `ANTHROPIC_API_KEY` | none | For the nightly consolidation. In Docker: `TEAM_ANTHROPIC_API_KEY`, or else `ANTHROPIC_API_KEY`. |

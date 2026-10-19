@@ -14,6 +14,6 @@ describe("noteNames", () => {
   });
 
   it("leaves out descriptions in a name's place", () => {
-    expect(noteNames(["Nikolai (person working/testing on Mac)", "Karina (calendar test attendee)", "the Bergmann team"], null)).toEqual([]);
+    expect(noteNames(["Nikolai (person working/testing on Mac)", "Mara (calendar test attendee)", "the Bergmann team"], null)).toEqual([]);
   });
 });

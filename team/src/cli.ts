@@ -27,6 +27,11 @@ const missingKey: PageUpdater = {
 
 if (cmd === "consolidate" || cmd === "rewrite") {
   const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir, {}, cfg.teamSecret));
+  // Another tool keeps this wiki (its repo is connected read-only): its upkeep isn't ours to do.
+  if (wiki.remote?.readOnly) {
+    console.log(JSON.stringify({ status: "skipped", reason: "the team's repo is connected read-only; another tool keeps the wiki" }));
+    process.exit(0);
+  }
   const updater = cfg.anthropicApiKey ? new AnthropicUpdater(cfg.anthropicApiKey, cfg.model) : missingKey;
   // `rewrite --all` or `rewrite people/anna-mueller …`: pages rewritten from their latest notes
   // (into their kind's sections), as well as the nightly run's work.

@@ -7,6 +7,19 @@ import { attention, LocalReader, indexFilesIn, renderIndexFiles, WikiStore } fro
 import type { TeamRemote } from "./remote.ts";
 import { Repo } from "./repo.ts";
 
+/** Write a file in the wiki; `index: false` keeps it out of the page index (raw transcripts). */
+export type Put = (path: string, text: string, opts?: { index?: boolean }) => Promise<void>;
+
+/** What Ambient wrote into .gitignore before transcripts were committed to raw/. */
+const LEGACY_GITIGNORE = "raw/\nout/\n.brain/\n";
+
+/** A write to a team wiki whose repo another tool keeps (read-only): refused, never queued. */
+export class ReadOnlyWiki extends Error {
+  constructor() {
+    super("This team's wiki is kept by another tool. Ambient only reads it, so nothing can be added here.");
+  }
+}
+
 export class TeamWiki {
   readonly repo: Repo;
   store: WikiStore;
@@ -43,8 +56,12 @@ export class TeamWiki {
       wiki.remote = remote;
     }
     wiki.knownHead = await wiki.repo.head();
-    // Repos from before index pages existed (or edited by hand) get them now.
-    await wiki.write(async () => ({ message: "index: rebuild", result: {} }));
+    // Repos from before index pages existed (or edited by hand) get them now; a read-only
+    // wiki is the repo's, as it is.
+    if (!remote?.readOnly) {
+      await wiki.write(async () => ({ message: "index: rebuild", result: {} }));
+      await wiki.trackRaw();
+    }
     return wiki;
   }
 
@@ -67,6 +84,20 @@ export class TeamWiki {
     }
   }
 
+  /**
+   * Wikis Ambient created before transcript destinations ignored raw/; transcripts are committed
+   * there now (product/sources.md), so drop that line once. A .gitignore anyone else wrote stays
+   * as it is (the commit adds the transcripts anyway).
+   */
+  private async trackRaw(): Promise<void> {
+    const file = join(this.dir, ".gitignore");
+    if (!existsSync(file) || readFileSync(file, "utf8") !== LEGACY_GITIGNORE) return;
+    await this.write(async (put) => {
+      await put(".gitignore", "out/\n.brain/\n", { index: false });
+      return { message: "chore: track raw/ for meeting transcripts", result: {} };
+    });
+  }
+
   /** Re-read everything from disk (after another process, e.g. the nightly job, committed). */
   reload(): void {
     this.store = WikiStore.fromDirectory(this.dir, "team", this.teamId);
@@ -78,17 +109,19 @@ export class TeamWiki {
 
   /** Serialize writers: each callback runs alone and its files land in one commit. */
   write<T>(
-    fn: (put: (path: string, text: string) => Promise<void>, remove: (path: string) => Promise<void>) => Promise<{ message: string; result: T }>,
+    fn: (put: Put, remove: (path: string) => Promise<void>) => Promise<{ message: string; result: T }>,
   ): Promise<T & { commit: string | null }> {
+    if (this.remote?.readOnly) return Promise.reject(new ReadOnlyWiki());
     const next = this.chain.then(async () => {
       // Start from the repo's latest state, so edits made there aren't overwritten.
       if (this.remote?.connected && (await this.remote.pull())) this.reload();
       const touched: string[] = [];
-      const put = async (path: string, text: string) => {
+      const put: Put = async (path, text, opts = {}) => {
         const file = inside(this.dir, path);
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, text);
-        this.store.upsert(path, text);
+        // Raw transcripts are committed but aren't pages: no index entry, no search, no findById.
+        if (opts.index !== false) this.store.upsert(path, text);
         touched.push(path);
       };
       const remove = async (path: string) => {
@@ -135,7 +168,10 @@ export class TeamWiki {
   private async writeIndexes(): Promise<string[]> {
     const changed: string[] = [];
     const rendered = renderIndexFiles(this.store.entries(), `${this.teamName} wiki`, attention(this.store.lint()));
+    const keep = new Set(this.remote?.keep ?? []);
     for (const [path, text] of rendered) {
+      // The repo's own index.md (it had one when it was connected) stays as its people wrote it.
+      if (keep.has(path)) continue;
       // A folder from the repo that can't be written to (a link on the way, say) gets no index,
       // rather than every write failing, and the server with it (it writes at startup).
       const file = insideOrNull(this.dir, path);

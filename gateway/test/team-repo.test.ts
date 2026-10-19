@@ -96,15 +96,30 @@ describe("team repo", () => {
     expect(status.json.repo).toMatchObject({ status: "ok", lastError: null });
   });
 
-  it("refuses a repo with unrelated history, and disconnects", async () => {
+  it("asks before connecting a repo with files of its own, then connects it either way it's told", async () => {
     const other = join(tmp, "other.git");
     sh(["init", "-q", "--bare", "-b", "main", other]);
     const work = clone(`file://${other}`, "other-work");
     writeFileSync(join(work, "README.md"), "unrelated\n");
+    writeFileSync(join(work, "AGENTS.md"), "# Our rules\n");
     sh(["add", "-A"], work);
     sh(["commit", "-q", "-m", "x"], work);
     sh(["-c", "protocol.file.allow=always", "push", "-q", "origin", "HEAD:main"], work);
-    expect(await appCall(s, lena, "POST", "/v1/app/teams/acme/repo", { url: `file://${other}`, token: "t" })).toMatchObject({ status: 400, json: { error: "not_empty" } });
+    expect(await appCall(s, lena, "POST", "/v1/app/teams/acme/repo", { url: `file://${other}`, token: "t" })).toMatchObject({
+      status: 409,
+      json: { error: "has_content", files: 2, sample: ["AGENTS.md", "README.md"] },
+    });
+
+    // Read-only would replace the team's notes: refused for a team that has some.
+    expect(await appCall(s, lena, "POST", "/v1/app/teams/acme/repo", { url: `file://${other}`, token: "t", mode: "read-only", existing: true })).toMatchObject({ status: 400, json: { error: "not_empty" } });
+
+    // Two-way, once seen: merged and pushed there, with the repo's own AGENTS.md untouched.
+    const r = await appCall(s, lena, "POST", "/v1/app/teams/acme/repo", { url: `file://${other}`, token: "t", existing: true });
+    expect(r).toMatchObject({ status: 200, json: { repo: { mode: "two-way", keep: ["AGENTS.md"] } } });
+    const check = clone(`file://${other}`, "other-check");
+    expect(readFileSync(join(check, "AGENTS.md"), "utf8")).toBe("# Our rules\n");
+    expect(existsSync(join(check, "README.md"))).toBe(true);
+    expect(existsSync(join(check, "index.md"))).toBe(true);
 
     expect((await appCall(s, lena, "DELETE", "/v1/app/teams/acme/repo")).status).toBe(204);
     expect((await appCall(s, lena, "GET", "/v1/app/teams/acme/repo")).json.repo).toBeNull();

@@ -10,14 +10,48 @@
 // - Symlinks in a repo are checked out as plain files holding the link's target (core.symlinks
 //   false): a link committed to someone's repo must never make the gateway or a team server read
 //   or write a file outside the wiki (/etc/brain/*.env, for one).
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { lstat, readdir } from "node:fs/promises";
 import { BlockList, isIP } from "node:net";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
-const run = promisify(execFile);
+
+/**
+ * git in a process group of its own (spawn's `detached`; execFile doesn't take it): `stop` kills
+ * the whole group. stdout is kept up to `maxBuffer`; past it the run fails.
+ */
+function run(args: string[], opts: { env: NodeJS.ProcessEnv; maxBuffer: number }): { done: Promise<{ stdout: string }>; stop: () => void } {
+  const child = spawn("git", args, { env: opts.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  const stop = () => {
+    try {
+      if (child.pid && child.exitCode === null && child.signalCode === null) process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  };
+  const done = new Promise<{ stdout: string }>((resolve, reject) => {
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    let size = 0;
+    child.stdout.on("data", (b: Buffer) => {
+      size += b.length;
+      if (size > opts.maxBuffer) stop();
+      else out.push(b);
+    });
+    child.stderr.on("data", (b: Buffer) => {
+      if (err.reduce((n, x) => n + x.length, 0) < 64 * 1024) err.push(b);
+    });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      const stdout = Buffer.concat(out).toString("utf8");
+      const stderr = Buffer.concat(err).toString("utf8");
+      if (code === 0 && size <= opts.maxBuffer) resolve({ stdout });
+      else reject(Object.assign(new Error(`git exited with ${signal ?? code}${size > opts.maxBuffer ? " (output too large)" : ""}`), { stderr }));
+    });
+  });
+  return { done, stop };
+}
 
 export interface RemoteRepo {
   url: string;
@@ -28,17 +62,63 @@ export interface RemoteRepo {
 export class GitError extends Error {
   constructor(
     message: string,
-    readonly code: "bad_url" | "auth" | "not_found" | "not_empty" | "conflict" | "too_large" | "failed" = "failed",
+    readonly code: "bad_url" | "auth" | "not_found" | "not_empty" | "has_content" | "conflict" | "too_large" | "failed" = "failed",
   ) {
     super(message);
   }
 }
 
+/**
+ * A repo that already has files of its own, and wasn't written by Ambient: connected only once
+ * someone has seen what's in it and said so (`existing`). `files` and `sample` are for that
+ * question.
+ */
+export class HasContent extends GitError {
+  constructor(
+    readonly files: number,
+    readonly sample: string[],
+  ) {
+    super(`This repo already has ${files} ${files === 1 ? "file" : "files"} of its own.`, "has_content");
+  }
+
+  /** From the repo's file list, with a sample that shows what's in it (see sampleFiles). */
+  static of(files: string[]): HasContent {
+    return new HasContent(files.length, sampleFiles(files));
+  }
+}
+
+/**
+ * A few file names that show what a repo holds, for the "connect it anyway?" question. Git lists
+ * files sorted, which puts hidden folders (`.azuredevops/`, `.claude/`) first; people recognise a
+ * repo by its pages. So: Markdown pages in folders first, one per folder, then pages at the top,
+ * then other files, hidden ones last; then more of the same order to fill up.
+ */
+export function sampleFiles(files: string[], n = 5): string[] {
+  const rank = (f: string) => {
+    if (f.split("/").some((part) => part.startsWith("."))) return 3;
+    if (!f.toLowerCase().endsWith(".md")) return 2;
+    return f.includes("/") ? 0 : 1;
+  };
+  const ordered = files.map((f, i) => ({ f, r: rank(f), i })).sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.f);
+  const picked: string[] = [];
+  const folders = new Set<string>();
+  for (const f of ordered) {
+    const top = f.includes("/") ? f.split("/")[0]! : f;
+    if (picked.length < n && !folders.has(top)) {
+      folders.add(top);
+      picked.push(f);
+    }
+  }
+  for (const f of ordered) if (picked.length < n && !picked.includes(f)) picked.push(f);
+  return picked;
+}
+
 export interface GitOptions {
   /** Tests use local bare repos (file://). Never set in production. */
   allowFile?: boolean;
-  /** What a clone may take on disk; MAX_CLONE_BYTES unless set (tests set less). */
+  /** What a clone may take on disk, and how many files; MAX_CLONE_BYTES / MAX_CLONE_FILES unless set (tests set less). */
   maxCloneBytes?: number;
+  maxCloneFiles?: number;
 }
 
 export const BOT_AUTHOR = { name: "Ambient Bot", email: "bot@ambient.invalid" };
@@ -131,62 +211,76 @@ function env(remote?: RemoteRepo, opts: GitOptions = {}, pin?: string): NodeJS.P
 }
 
 /** What a clone may take on disk (pack and working copy), checked while it runs. */
-export const MAX_CLONE_BYTES = 512 * 1024 * 1024;
+export const MAX_CLONE_BYTES = 256 * 1024 * 1024;
+/** And files: a repo of empty files takes no bytes but every inode, and a long time to walk. */
+export const MAX_CLONE_FILES = 60_000;
 
-/** Bytes of regular files under `dir` (links not followed). */
-async function dirBytes(dir: string): Promise<number> {
-  let total = 0;
+/** Bytes and number of regular files under `dir` (links not followed); stops counting past `stopAt` files. */
+async function dirUsage(dir: string, stopAt = Number.POSITIVE_INFINITY, acc = { bytes: 0, files: 0 }): Promise<{ bytes: number; files: number }> {
   for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    if (acc.files > stopAt) break;
     const p = join(dir, e.name);
-    if (e.isDirectory()) total += await dirBytes(p);
-    else if (e.isFile()) total += (await lstat(p).catch(() => ({ size: 0 }))).size;
+    if (e.isDirectory()) await dirUsage(p, stopAt, acc);
+    else if (e.isFile()) {
+      acc.files++;
+      acc.bytes += (await lstat(p).catch(() => ({ size: 0 }))).size;
+    }
   }
-  return total;
+  return acc;
 }
 
 /**
  * Run git. Errors are mapped to plain-language GitErrors; the token never appears in them.
  * `limit`: a folder git writes into and the most it may hold. The repo is someone's own, as big as
  * they like, and the gateway's disk is everyone's: past the limit, git is stopped.
+ *
+ * git runs in a process group of its own, and stopping it (the limit, the timeout) stops the whole
+ * group: `git clone` hands the download to helpers (remote-https, fetch-pack, index-pack) that
+ * keep going, and writing, when only `git` itself is killed.
  */
 export async function git(
   args: string[],
-  o: { cwd?: string; remote?: RemoteRepo; timeoutMs?: number; limit?: { dir: string; bytes: number } } & GitOptions = {},
+  o: { cwd?: string; remote?: RemoteRepo; timeoutMs?: number; limit?: { dir: string; bytes: number; files?: number } } & GitOptions = {},
 ): Promise<string> {
   // A call that talks to the remote checks its address again, now, and git connects only there.
   const pin = o.remote ? (await resolveRepoUrl(o.remote.url, o)).pin : undefined;
-  const p = run("git", o.cwd ? ["-C", o.cwd, ...args] : args, {
-    env: env(o.remote, o, pin),
-    timeout: o.timeoutMs ?? 120_000,
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  const { done, stop } = run(o.cwd ? ["-C", o.cwd, ...args] : args, { env: env(o.remote, o, pin), maxBuffer: 64 * 1024 * 1024 });
   let tooLarge = false;
+  let timedOut = false;
+  const over = (u: { bytes: number; files: number }) => !!o.limit && (u.bytes > o.limit.bytes || u.files > (o.limit.files ?? MAX_CLONE_FILES));
+  const timer = setTimeout(() => {
+    timedOut = true;
+    stop();
+  }, o.timeoutMs ?? 120_000);
   let measuring = false;
   const watch = o.limit
     ? setInterval(() => {
         if (measuring) return;
         measuring = true;
-        void dirBytes(o.limit!.dir)
-          .then((n) => {
-            if (n > o.limit!.bytes) {
+        void dirUsage(o.limit!.dir, o.limit!.files ?? MAX_CLONE_FILES)
+          .then((u) => {
+            if (over(u)) {
               tooLarge = true;
-              p.child.kill("SIGKILL");
+              stop();
             }
           })
           .finally(() => (measuring = false));
       }, 250)
     : undefined;
   try {
-    const { stdout } = await p;
+    const { stdout } = await done;
     // Done before a check came round (a fast clone): measured once more.
-    if (o.limit && (await dirBytes(o.limit.dir)) > o.limit.bytes) tooLarge = true;
+    if (o.limit && over(await dirUsage(o.limit.dir, o.limit.files ?? MAX_CLONE_FILES))) tooLarge = true;
     if (!tooLarge) return stdout;
     throw new Error("too large");
   } catch (err) {
-    const e = err as { stderr?: string; message: string; killed?: boolean };
+    const e = err as { stderr?: string; message: string };
     const text = `${e.stderr ?? ""} ${e.message}`.replace(/Authorization: Basic \S+/g, "Authorization: …");
-    if (tooLarge) throw new GitError(`This repo is too large for Ambient (more than ${Math.round(o.limit!.bytes / 1024 / 1024)} MB). Use a repo for the wiki alone.`, "too_large");
-    if (e.killed) throw new GitError("The repo took too long to answer.");
+    if (tooLarge) {
+      const mb = Math.round(o.limit!.bytes / 1024 / 1024);
+      throw new GitError(`This repo is too large for Ambient (more than ${mb} MB or ${o.limit!.files ?? MAX_CLONE_FILES} files). Use a repo for the wiki alone.`, "too_large");
+    }
+    if (timedOut) throw new GitError("The repo took too long to answer.");
     if (/Authentication failed|could not read Username|403|401|Invalid username or password|access denied|not authorized/i.test(text)) {
       throw new GitError("The token was refused. Check that it can read and write this repo.", "auth");
     }
@@ -194,6 +288,7 @@ export async function git(
     if (/non-fast-forward|\[rejected\]|fetch first|conflict/i.test(text)) throw new GitError("The repo changed at the same time; will retry.", "conflict");
     throw new GitError(`git failed: ${text.trim().split("\n").slice(-3).join(" ").slice(0, 300)}`);
   } finally {
+    clearTimeout(timer);
     clearInterval(watch);
   }
 }
@@ -221,7 +316,7 @@ export async function checkout(remote: RemoteRepo, dir: string, opts: GitOptions
     await git(["init", "-q", "-b", info.branch, dir], opts);
     await git(["remote", "add", "origin", remote.url], { cwd: dir, ...opts });
   } else {
-    await git(["clone", "-q", "--depth", "1", "--branch", info.branch, remote.url, dir], { remote, limit: { dir, bytes: opts.maxCloneBytes ?? MAX_CLONE_BYTES }, ...opts });
+    await git(["clone", "-q", "--depth", "1", "--branch", info.branch, remote.url, dir], { remote, limit: { dir, bytes: opts.maxCloneBytes ?? MAX_CLONE_BYTES, files: opts.maxCloneFiles ?? MAX_CLONE_FILES }, ...opts });
   }
   return info;
 }

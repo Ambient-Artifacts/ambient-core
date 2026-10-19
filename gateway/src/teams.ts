@@ -8,6 +8,42 @@ import type { Team } from "./directory.ts";
 
 export const TEAM_TOKEN_TYP = "brain-team+jwt";
 
+/**
+ * The most the gateway reads of one team server answer (pages, lists, search results, a
+ * transcript). The gateway is shared and a team server is one team's: a compromised one could
+ * otherwise stream gigabytes inside the request's timeout and take everyone's gateway down.
+ */
+export const MAX_TEAM_RESPONSE_BYTES = 16 * 1024 * 1024;
+
+/** The body as text, up to `max` bytes; past that the read stops and the request fails. */
+export async function readCapped(res: Response, max = MAX_TEAM_RESPONSE_BYTES): Promise<string> {
+  const tooMuch = () => new TeamServerError(502, `team server answered with more than ${Math.round(max / 1024 / 1024)} MB`);
+  if (Number(res.headers.get("content-length") ?? 0) > max) {
+    await res.body?.cancel().catch(() => undefined);
+    throw tooMuch();
+  }
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      throw tooMuch();
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+const readJson = async (res: Response, max?: number): Promise<unknown> => {
+  const text = await readCapped(res, max);
+  return text ? (JSON.parse(text) as unknown) : {};
+};
+
 export class TeamServerError extends Error {
   constructor(
     readonly status: number,
@@ -38,7 +74,7 @@ export class TeamLink {
     this.keyPromise = importJWK(signingKey, "ES256");
   }
 
-  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "health", subject?: string, extra: Record<string, string> = {}): Promise<string> {
+  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health", subject?: string, extra: Record<string, string> = {}): Promise<string> {
     return new SignJWT({ ...extra, purpose, team_slug: team.slug })
       .setProtectedHeader({ alg: "ES256", kid: this.kid, typ: TEAM_TOKEN_TYP })
       .setIssuer(this.issuer)
@@ -86,7 +122,7 @@ export class TeamLink {
     while (Date.now() < until) {
       try {
         const res = await this.fetchImpl(`${url}/health`, { signal: AbortSignal.timeout(2_000) });
-        if (res.ok && (await res.json()).claimed === undefined) return true;
+        if (res.ok && ((await readJson(res, 64 * 1024)) as { claimed?: unknown }).claimed === undefined) return true;
       } catch {
         // Restarting.
       }
@@ -109,26 +145,60 @@ export class TeamLink {
       throw new TeamServerError(503, `team server unreachable: ${(err as Error).message}`);
     }
     if (!res.ok) throw new TeamServerError(res.status >= 500 ? 503 : res.status, `team server answered ${res.status}`);
-    return res.json();
+    return readJson(res);
   }
 
   /** The team repo endpoints, passed through with their status (400s carry a message for the user). */
-  async repo(team: Team, uid: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<{ status: number; json: unknown }> {
+  repo(team: Team, uid: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<{ status: number; json: unknown }> {
+    return this.passThrough(team, uid, "repo", "/v1/repo", method, body, 120_000);
+  }
+
+  /** Team settings: destinations and the Microsoft 365 connection (the secret never comes back). */
+  settings(team: Team, uid: string, method: "GET" | "PUT", body?: unknown): Promise<{ status: number; json: unknown }> {
+    // Choosing a folder asks Microsoft up to three times, each with retries on throttling.
+    return this.passThrough(team, uid, "settings", "/v1/settings", method, body, 90_000);
+  }
+
+  private async passThrough(
+    team: Team,
+    uid: string,
+    purpose: "repo" | "settings",
+    path: string,
+    method: string,
+    body: unknown,
+    timeoutMs: number,
+  ): Promise<{ status: number; json: unknown }> {
     if (!team.serverUrl) throw new TeamServerError(503, `team ${team.slug} has no server yet`);
     let res: Response;
     try {
-      res = await this.fetchImpl(`${team.serverUrl}/v1/repo`, {
+      res = await this.fetchImpl(`${team.serverUrl}${path}`, {
         method,
-        headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), authorization: `Bearer ${await this.token(team, "repo", uid)}` },
+        headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), authorization: `Bearer ${await this.token(team, purpose, uid)}` },
         body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       throw new TeamServerError(503, `team server unreachable: ${(err as Error).message}`);
     }
     if (res.status >= 500) throw new TeamServerError(503, `team server answered ${res.status}`);
-    const text = await res.text();
-    return { status: res.status, json: text ? JSON.parse(text) : {} };
+    return { status: res.status, json: await readJson(res) };
+  }
+
+  /** A token for Ambient's own Microsoft app, for the team's company (microsoft-connect.ts). */
+  async pushGraphToken(team: Pick<Team, "id" | "slug" | "serverUrl">, body: { tenant_id: string; access_token: string; expires_at: number }): Promise<void> {
+    if (!team.serverUrl) throw new TeamServerError(503, `team ${team.slug} has no server yet`);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${team.serverUrl}/v1/graph-token`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", authorization: `Bearer ${await this.token(team, "graph")}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (err) {
+      throw new TeamServerError(503, `team server unreachable: ${(err as Error).message}`);
+    }
+    if (!res.ok) throw new TeamServerError(res.status >= 500 ? 503 : res.status, `team server answered ${res.status}`);
   }
 
   reader(team: Team, uid: string): WikiReader {

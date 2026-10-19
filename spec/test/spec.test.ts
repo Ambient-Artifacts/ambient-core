@@ -220,4 +220,73 @@ describe("forgetNote", () => {
     forgetNotes(gone, many);
     expect(performance.now() - started).toBeLessThan(2000);
   });
+  it("stays fast on pages built to be slow: long lines of slashes, made-up names", () => {
+    const hostile = new Map(pages);
+    for (let i = 0; i < 20; i++) hostile.set(`wiki/topics/h${i}.md`, `---\ntitle: H${i}\ntype: topic\n---\n# H\n\n## Timeline\n${"/".repeat(200_000)}.md\n`);
+    let started = performance.now();
+    const r = forgetNotes(["wiki/notes/2026/10/2026-10-08-test-bbbbbb.md"], hostile);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(r.deletes).toContain("wiki/people/johann-beurich.md");
+    // Names unlike the app's (a delete can name any path under wiki/notes/) aren't searched for.
+    const odd = Array.from({ length: 500 }, (_, i) => `wiki/notes/odd-${i}`);
+    started = performance.now();
+    forgetNotes(odd, hostile);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe("parsePageLenient", () => {
+  it("returns the error instead of throwing, and keeps the body", async () => {
+    const { parsePage, parsePageLenient } = await import("../src/index.ts");
+    const bad = "---\ntitle: A\ntitle: B\n---\n# Body\n";
+    expect(() => parsePage(bad)).toThrow();
+    const p = parsePageLenient(bad);
+    expect(p.frontmatter).toEqual({});
+    expect(p.body).toBe("# Body\n");
+    expect(p.error).toMatch(/unique/i);
+    expect(parsePageLenient("---\ntitle: A\n---\nx").error).toBeUndefined();
+  });
+});
+
+describe("destination files", () => {
+  it("render front matter in the app's style and one line per segment, with a stable file name", async () => {
+    const { renderTranscript, renderWorkLog, destinationFileName, parsePage, TeamSettings } = await import("../src/index.ts");
+    const meta = {
+      id: "01JABCDEFGHJKMNPQRSTVWXYZ9", title: "Kickoff mit Acme: Zürich", recorded_at: "2026-10-12T09:30:00+02:00",
+      ended_at: "2026-10-12T10:05:00+02:00", duration_s: 2100, locale: "de-DE", recorded_by: "Lena Vogel", team: "Acme",
+      meeting: { title: "Kickoff mit Acme: Zürich", attendees: ["Anna Muster", 'Ben "B" Koch'] }, speakers: ["Lena Vogel", "Speaker 1"],
+    };
+    const text = renderTranscript(meta, [
+      { t0: 0, text: "Hallo  zusammen.", speaker: "Lena Vogel" },
+      { t0: 65.4, text: "Wir starten im November.", speaker: "Speaker 1" },
+      { t0: 70, text: "  " },
+      { t0: 3725, text: "Ohne Sprecher." },
+    ]);
+    expect(text.split("\n").slice(0, 3)).toEqual(["---", 'id: "01JABCDEFGHJKMNPQRSTVWXYZ9"', 'type: "transcript"']);
+    expect(text).toContain('\nmeeting: {title: "Kickoff mit Acme: Zürich", attendees: ["Anna Muster", "Ben \\"B\\" Koch"]}\n');
+    const page = parsePage(text);
+    expect(page.frontmatter).toMatchObject({ type: "transcript", title: meta.title, locale: "de-DE", recorded_by: "Lena Vogel", meeting: { attendees: ["Anna Muster", 'Ben "B" Koch'] } });
+    expect(page.body).toBe("[00:00:00] Lena Vogel: Hallo zusammen.\n[00:01:05] Speaker 1: Wir starten im November.\n[01:02:05] Ohne Sprecher.\n");
+    expect(destinationFileName(meta)).toBe("2026-10/2026-10-12-kickoff-mit-acme-zuerich-vwxyz9.md");
+
+    const work = parsePage(renderWorkLog({ id: "01JWORK0000000000000000001", title: "Pricing", summary: "Did it.", recorded_at: "2026-10-12T09:30:00Z", team: "Acme", tool: "Claude Code" }, "# Pricing\n\nDid it.\n"));
+    expect(work).toEqual({
+      frontmatter: { id: "01JWORK0000000000000000001", type: "work", title: "Pricing", summary: "Did it.", recorded_at: "2026-10-12T09:30:00Z", scope: "team", team: "Acme", tool: "Claude Code" },
+      body: "# Pricing\n\nDid it.\n",
+    });
+
+    expect(TeamSettings.parse({})).toEqual({ transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null });
+    expect(TeamSettings.safeParse({ transcripts: { kind: "repo", folder: "../etc" } }).success).toBe(false);
+    expect(TeamSettings.safeParse({ work: { kind: "repo" } }).success).toBe(false);
+  });
+});
+
+describe("the transcript fixture (shared with the app)", () => {
+  it("renders spec/fixtures/transcript byte for byte", async () => {
+    const { renderTranscript, destinationFileName } = await import("../src/index.ts");
+    const dir = join(FIXTURES, "transcript");
+    const f = JSON.parse(readFileSync(join(dir, "kickoff.json"), "utf8"));
+    expect(renderTranscript(f.meta, f.segments)).toBe(readFileSync(join(dir, "kickoff.md"), "utf8"));
+    expect(destinationFileName(f.meta)).toBe(f.file);
+  });
 });

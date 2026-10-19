@@ -4,6 +4,7 @@
 // (in Docker: `docker compose exec gateway admin …`). Everything goes through the same
 // services the app API uses, so the rules (scopes, team servers, encryption) are the same.
 import { slugify } from "@brain/spec";
+import { HasContent } from "@brain/wiki";
 import { Pairing } from "./auth/pairing.ts";
 import { PatService } from "./auth/pats.ts";
 import type { GatewayConfig } from "./config.ts";
@@ -51,10 +52,12 @@ Teams
       Put a team server in the pool (the Docker setup does this for its own).
 
 Wikis in your own git repo (https; the access token comes on stdin, e.g. < token.txt)
-  repo <email> <url>
+  repo <email> <url> [--existing]
       Keep the user's personal wiki in step with their repo (synced every 15 minutes).
-  team repo <slug> <url>
-      Keep the team wiki in step with the team's repo (pushed after every change).
+  team repo <slug> <url> [--existing] [--read-only]
+      Keep the team wiki in step with the team's repo (pushed after every change), or with
+      --read-only follow a repo another tool keeps (never written).
+      A repo with files of its own needs --existing: run without it first to see what's there.
 `;
 
 export class AdminError extends Error {}
@@ -70,7 +73,7 @@ export interface AdminDeps {
 
 type Flags = Record<string, string | true>;
 /** Flags that stand alone; every other flag takes a value. */
-const SWITCHES = ["upkeep", "claude-code", "help"];
+const SWITCHES = ["upkeep", "claude-code", "help", "existing", "read-only"];
 
 function parse(args: string[]): { words: string[]; flags: Flags } {
   const words: string[] = [];
@@ -255,8 +258,9 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     if (!isTeam) {
       const u = await findUser(sub);
       const personal = new PersonalStore(d.control, d.config.masterKey);
-      const status = await new PersonalRepos(d.control, personal, { allowFile: d.config.allowFileRepos }).connect(u.uid, url, token).catch((err: Error) => {
-        throw new AdminError(`The repo didn't connect: ${err.message}`);
+      const status = await new PersonalRepos(d.control, personal, { allowFile: d.config.allowFileRepos }).connect(u.uid, url, token, { existing: flags.existing === true }).catch((err: Error) => {
+        const there = err instanceof HasContent ? ` (e.g. ${err.sample.join(", ")}). Add --existing to connect it anyway` : "";
+        throw new AdminError(`The repo didn't connect: ${err.message}${there}`);
       });
       return `${u.name}'s personal wiki is connected to ${status.url} (${status.branch}). It syncs every 15 minutes.`;
     }
@@ -264,9 +268,16 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     const team = (await d.control.q(api.admin.overview, {})).teams.find((t) => t.slug === slug && t.status === "active");
     if (!team) throw new AdminError(`No active team "${slug}".`);
     const link = new TeamLink(origin, d.config.signingKeys[0]!, d.fetchImpl);
-    const out = await link.repo({ id: team.id, slug, name: team.name, status: "active", serverUrl: team.serverUrl }, "admin", "POST", { url, token });
+    const mode = flags["read-only"] === true ? "read-only" : "two-way";
+    const out = await link.repo({ id: team.id, slug, name: team.name, status: "active", serverUrl: team.serverUrl }, "admin", "POST", { url, token, mode, existing: flags.existing === true });
+    if (out.status === 409) {
+      const j = out.json as { message?: string; sample?: string[] };
+      throw new AdminError(`${j.message ?? "The repo has files of its own."} (e.g. ${(j.sample ?? []).join(", ")}). Add --existing to connect it anyway${mode === "two-way" ? ", or --read-only if another tool keeps it" : ""}.`);
+    }
     if (out.status !== 200) throw new AdminError(`The team server refused: ${JSON.stringify(out.json)}`);
-    return `The ${slug} team wiki is connected to ${url}. Every change is pushed there.`;
+    return mode === "read-only"
+      ? `The ${slug} team wiki follows ${url} now, read-only: Ambient reads it and never writes there.`
+      : `The ${slug} team wiki is connected to ${url}. Every change is pushed there.`;
   }
 
   if (cmd === "share") {

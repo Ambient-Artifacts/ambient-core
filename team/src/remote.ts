@@ -1,12 +1,20 @@
 // The team wiki's own repo (GitHub, GitLab, Azure DevOps, Bitbucket, any git over HTTPS),
-// set by a team admin in the app. The team server keeps its local git repo as the working
-// copy: it pulls (rebase) before every write and every few minutes, and pushes after every
-// commit. The token lives only on this server, in a file only the service user can read, and
+// set by a team admin in the app. Two ways to connect one:
+//   two-way    Ambient keeps the wiki: the team server keeps its local git repo as the working
+//              copy, pulls (rebase) before every write and every few minutes, and pushes after
+//              every commit.
+//   read-only  another tool keeps the wiki (a company's own pipeline, say): the team server
+//              follows the repo exactly (fetch, reset) and never writes, commits or pushes.
+// A repo with files of its own is connected only once someone has seen what's in it
+// (`existing`). Then, two-way, Ambient never overwrites the repo's own AGENTS.md or index.md
+// (`keep`). The token lives only on this server, in a file only the service user can read, and
 // sealed there with BRAIN_TEAM_SECRET (from the env file, not the data directory) when it's set,
 // so a backup or copy of the data alone doesn't hand out push access to the team's repo.
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
-import { checkRepoUrl, git, GitError, remoteInfo, type GitOptions, type RemoteRepo } from "@brain/wiki";
+import { checkRepoUrl, git, GitError, HasContent, remoteInfo, type GitOptions, type RemoteRepo } from "@brain/wiki";
+import { sealer, type Sealer } from "./seal.ts";
+
+export type RepoMode = "two-way" | "read-only";
 
 interface RemoteConfig {
   url: string;
@@ -16,6 +24,10 @@ interface RemoteConfig {
   lastPushAt: string | null;
   lastPullAt: string | null;
   lastError: string | null;
+  /** Absent: two-way (connected before there was a choice). */
+  mode?: RepoMode;
+  /** Files the repo had of its own when it was connected, which Ambient never writes. */
+  keep?: string[];
 }
 
 export type RemoteStatus = Omit<RemoteConfig, "token">;
@@ -23,7 +35,7 @@ export type RemoteStatus = Omit<RemoteConfig, "token">;
 export class TeamRemote {
   private config: RemoteConfig | null = null;
 
-  private key: Buffer | null;
+  private key: Sealer | null;
 
   constructor(
     private file: string,
@@ -31,7 +43,7 @@ export class TeamRemote {
     private opts: GitOptions = {},
     secret?: string | null,
   ) {
-    this.key = secret ? Buffer.from(hkdfSync("sha256", secret, Buffer.alloc(0), "ambient team repo token", 32)) : null;
+    this.key = sealer(secret, "ambient team repo token");
   }
 
   async load(): Promise<void> {
@@ -50,7 +62,7 @@ export class TeamRemote {
       }
       const { tokenSealed, ...rest } = stored;
       try {
-        this.config = { ...rest, token: this.open(tokenSealed) };
+        this.config = { ...rest, token: this.key.open(tokenSealed) };
       } catch {
         // Sealed with another secret (changed, or mistyped): the server still starts.
         console.error("[team] the repo token doesn't open with this BRAIN_TEAM_SECRET (changed since it was sealed?): repo sync is off until the secret is right or the repo is connected again");
@@ -63,23 +75,18 @@ export class TeamRemote {
     if (this.key && this.config.token) await this.save();
   }
 
-  private seal(token: string): string {
-    const iv = randomBytes(12);
-    const c = createCipheriv("aes-256-gcm", this.key!, iv);
-    const body = Buffer.concat([c.update(token, "utf8"), c.final(), c.getAuthTag()]);
-    return `v1.${iv.toString("base64url")}.${body.toString("base64url")}`;
-  }
-
-  private open(sealed: string): string {
-    const [, iv, body] = sealed.split(".");
-    const raw = Buffer.from(body ?? "", "base64url");
-    const d = createDecipheriv("aes-256-gcm", this.key!, Buffer.from(iv ?? "", "base64url"));
-    d.setAuthTag(raw.subarray(raw.length - 16));
-    return Buffer.concat([d.update(raw.subarray(0, raw.length - 16)), d.final()]).toString("utf8");
-  }
-
   get connected(): boolean {
     return this.config !== null;
+  }
+
+  /** Another tool keeps the wiki: nothing here may write it. */
+  get readOnly(): boolean {
+    return this.config?.mode === "read-only";
+  }
+
+  /** Paths Ambient doesn't write in this wiki (the repo's own AGENTS.md or index.md). */
+  get keep(): string[] {
+    return this.config?.keep ?? [];
   }
 
   status(): RemoteStatus | null {
@@ -95,7 +102,7 @@ export class TeamRemote {
   private async save(): Promise<void> {
     if (!this.config) return;
     const { token, ...rest } = this.config;
-    const stored = this.key ? { ...rest, tokenSealed: this.seal(token) } : this.config;
+    const stored = this.key ? { ...rest, tokenSealed: this.key.seal(token) } : this.config;
     await writeFile(this.file, JSON.stringify(stored, null, 2), { mode: 0o600 });
   }
 
@@ -110,32 +117,61 @@ export class TeamRemote {
   }
 
   /**
-   * Point the wiki at the team's repo and push its history. A non-empty repo is accepted only
-   * if it shares history with this wiki (reconnecting); we never write into an unrelated repo.
+   * Point the wiki at the team's repo. Two-way, the wiki's history goes there: into an empty repo,
+   * onto one that shares history with it (reconnecting), or merged with one that has files of
+   * its own once `existing` says someone has seen them (the repo's version wins where both have
+   * a file, and its own AGENTS.md and index.md are never written after). Read-only, the wiki
+   * becomes the repo's content, and only for a wiki that has no notes yet: they'd be lost.
    */
-  async connect(rawUrl: string, token: string): Promise<RemoteStatus> {
+  async connect(rawUrl: string, token: string, opts: { mode?: RepoMode; existing?: boolean } = {}): Promise<RemoteStatus> {
+    const mode = opts.mode ?? "two-way";
     const url = await checkRepoUrl(rawUrl, this.opts);
     if (!token.trim()) throw new GitError("Add an access token for the repo.", "auth");
     const remote: RemoteRepo = { url, token: token.trim() };
     const info = await remoteInfo(remote, this.opts);
+    if (mode === "read-only" && info.empty) throw new GitError("This repo is empty, so there's nothing to read. Connect it as \"Ambient keeps this wiki\" instead.", "bad_url");
     const g = (args: string[], withAuth = false) => git(args, { cwd: this.wikiDir, ...(withAuth ? { remote } : {}), ...this.opts });
-    await g(["remote", "remove", "origin"]).catch(() => undefined);
+    const forget = () => g(["remote", "remove", "origin"]).catch(() => undefined);
+    await forget();
     await g(["remote", "add", "origin", url]);
+    let keep: string[] = [];
     if (!info.empty) {
       await g(["fetch", "-q", "origin", info.branch], true);
       const shared = await g(["merge-base", "HEAD", "FETCH_HEAD"]).then(() => true, () => false);
       if (!shared) {
-        await g(["remote", "remove", "origin"]).catch(() => undefined);
-        throw new GitError("This repo already has other content. Use a new, empty repo.", "not_empty");
+        const files = (await g(["ls-tree", "-r", "--name-only", "FETCH_HEAD"])).split("\n").filter(Boolean);
+        if (!opts.existing) {
+          await forget();
+          throw HasContent.of(files);
+        }
+        if (mode === "read-only") {
+          const notes = (await g(["ls-files", "--", "notes"])).trim();
+          if (notes) {
+            await forget();
+            throw new GitError("This team's wiki already has notes, which a read-only repo would replace. Connect a read-only repo to a new team.", "not_empty");
+          }
+        } else {
+          keep = ["AGENTS.md", "index.md"].filter((f) => files.includes(f));
+          await g(["merge", "-q", "--allow-unrelated-histories", "-X", "theirs", "-m", "connect: the team's repo", "FETCH_HEAD"]).catch(async (err) => {
+            await g(["merge", "--abort"]).catch(() => undefined);
+            await forget();
+            throw err;
+          });
+        }
       }
-      await g(["rebase", "-q", "FETCH_HEAD"]).catch(async (err) => {
-        await g(["rebase", "--abort"]).catch(() => undefined);
-        throw err;
-      });
+      if (mode === "read-only") {
+        // The repo is the wiki: what was here (the new team's empty skeleton) gives way.
+        await g(["reset", "-q", "--hard", "FETCH_HEAD"]);
+      } else if (shared) {
+        await g(["rebase", "-q", "FETCH_HEAD"]).catch(async (err) => {
+          await g(["rebase", "--abort"]).catch(() => undefined);
+          throw err;
+        });
+      }
     }
-    await g(["push", "-q", "origin", `HEAD:refs/heads/${info.branch}`], true);
+    if (mode === "two-way") await g(["push", "-q", "origin", `HEAD:refs/heads/${info.branch}`], true);
     const now = new Date().toISOString();
-    this.config = { url, token: remote.token, branch: info.branch, status: "ok", lastPushAt: now, lastPullAt: now, lastError: null };
+    this.config = { url, token: remote.token, branch: info.branch, status: "ok", lastPushAt: mode === "two-way" ? now : null, lastPullAt: now, lastError: null, mode, keep };
     await this.save();
     return this.status()!;
   }
@@ -146,12 +182,20 @@ export class TeamRemote {
     this.config = null;
   }
 
-  /** Bring in commits made in the repo (people, Claude Code, Obsidian). True when HEAD moved. */
+  /**
+   * Bring in commits made in the repo (people, Claude Code, Obsidian). True when HEAD moved.
+   * Read-only, the wiki follows the repo exactly: nothing here is ever kept against it.
+   */
   async pull(): Promise<boolean> {
     if (!this.config) return false;
     const before = (await git(["rev-parse", "HEAD"], { cwd: this.wikiDir, ...this.opts })).trim();
     try {
-      await git(["pull", "-q", "--rebase", "origin", this.config.branch], { cwd: this.wikiDir, remote: this.remote, ...this.opts });
+      if (this.readOnly) {
+        await git(["fetch", "-q", "origin", this.config.branch], { cwd: this.wikiDir, remote: this.remote, ...this.opts });
+        await git(["reset", "-q", "--hard", "FETCH_HEAD"], { cwd: this.wikiDir, ...this.opts });
+      } else {
+        await git(["pull", "-q", "--rebase", "origin", this.config.branch], { cwd: this.wikiDir, remote: this.remote, ...this.opts });
+      }
       await this.record(true, "pull");
     } catch (err) {
       await git(["rebase", "--abort"], { cwd: this.wikiDir, ...this.opts }).catch(() => undefined);
@@ -163,7 +207,7 @@ export class TeamRemote {
 
   /** Push the wiki's commits; if the repo moved meanwhile, rebase once and retry. */
   async push(): Promise<void> {
-    if (!this.config) return;
+    if (!this.config || this.readOnly) return;
     const push = () => git(["push", "-q", "origin", `HEAD:refs/heads/${this.config!.branch}`], { cwd: this.wikiDir, remote: this.remote, ...this.opts });
     try {
       await push().catch(async (err) => {
