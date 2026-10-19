@@ -14,6 +14,7 @@ import {
   section,
   splitCompiled,
 } from "@brain/spec";
+import { bodyLinks } from "./body-links.ts";
 import { buildListing, type Listing, type ListedPage } from "./indexes.ts";
 import { attention, lintWiki, type LintReport } from "./lint.ts";
 
@@ -173,6 +174,8 @@ export class WikiStore {
       if (fm.links && typeof fm.links === "object") {
         for (const [rel, v] of Object.entries(fm.links as Record<string, unknown>)) addLinks(rel, v);
       }
+      // Links in the text, for wikis that link there (a team's own repo): the graph and backlinks.
+      addLinks("mentions", bodyLinks(path, body, this.prefix));
     });
     tx();
   }
@@ -242,7 +245,7 @@ export class WikiStore {
     return buildListing(this.entries(), folder, folder ? undefined : attention(this.lint()));
   }
 
-  /** Every front-matter link (src and dst are refs). */
+  /** Every link (src and dst are refs): front matter by its field, links in the text as "mentions". */
   allLinks(): { src: string; dst: string; rel: string }[] {
     return this.db.prepare("SELECT src, dst, rel FROM links").all() as { src: string; dst: string; rel: string }[];
   }
