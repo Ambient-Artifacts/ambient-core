@@ -76,7 +76,11 @@ export class LocalReader implements WikiReader {
 }
 
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}/).optional();
-const ref = z.string().min(1).max(300).regex(/^[a-z0-9][a-z0-9/_.-]*$/);
+// A page's ref is its path without ".md", as the repo names it: connected repos have README.md, CLAUDE.md,
+// "Meeting Notes.md" or "Über uns.md". Refs are only looked up in the index, never opened as files;
+// they still can't be absolute, climb out with "..", or carry control characters.
+const pathPart = (s: string) => !/[\u0000-\u001f\u007f\\]/.test(s) && !s.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
+const ref = z.string().min(1).max(300).refine(pathPart, "not a page ref");
 
 /** Wire contract for team-server queries: one op name, validated args. */
 export const QueryRequest = z.discriminatedUnion("op", [
@@ -104,7 +108,7 @@ export const QueryRequest = z.discriminatedUnion("op", [
     about: ref.optional(),
   }),
   z.object({ op: z.literal("decisions"), since: date, about: ref.optional() }),
-  z.object({ op: z.literal("listing"), folder: z.string().max(300).regex(/^[a-z0-9/_.-]*$/).optional() }),
+  z.object({ op: z.literal("listing"), folder: z.string().max(300).refine((f) => f === "" || pathPart(f.replace(/\/$/, "")), "not a folder").optional() }),
   z.object({ op: z.literal("entries") }),
   z.object({ op: z.literal("backlinks"), ref }),
   z.object({ op: z.literal("transcript"), ref }),
