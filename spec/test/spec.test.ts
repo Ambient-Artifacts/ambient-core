@@ -275,9 +275,13 @@ describe("destination files", () => {
       body: "# Pricing\n\nDid it.\n",
     });
 
-    expect(TeamSettings.parse({})).toEqual({ transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null });
+    expect(TeamSettings.parse({})).toEqual({ transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [] });
     expect(TeamSettings.safeParse({ transcripts: { kind: "repo", folder: "../etc" } }).success).toBe(false);
     expect(TeamSettings.safeParse({ work: { kind: "repo" } }).success).toBe(false);
+    // Folders and files of the team's repo that stay out of the brain: paths in the repo, nothing else.
+    expect(TeamSettings.parse({ ignore: ["templates", "tools/wiki-sync", "README.md", "Über uns.md"] }).ignore).toHaveLength(4);
+    for (const bad of ["", "../x", "a/../b", "a\\b", "a\u0000b", "x".repeat(201)]) expect(TeamSettings.safeParse({ ignore: [bad] }).success, JSON.stringify(bad)).toBe(false);
+    expect(TeamSettings.safeParse({ ignore: Array.from({ length: 51 }, (_, i) => `d${i}`) }).success).toBe(false);
   });
 });
 

@@ -6,6 +6,7 @@
 // (links an agent can pass straight to `fetch` / `index`).
 import { readdir } from "node:fs/promises";
 import { join, posix } from "node:path";
+import { headline } from "./repo-files.ts";
 
 export interface IndexEntry {
   ref: string;
@@ -20,6 +21,8 @@ export interface FolderEntry {
   path: string;
   name: string;
   pages: number;
+  /** The first line of what the folder's own `_index.md` says it holds (connected repos). */
+  about?: string;
 }
 
 /** A lint finding shown on the top-level index. */
@@ -33,6 +36,8 @@ export interface AttentionItem {
 export interface Listing {
   /** "" for the top level, otherwise a folder ref like "people" or "notes/2026/10". */
   folder: string;
+  /** What the folder's own `_index.md` says it holds, in the team's words (connected repos). */
+  about?: string;
   folders: FolderEntry[];
   pages: IndexEntry[];
   /** Top level only. */
@@ -85,7 +90,8 @@ export function foldersWithPages(pages: ListedPage[]): string[] {
   return [...out].sort();
 }
 
-export function buildListing(pages: ListedPage[], folder = "", attention?: AttentionItem[]): Listing {
+/** `notes`: what folders say about themselves in their own `_index.md` (WikiStore.folderNotes). */
+export function buildListing(pages: ListedPage[], folder = "", attention?: AttentionItem[], notes?: ReadonlyMap<string, string>): Listing {
   const f = folder.replace(/^\/+|\/+$/g, "");
   const inside = f ? pages.filter((p) => p.ref.startsWith(`${f}/`)) : pages;
   const counts = new Map<string, number>();
@@ -100,13 +106,18 @@ export function buildListing(pages: ListedPage[], folder = "", attention?: Atten
     }
   }
   const dated = isDated(f);
-  const folders = [...counts.entries()].map(([path, n]) => ({ path, name: path.slice(path.lastIndexOf("/") + 1), pages: n }));
+  const folders = [...counts.entries()].map(([path, n]): FolderEntry => ({
+    path,
+    name: path.slice(path.lastIndexOf("/") + 1),
+    pages: n,
+    ...(notes?.get(path) ? { about: headline(notes.get(path)!) } : {}),
+  }));
   if (!f) folders.sort((a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path));
   else folders.sort((a, b) => (dated ? b.path.localeCompare(a.path) : a.path.localeCompare(b.path)));
   // Ties break on the ref, so the same pages always give the same file (no noise commits).
   direct.sort((a, b) => (dated || a.type === "note" ? b.date.localeCompare(a.date) : a.title.localeCompare(b.title)) || a.ref.localeCompare(b.ref));
 
-  const listing: Listing = { folder: f, folders, pages: direct };
+  const listing: Listing = { folder: f, folders, pages: direct, ...(f && notes?.get(f) ? { about: notes.get(f) } : {}) };
   if (!f) {
     const all = pages.map(entry);
     listing.total = pages.length;
@@ -166,7 +177,8 @@ export function renderListing(l: Listing, title: string, links: RenderLinks): st
       out.push("## Sections");
       for (const f of l.folders) {
         const s = SECTIONS[f.path];
-        out.push(`- [${s?.label ?? f.name}](${links.folder(f.path, "")}): ${f.pages} ${f.pages === 1 ? "page" : "pages"}${s ? `, ${s.about}` : ""}`);
+        const about = f.about ?? s?.about;
+        out.push(`- [${s?.label ?? f.name}](${links.folder(f.path, "")}): ${f.pages} ${f.pages === 1 ? "page" : "pages"}${about ? `, ${about}` : ""}`);
       }
       out.push("");
     }
@@ -186,7 +198,9 @@ export function renderListing(l: Listing, title: string, links: RenderLinks): st
     const back = links.top?.(l.folder);
     if (back) out.push(`[Back to the index](${back})`, "");
     const n = l.pages.length + l.folders.reduce((a, f) => a + f.pages, 0);
-    out.push(`${n} ${n === 1 ? "page" : "pages"}${top ? `: ${top.about}` : ""}.`, "");
+    // A folder that says what it holds in its own `_index.md` keeps those words; Ambient's own sections have a line of theirs.
+    if (l.about) out.push(l.about, "", `${n} ${n === 1 ? "page" : "pages"}.`, "");
+    else out.push(`${n} ${n === 1 ? "page" : "pages"}${top ? `: ${top.about}` : ""}.`, "");
     if (l.folders.length) {
       out.push("## Folders");
       for (const f of l.folders) out.push(`- [${f.name}](${links.folder(f.path, l.folder)}): ${f.pages} ${f.pages === 1 ? "page" : "pages"}`);
@@ -209,11 +223,11 @@ export const fileLinks: RenderLinks = {
 };
 
 /** Every generated index file of a wiki, keyed by its path below the wiki root. */
-export function renderIndexFiles(pages: ListedPage[], title: string, attention?: AttentionItem[]): Map<string, string> {
+export function renderIndexFiles(pages: ListedPage[], title: string, attention?: AttentionItem[], notes?: ReadonlyMap<string, string>): Map<string, string> {
   const files = new Map<string, string>();
-  files.set("index.md", renderListing(buildListing(pages, "", attention), title, fileLinks));
+  files.set("index.md", renderListing(buildListing(pages, "", attention, notes), title, fileLinks));
   for (const folder of foldersWithPages(pages)) {
-    files.set(`${folder}/_index.md`, renderListing(buildListing(pages, folder), title, fileLinks));
+    files.set(`${folder}/_index.md`, renderListing(buildListing(pages, folder, undefined, notes), title, fileLinks));
   }
   return files;
 }

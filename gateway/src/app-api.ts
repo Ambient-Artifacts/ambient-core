@@ -842,7 +842,7 @@ export function appApiRouter(d: AppApiDeps): Router {
         return;
       }
       const body = method === "PUT"
-        ? Object.fromEntries((["transcripts", "work", "microsoft"] as const).filter((k) => k in b).map((k) => [k, b[k]]))
+        ? Object.fromEntries((["transcripts", "work", "microsoft", "ignore"] as const).filter((k) => k in b).map((k) => [k, b[k]]))
         : undefined;
       const out = await d.teams.settings(team, uid, method, body);
       // Disconnected (or switched to the company's own app): no more tokens for that tenant.

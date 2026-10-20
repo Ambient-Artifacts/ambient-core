@@ -3,7 +3,7 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { attention, LocalReader, indexFilesIn, renderIndexFiles, WikiStore } from "@brain/wiki";
+import { attention, LocalReader, indexFilesIn, normalizeIgnore, renderIndexFiles, WikiStore } from "@brain/wiki";
 import type { TeamRemote } from "./remote.ts";
 import { Repo } from "./repo.ts";
 
@@ -32,6 +32,8 @@ export class TeamWiki {
   }
   private lastCheck = 0;
   private lastPull = 0;
+  /** Folders and files of the repo that aren't knowledge (templates, a README) and stay out of the brain. */
+  private ignore: string[];
   /** The team's own repo, when an admin connected one. */
   remote?: TeamRemote;
 
@@ -39,18 +41,28 @@ export class TeamWiki {
     readonly dir: string,
     readonly teamId: string,
     readonly teamName = "Team",
+    ignore: readonly string[] = [],
   ) {
     this.repo = new Repo(dir);
-    this.store = WikiStore.fromDirectory(dir, "team", teamId);
+    this.ignore = normalizeIgnore(ignore);
+    this.store = WikiStore.fromDirectory(dir, "team", teamId, { ignore: this.ignore });
+  }
+
+  /** The team changed what stays out: read the repo again without it (or with it again). */
+  setIgnore(list: readonly string[]): void {
+    const next = normalizeIgnore(list);
+    if (next.join("\n") === this.ignore.join("\n")) return;
+    this.ignore = next;
+    this.reload();
   }
 
   get reader(): LocalReader {
     return new LocalReader(this.store);
   }
 
-  static async open(dir: string, teamId: string, teamName: string, remote?: TeamRemote): Promise<TeamWiki> {
+  static async open(dir: string, teamId: string, teamName: string, remote?: TeamRemote, ignore: readonly string[] = []): Promise<TeamWiki> {
     await new Repo(dir).ensure(teamName);
-    const wiki = new TeamWiki(dir, teamId, teamName);
+    const wiki = new TeamWiki(dir, teamId, teamName, ignore);
     if (remote) {
       await remote.load();
       wiki.remote = remote;
@@ -100,7 +112,7 @@ export class TeamWiki {
 
   /** Re-read everything from disk (after another process, e.g. the nightly job, committed). */
   reload(): void {
-    this.store = WikiStore.fromDirectory(this.dir, "team", this.teamId);
+    this.store = WikiStore.fromDirectory(this.dir, "team", this.teamId, { ignore: this.ignore });
   }
 
   read(path: string): string {
@@ -167,7 +179,7 @@ export class TeamWiki {
   /** Regenerate index.md and every folder's _index.md; returns the files that changed. */
   private async writeIndexes(): Promise<string[]> {
     const changed: string[] = [];
-    const rendered = renderIndexFiles(this.store.entries(), `${this.teamName} wiki`, attention(this.store.lint()));
+    const rendered = renderIndexFiles(this.store.entries(), `${this.teamName} wiki`, attention(this.store.lint()), this.store.folderNotes);
     const keep = new Set(this.remote?.keep ?? []);
     for (const [path, text] of rendered) {
       // The repo's own index.md (it had one when it was connected) stays as its people wrote it.

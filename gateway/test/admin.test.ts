@@ -118,6 +118,15 @@ describe("admin CLI", () => {
     await expect(withToken("t0ken", "team", "repo", "nope", team)).rejects.toThrow(/No active team "nope"/);
   });
 
+  it("leaves folders and files of a team's repo out of its brain", async () => {
+    expect(await admin("team", "ignore", "acme")).toBe("The acme brain leaves nothing out.");
+    expect(await admin("team", "ignore", "acme", "templates/", "./CLAUDE.md")).toBe("The acme brain leaves out: CLAUDE.md, templates.");
+    expect(await admin("team", "ignore", "acme")).toBe("The acme brain leaves out: CLAUDE.md, templates.");
+    await expect(admin("team", "ignore", "acme", "../outside")).rejects.toThrow(/refused/);
+    expect(await admin("team", "ignore", "acme", "--clear")).toBe("The acme brain leaves nothing out.");
+    await expect(admin("team", "ignore", "nope", "templates")).rejects.toThrow(/No active team "nope"/);
+  });
+
   it("tells people where their sign-in code comes from: the app, the admin, or either", () => {
     const page = (codes?: "app" | "admin" | "both") => loginPage({ uid: "u1", clientName: "Claude", redirectHost: "claude.ai", codes });
     expect(page("admin")).toContain("<b>admin connect-code</b>");

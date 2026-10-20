@@ -198,6 +198,14 @@ export function withKind(v: unknown): unknown {
 }
 
 /**
+ * Folders and files of the team's repo that stay out of the brain: templates, scripts, a README are
+ * the repo's plumbing, not knowledge. Paths below the repo root; a folder takes everything in it.
+ */
+export const IgnorePaths = z
+  .array(z.string().min(1).max(200).refine((p) => !/[\u0000-\u001f\u007f\\]/.test(p) && !p.split("/").some((s) => s === ".."), "not a path in the repo"))
+  .max(50);
+
+/**
  * Per-team settings, kept on the team server (0600, the secret sealed). Who maintains the wiki
  * isn't one of them: a repo connected read-only means another tool does.
  */
@@ -205,6 +213,7 @@ export const TeamSettings = z.object({
   transcripts: TranscriptDestination.default({ kind: "repo", folder: "raw" }),
   work: WorkDestination.default({ kind: "none" }),
   microsoft: MicrosoftConnection.nullable().default(null),
+  ignore: IgnorePaths.default([]),
 });
 export type TeamSettings = z.infer<typeof TeamSettings>;
 
