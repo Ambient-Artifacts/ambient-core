@@ -180,8 +180,13 @@ export class WikiStore {
       for (const a of aliases) if (a.trim()) insAlias.run(foldText(a.trim()), path);
 
       const insLink = this.db.prepare("INSERT OR IGNORE INTO links (src, dst, rel) VALUES (?, ?, ?)");
+      // A page is named by its ref ("people/anna"), but a repo written for git and Obsidian names it by its
+      // file ("people/anna.md", "./people/anna.md"): both mean the same page.
       const addLinks = (rel: string, v: unknown) => {
-        for (const dst of Array.isArray(v) ? v : [v]) if (typeof dst === "string" && dst) insLink.run(ref, dst, rel);
+        for (const raw of Array.isArray(v) ? v : [v]) {
+          const dst = typeof raw === "string" ? raw.trim().replace(/^(\.\/)+/, "").replace(/\.md$/, "") : "";
+          if (dst) insLink.run(ref, dst, rel);
+        }
       };
       for (const f of LINK_FIELDS) addLinks(f, fm[f]);
       if (fm.links && typeof fm.links === "object") {
