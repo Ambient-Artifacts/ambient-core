@@ -142,7 +142,7 @@ export async function ingestNote(
   const recordedBy = opts.recordedBySlug && REF.test(opts.recordedBySlug) ? opts.recordedBySlug : undefined;
   // The id names the raw transcript's file: never a path (the schema says so too).
   if (!NoteId.safeParse(note.note_id).success) throw new IngestError(422, "invalid note: note_id");
-  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null };
+  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [] };
   const files = opts.outbox ? destinationFiles(wiki, note, settings) : [];
 
   if (opts.readOnly) {

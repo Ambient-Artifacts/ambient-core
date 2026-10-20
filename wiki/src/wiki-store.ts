@@ -16,6 +16,7 @@ import {
 } from "@brain/spec";
 import { bodyLinks } from "./body-links.ts";
 import { buildListing, type Listing, type ListedPage } from "./indexes.ts";
+import { ignoring, purposeOf } from "./repo-files.ts";
 import { attention, lintWiki, type LintReport } from "./lint.ts";
 
 export type StoreScope = "personal" | "team";
@@ -106,20 +107,32 @@ export class WikiStore {
     this.db.exec(INDEX_SCHEMA_SQL);
   }
 
-  static fromDirectory(root: string, scope: StoreScope, teamId: string | null = null): WikiStore {
+  /**
+   * What folders say about themselves in their own `_index.md` (a repo Ambient didn't write has them),
+   * by folder ref. Ambient's generated index files say nothing here.
+   */
+  readonly folderNotes = new Map<string, string>();
+
+  /** `ignore`: paths below the repo root (folders or files) that aren't knowledge and stay out. */
+  static fromDirectory(root: string, scope: StoreScope, teamId: string | null = null, opts: { ignore?: readonly string[] } = {}): WikiStore {
     const store = new WikiStore(scope, teamId);
     const base = scope === "personal" ? join(root, "wiki") : root;
+    const skip = ignoring(opts.ignore ?? []);
     const walk = (dir: string, top: boolean): void => {
       for (const name of readdirSync(dir)) {
         if (top && scope === "team" && SKIP_TEAM_ROOT.has(name)) continue;
         if (top && scope === "personal" && SKIP_PERSONAL_ROOT.has(name)) continue;
         if (name.startsWith(".")) continue;
         const p = join(dir, name);
+        if (skip(relative(root, p).split(sep).join("/"))) continue;
         // lstat: a symlink (from a connected repo) is skipped, never followed out of the wiki.
         const st = lstatSync(p);
         if (st.isDirectory()) walk(p, false);
         else if (st.isFile() && name.endsWith(".md") && !name.startsWith("_")) {
           store.upsert(relative(root, p).split(sep).join("/"), readFileSync(p, "utf8"));
+        } else if (st.isFile() && name === "_index.md" && dir !== base && st.size < 200_000) {
+          const about = purposeOf(readFileSync(p, "utf8"));
+          if (about) store.folderNotes.set(relative(base, dir).split(sep).join("/"), about);
         }
       }
     };
@@ -242,7 +255,7 @@ export class WikiStore {
 
   /** The folders and pages at one level ("" = top), as on the index pages. */
   listing(folder = ""): Listing {
-    return buildListing(this.entries(), folder, folder ? undefined : attention(this.lint()));
+    return buildListing(this.entries(), folder, folder ? undefined : attention(this.lint()), this.folderNotes);
   }
 
   /** Every link (src and dst are refs): front matter by its field, links in the text as "mentions". */

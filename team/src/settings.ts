@@ -12,6 +12,7 @@ export interface PublicTeamSettings {
   transcripts: TeamSettings["transcripts"];
   work: TeamSettings["work"];
   microsoft: { kind: "own"; tenant_id: string; client_id: string } | { kind: "ambient"; tenant_id: string; tenant_name: string } | null;
+  ignore: string[];
 }
 
 /** On disk: the own app's secret sealed; older files have no `kind` (withKind). */
@@ -92,12 +93,12 @@ export class TeamSettingsStore {
   }
 
   public(readOnly: boolean): PublicTeamSettings {
-    const { transcripts, work, microsoft } = this.effective(readOnly);
+    const { transcripts, work, microsoft, ignore } = this.effective(readOnly);
     const m: PublicTeamSettings["microsoft"] = !microsoft
       ? null
       : microsoft.kind === "own"
         ? { kind: "own", tenant_id: microsoft.tenant_id, client_id: microsoft.client_id }
         : { kind: "ambient", tenant_id: microsoft.tenant_id, tenant_name: microsoft.tenant_name };
-    return { transcripts, work, microsoft: m };
+    return { transcripts, work, microsoft: m, ignore };
   }
 }

@@ -58,6 +58,9 @@ Wikis in your own git repo (https; the access token comes on stdin, e.g. < token
       Keep the team wiki in step with the team's repo (pushed after every change), or with
       --read-only follow a repo another tool keeps (never written).
       A repo with files of its own needs --existing: run without it first to see what's there.
+  team ignore <slug> [<path>...] [--clear]
+      Folders and files of the team's repo that aren't knowledge (templates, scripts, a README):
+      they stay out of the brain. Without paths: what's left out now. --clear: nothing is.
 `;
 
 export class AdminError extends Error {}
@@ -73,7 +76,7 @@ export interface AdminDeps {
 
 type Flags = Record<string, string | true>;
 /** Flags that stand alone; every other flag takes a value. */
-const SWITCHES = ["upkeep", "claude-code", "help", "existing", "read-only"];
+const SWITCHES = ["upkeep", "claude-code", "help", "existing", "read-only", "clear"];
 
 function parse(args: string[]): { words: string[]; flags: Flags } {
   const words: string[] = [];
@@ -278,6 +281,20 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     return mode === "read-only"
       ? `The ${slug} team wiki follows ${url} now, read-only: Ambient reads it and never writes there.`
       : `The ${slug} team wiki is connected to ${url}. Every change is pushed there.`;
+  }
+
+  if (cmd === "team" && sub === "ignore") {
+    const slug = need(words[2], "The team's slug");
+    const team = (await d.control.q(api.admin.overview, {})).teams.find((t) => t.slug === slug && t.status === "active");
+    if (!team) throw new AdminError(`No active team "${slug}".`);
+    const link = new TeamLink(origin, d.config.signingKeys[0]!, d.fetchImpl);
+    const asTeam = { id: team.id, slug, name: team.name, status: "active" as const, serverUrl: team.serverUrl };
+    const paths = words.slice(3);
+    const change = flags.clear === true ? [] : paths.length ? paths : null;
+    const out = await link.settings(asTeam, "admin", change ? "PUT" : "GET", change ? { ignore: change } : undefined);
+    if (out.status !== 200) throw new AdminError(`The team server refused: ${JSON.stringify(out.json)}`);
+    const now = ((out.json as { settings?: { ignore?: string[] } }).settings?.ignore ?? []);
+    return now.length ? `The ${slug} brain leaves out: ${now.join(", ")}.` : `The ${slug} brain leaves nothing out.`;
   }
 
   if (cmd === "share") {

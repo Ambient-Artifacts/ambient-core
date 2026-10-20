@@ -335,6 +335,10 @@ describe("a repo kept by another tool (connected read-only)", () => {
     execFileSync("git", ["-c", "protocol.file.allow=always", "clone", "-q", bare, work], { env });
     mkdirSync(join(work, "clients"), { recursive: true });
     writeFileSync(join(work, "clients", "acme.md"), "---\ntitle: Acme\ntype: client\n---\n# Acme\n");
+    writeFileSync(join(work, "clients", "_index.md"), "# clients\n\nOne page per client: overview and history.\n\n## Pages\n\n| Page | Description |\n|---|---|\n| [acme.md](acme.md) | Acme |\n");
+    mkdirSync(join(work, "templates"), { recursive: true });
+    writeFileSync(join(work, "templates", "client.md"), "---\ntitle: <Client name>\ntype: client\n---\n# <Client name>\n");
+    writeFileSync(join(work, "README.md"), "# Acme wiki\n\nHow this repo works.\n");
     execFileSync("git", ["-C", work, "add", "-A"], { env });
     execFileSync("git", ["-C", work, "commit", "-qm", "theirs"], { env });
     execFileSync("git", ["-C", work, "-c", "protocol.file.allow=always", "push", "-q", "origin", "HEAD:main"], { env });
@@ -374,6 +378,35 @@ describe("a repo kept by another tool (connected read-only)", () => {
     // The phone sending it again (its answer got lost) doesn't write it twice.
     expect((await ro.call("POST", "/v1/inbox", "inbox", note("t_ro", "01JDESTRO00000000000000002"))).json.status).toBe("duplicate");
     expect(await ro.deliverer.outbox.all()).toEqual([]);
+  });
+
+  it("leaves out what the team says isn't knowledge, and says what a folder holds in the team's words", async () => {
+    expect(ro.wiki.store.getByRef("templates/client")).toBeDefined();
+    expect(ro.wiki.store.getByRef("README")).toBeDefined();
+    const folder = async () => (await ro.call("POST", "/v1/query", "query", { op: "listing", folder: "clients" })).json.result;
+    expect((await folder()).about).toBe("One page per client: overview and history.");
+
+    const bad = await ro.call("PUT", "/v1/settings", "settings", { ignore: ["../outside"] });
+    expect(bad).toMatchObject({ status: 400, json: { error: "settings" } });
+    expect(ro.settings.get().ignore).toEqual([]);
+
+    const put = await ro.call("PUT", "/v1/settings", "settings", { ignore: ["./templates/", "README.md", "templates"] });
+    expect(put.status).toBe(200);
+    expect(put.json.settings.ignore).toEqual(["README.md", "templates"]);
+    expect(ro.wiki.store.getByRef("templates/client")).toBeUndefined();
+    expect(ro.wiki.store.getByRef("README")).toBeUndefined();
+    expect(ro.wiki.store.getByRef("clients/acme")).toBeDefined();
+    expect((await ro.call("GET", "/v1/settings", "settings")).json.settings.ignore).toEqual(["README.md", "templates"]);
+    expect(JSON.parse(readFileSync(join(ro.dataDir, "settings.json"), "utf8")).ignore).toEqual(["README.md", "templates"]);
+    // The repo is read-only: nothing was written to it.
+    expect(existsSync(join(ro.dataDir, "wiki", "templates", "client.md"))).toBe(true);
+
+    // A reload (the repo changed, the server restarted) keeps them out; putting nothing brings them back.
+    ro.wiki.reload();
+    expect(ro.wiki.store.getByRef("templates/client")).toBeUndefined();
+    expect((await ro.call("PUT", "/v1/settings", "settings", { ignore: [] })).json.settings.ignore).toEqual([]);
+    expect(ro.wiki.store.getByRef("templates/client")).toBeDefined();
+    expect((await folder()).about).toBe("One page per client: overview and history.");
   });
 
   it("takes work sessions only when the team set a work log folder", async () => {

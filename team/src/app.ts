@@ -5,8 +5,8 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JWK, type JWTPayload } from "jose";
-import { clock, MicrosoftConnection, TeamNoteV1, TeamSettings, withKind, WorkDestination } from "@brain/spec";
-import { dispatchQuery, GitError, HasContent, LocalReader, QueryRequest, type WikiStore } from "@brain/wiki";
+import { clock, IgnorePaths, MicrosoftConnection, TeamNoteV1, TeamSettings, withKind, WorkDestination } from "@brain/spec";
+import { dispatchQuery, GitError, HasContent, LocalReader, normalizeIgnore, QueryRequest, type WikiStore } from "@brain/wiki";
 import type { Deliverer } from "./destination.ts";
 import { GraphError, graphFor as defaultGraphFor, GraphTokens, type DriveFolder, type MicrosoftGraph } from "./graph.ts";
 import { destinationFiles, IngestError, ingestNote } from "./ingest.ts";
@@ -269,12 +269,18 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
         if (!parsed.success) throw new SettingsError("Work logs go to a OneDrive or SharePoint folder, or nowhere.");
         next.work = parsed.data;
       }
+      if (body.ignore !== undefined) {
+        const paths = IgnorePaths.safeParse(body.ignore);
+        if (!paths.success) throw new SettingsError("Left-out paths are folders or files in the repo, like templates or README.md.");
+        next.ignore = normalizeIgnore(paths.data);
+      }
       if (!next.microsoft && (next.transcripts.kind === "drive" || next.work.kind === "drive")) {
         throw new SettingsError("A OneDrive or SharePoint folder needs the Microsoft 365 connection. Choose another place first.");
       }
       const valid = TeamSettings.safeParse(next);
       if (!valid.success) throw new SettingsError(`Those settings aren't valid (${valid.error.issues[0]?.path.join(".")}).`);
       await store.save(valid.data);
+      wiki.setIgnore(valid.data.ignore);
       res.json(await settingsReply(store));
       void cfg.deliverer?.run().catch((err) => console.error("[team] delivery", err));
     } catch (err) {

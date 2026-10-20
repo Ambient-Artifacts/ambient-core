@@ -70,4 +70,15 @@ describe("team settings", () => {
     expect(String(bad.json.message)).toContain("Connect Microsoft 365 first");
     expect(readdirSync(s.dataDir)).toContain("settings.json");
   });
+
+  it("an admin leaves out folders and files of the repo that aren't knowledge", async () => {
+    const r = await appCall(s, lena, "PUT", "/v1/app/teams/acme/settings", { ignore: ["./templates/", "CLAUDE.md", "templates"] });
+    expect(r.status).toBe(200);
+    expect((r.json.settings as { ignore: string[] }).ignore).toEqual(["CLAUDE.md", "templates"]);
+    const seen = await appCall(s, lena, "GET", "/v1/app/teams/acme/settings");
+    expect((seen.json.settings as { ignore: string[] }).ignore).toEqual(["CLAUDE.md", "templates"]);
+    const bad = await appCall(s, lena, "PUT", "/v1/app/teams/acme/settings", { ignore: ["../secrets"] });
+    expect(bad).toMatchObject({ status: 400, json: { error: "settings" } });
+    expect((await appCall(s, lena, "PUT", "/v1/app/teams/acme/settings", { ignore: [] })).status).toBe(200);
+  });
 });
