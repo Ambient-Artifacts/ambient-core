@@ -40,6 +40,7 @@ describe("what a folder says about itself", () => {
   it("stays short, and a headline is one plain line", () => {
     expect(purposeOf(`# a\n\n${"word ".repeat(300).trim()}\n\n## Pages\n`).length).toBeLessThanOrEqual(1200);
     expect(headline("**Look here** for the `thing`.\nMore.")).toBe("Look here for the thing");
+    expect(headline("Detail pages of [STAGILE®](../stagile.md): meetings and roles.")).toBe("Detail pages of STAGILE®: meetings and roles");
     expect(headline("x ".repeat(100))).toMatch(/…$/);
   });
 });
@@ -92,6 +93,10 @@ describe("a connected repo with its own indexes and plumbing", () => {
     // Ambient's own sections keep their line unless the repo says something else.
     expect(top).toContain("[People](people/_index.md): 1 page, the people in your conversations\n");
     expect(renderListing(store.listing("people"), "Acme wiki", fileLinks)).toContain("1 page: the people in your conversations.");
+    // A folder inside a folder shows what it holds in the list of folders.
+    write("strategy/vision/goal.md", page("Goal"));
+    write("strategy/vision/_index.md", "# strategy/vision\n\nThe long-term goals in detail.\n\n## Pages\n");
+    expect(renderListing(WikiStore.fromDirectory(dir, "team", "acme").listing("strategy"), "Acme wiki", fileLinks)).toContain("- [vision](vision/_index.md): 1 page, The long-term goals in detail\n");
   });
 
   it("keeps those words in the index files Ambient writes (two-way)", () => {

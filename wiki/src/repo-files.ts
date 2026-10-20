@@ -48,6 +48,11 @@ export function purposeOf(markdown: string): string {
 
 /** The first line of a purpose, for a listing of folders: no markdown emphasis, no final period, at most 140 characters. */
 export function headline(purpose: string): string {
-  const first = (purpose.split("\n").find((l) => l.trim()) ?? "").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim().replace(/\.$/, "");
+  const first = (purpose.split("\n").find((l) => l.trim()) ?? "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\.$/, "");
   return first.length <= 140 ? first : `${first.slice(0, 139).replace(/\s+\S*$/, "")}…`;
 }

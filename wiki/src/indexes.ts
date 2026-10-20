@@ -203,7 +203,7 @@ export function renderListing(l: Listing, title: string, links: RenderLinks): st
     else out.push(`${n} ${n === 1 ? "page" : "pages"}${top ? `: ${top.about}` : ""}.`, "");
     if (l.folders.length) {
       out.push("## Folders");
-      for (const f of l.folders) out.push(`- [${f.name}](${links.folder(f.path, l.folder)}): ${f.pages} ${f.pages === 1 ? "page" : "pages"}`);
+      for (const f of l.folders) out.push(`- [${f.name}](${links.folder(f.path, l.folder)}): ${f.pages} ${f.pages === 1 ? "page" : "pages"}${f.about ? `, ${f.about}` : ""}`);
       out.push("");
     }
     if (l.pages.length) {
