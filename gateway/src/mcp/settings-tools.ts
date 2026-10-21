@@ -24,7 +24,7 @@ interface TeamSettingsJson {
     work?: Destination;
     microsoft?: { kind: string; tenant_name?: string } | null;
     ignore?: string[];
-    notes?: { by: string };
+    notes?: { by: string; pcc?: boolean };
   };
   repo_mode?: string | null;
   repo_folder?: string | null;
@@ -76,7 +76,7 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
     const ms = st.microsoft;
     const lines = [
       head,
-      `- Meeting notes written by: ${st.notes?.by === "own" ? "the team's own pipeline (recordings bring only their transcript)" : "Ambient (the device that recorded)"}`,
+      `- Meeting notes written by: ${st.notes?.by === "own" ? "the team's own pipeline (recordings bring only their transcript)" : `Ambient (the device that recorded${st.notes?.pcc ? ", with Apple's Private Cloud Compute" : ", on the device"})`}`,
       `- Meeting transcripts go to: ${place(st.transcripts, j.repo_folder)}`,
       `- Work logs go to: ${place(st.work, j.repo_folder)}`,
       `- Microsoft 365: ${!ms ? "not connected" : ms.kind === "ambient" ? `Ambient's Microsoft app${ms.tenant_name ? ` (${ms.tenant_name})` : ""}` : "the company's own Entra app"}`,
@@ -107,8 +107,8 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
       const data: Record<string, unknown> = {};
       if (!team && principal.personal) {
         const p = await settings.prefs(principal.uid);
-        parts.push(`Your preferences\n- Keep my brain current with Claude: ${p.consolidate ? "on" : "off"}\n- What's waiting on you, each morning: ${p.digest ? "on" : "off"}`);
-        data.preferences = { keep_brain_current_with_claude: p.consolidate, morning_digest: p.digest };
+        parts.push(`Your preferences\n- Keep my brain current with Claude: ${p.consolidate ? "on" : "off"}\n- What's waiting on you, each morning: ${p.digest ? "on" : "off"}\n- Write personal notes with Apple's Private Cloud Compute: ${p.pcc ? "on" : "off (on the device only)"}`);
+        data.preferences = { keep_brain_current_with_claude: p.consolidate, morning_digest: p.digest, apple_private_cloud_compute: p.pcc };
       }
       const described = await Promise.all(teams.map(describeTeam));
       parts.push(...described.map((d) => d.text));
@@ -124,6 +124,7 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
       description:
         `Change one of the user's teams' settings, as its owner or admin. ${ASKED} ` +
         "Give only what changes. meeting_notes: who writes the team's meeting notes (own_pipeline: the team's own pipeline writes them from the transcripts; a recording then brings only its transcript). " +
+        "apple_private_cloud_compute: when Ambient writes them, whether the device may use Apple's Private Cloud Compute (the transcript goes to Apple's servers for that; better notes for long meetings) or only its own model. " +
         "repo_writes: for a repo another tool keeps, whether Ambient writes nothing or one folder of it (repo_folder, default ambient). " +
         "transcripts / work_logs: where the team's server delivers them; \"folder\" needs the folder's OneDrive or SharePoint link. " +
         "left_out: folders or files of the team's repo that stay out of the brain (replaces the list). " +
@@ -131,6 +132,7 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
       inputSchema: {
         team: z.string().max(80).describe("The team's slug or name."),
         meeting_notes: z.enum(["ambient", "own_pipeline"]).optional(),
+        apple_private_cloud_compute: z.boolean().optional(),
         repo_writes: z.enum(["nothing", "one_folder"]).optional(),
         repo_folder: z.string().max(80).optional().describe('With repo_writes "one_folder": the folder, e.g. "ambient".'),
         transcripts: z.enum(["team_repo", "folder", "nowhere"]).optional(),
@@ -145,6 +147,7 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
       const a = args as {
         team: string;
         meeting_notes?: "ambient" | "own_pipeline";
+        apple_private_cloud_compute?: boolean;
         repo_writes?: "nothing" | "one_folder";
         repo_folder?: string;
         transcripts?: "team_repo" | "folder" | "nowhere";
@@ -157,7 +160,12 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
       const team = teamFor(a.team);
       if (!team) return result(`No team "${a.team}" on this connection.`, undefined, true);
       const change: Record<string, unknown> = {};
-      if (a.meeting_notes) change.notes = { by: a.meeting_notes === "own_pipeline" ? "own" : "ambient" };
+      if (a.meeting_notes || a.apple_private_cloud_compute !== undefined) {
+        change.notes = {
+          ...(a.meeting_notes ? { by: a.meeting_notes === "own_pipeline" ? "own" : "ambient" } : {}),
+          ...(a.apple_private_cloud_compute !== undefined ? { pcc: a.apple_private_cloud_compute } : {}),
+        };
+      }
       if (a.transcripts === "folder" && !a.transcripts_folder_link) return result("To send transcripts to a folder, give the folder's OneDrive or SharePoint link.", undefined, true);
       if (a.work_logs === "folder" && !a.work_folder_link) return result("To send work logs to a folder, give the folder's OneDrive or SharePoint link.", undefined, true);
       if (a.transcripts) change.transcripts = a.transcripts === "team_repo" ? { kind: "repo" } : a.transcripts === "nowhere" ? { kind: "none" } : { kind: "drive", url: a.transcripts_folder_link };
@@ -184,21 +192,24 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
     {
       title: "Change your preferences",
       description:
-        `Change the user's own Ambient preferences. ${ASKED} keep_brain_current_with_claude: Claude keeps their people and project pages and overview current from their notes (the notes' text goes to Anthropic). morning_digest: what's waiting on them, each morning.`,
+        `Change the user's own Ambient preferences. ${ASKED} keep_brain_current_with_claude: Claude keeps their people and project pages and overview current from their notes (the notes' text goes to Anthropic). morning_digest: what's waiting on them, each morning. apple_private_cloud_compute: the notes of their personal recordings are written with Apple's Private Cloud Compute (the transcript goes to Apple's servers for that, which keep nothing) instead of only the model on their device.`,
       inputSchema: {
         keep_brain_current_with_claude: z.boolean().optional(),
         morning_digest: z.boolean().optional(),
+        apple_private_cloud_compute: z.boolean().optional(),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async (args) => {
-      const a = args as { keep_brain_current_with_claude?: boolean; morning_digest?: boolean };
+      const a = args as { keep_brain_current_with_claude?: boolean; morning_digest?: boolean; apple_private_cloud_compute?: boolean };
       if (!canChangeOwn) return result("This connection can't change your own preferences (it needs personal:write on the personal connection).", undefined, true);
-      if (a.keep_brain_current_with_claude === undefined && a.morning_digest === undefined) return result("Nothing to change: give at least one preference.", undefined, true);
-      const p = await settings.prefs(principal.uid, { consolidate: a.keep_brain_current_with_claude, digest: a.morning_digest });
+      if (a.keep_brain_current_with_claude === undefined && a.morning_digest === undefined && a.apple_private_cloud_compute === undefined) {
+        return result("Nothing to change: give at least one preference.", undefined, true);
+      }
+      const p = await settings.prefs(principal.uid, { consolidate: a.keep_brain_current_with_claude, digest: a.morning_digest, pcc: a.apple_private_cloud_compute });
       return result(
-        `Changed.\n- Keep my brain current with Claude: ${p.consolidate ? "on" : "off"}\n- What's waiting on you, each morning: ${p.digest ? "on" : "off"}`,
-        { preferences: { keep_brain_current_with_claude: p.consolidate, morning_digest: p.digest } },
+        `Changed.\n- Keep my brain current with Claude: ${p.consolidate ? "on" : "off"}\n- What's waiting on you, each morning: ${p.digest ? "on" : "off"}\n- Write personal notes with Apple's Private Cloud Compute: ${p.pcc ? "on" : "off (on the device only)"}`,
+        { preferences: { keep_brain_current_with_claude: p.consolidate, morning_digest: p.digest, apple_private_cloud_compute: p.pcc } },
       );
     },
   );

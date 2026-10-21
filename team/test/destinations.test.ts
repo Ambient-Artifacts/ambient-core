@@ -448,14 +448,17 @@ describe("meeting notes written by the team's own pipeline", () => {
   afterAll(() => s.close());
 
   it("can only be chosen when the transcripts reach that pipeline", async () => {
-    expect((await s.call("GET", "/v1/settings", "settings")).json.settings.notes).toEqual({ by: "ambient" });
+    expect((await s.call("GET", "/v1/settings", "settings")).json.settings.notes).toEqual({ by: "ambient", pcc: false });
     const nowhere = await s.call("PUT", "/v1/settings", "settings", { transcripts: { kind: "none" }, notes: { by: "own" } });
     expect(nowhere.status).toBe(400);
     expect(nowhere.json.message).toMatch(/choose where transcripts go first/);
     expect((await s.call("PUT", "/v1/settings", "settings", { notes: { by: "someone" } })).status).toBe(400);
+    // Apple's Private Cloud Compute, on its own: who writes them stays.
+    expect((await s.call("PUT", "/v1/settings", "settings", { notes: { pcc: true } })).json.settings.notes).toEqual({ by: "ambient", pcc: true });
+    expect((await s.call("PUT", "/v1/settings", "settings", { notes: { pcc: "yes" } })).status).toBe(400);
     const ok = await s.call("PUT", "/v1/settings", "settings", { notes: { by: "own" } });
     expect(ok.status).toBe(200);
-    expect(ok.json.settings).toMatchObject({ transcripts: { kind: "repo" }, notes: { by: "own" } });
+    expect(ok.json.settings).toMatchObject({ transcripts: { kind: "repo" }, notes: { by: "own", pcc: true } });
     // And transcripts can't be switched off under it.
     expect((await s.call("PUT", "/v1/settings", "settings", { transcripts: { kind: "none" } })).status).toBe(400);
   });
@@ -491,6 +494,12 @@ describe("meeting notes written by the team's own pipeline", () => {
     expect(found.json.result).toMatchObject({ ref: "meetings/2026-10/2026-10-12-acme-kickoff", title: "Kickoff with Acme" });
     expect((await s.call("POST", "/v1/query", "query", { op: "recording", id: "01JNOSUCHRECORDING00000001" })).json.result).toBeNull();
     expect((await s.call("POST", "/v1/query", "query", { op: "recording", id: "../people/x" })).status).toBe(400);
+  });
+
+  it("records a note written with Apple's Private Cloud Compute as such", async () => {
+    await two.call("POST", "/v1/inbox", "inbox", note("t_acme", "01JPCCNOTE0000000000000001", { client: { app: "2.0 (1)", transcriber: "Parakeet", compiler: "fm-pcc" } }));
+    const page = two.wiki.store.findById("01JPCCNOTE0000000000000001");
+    expect(page?.frontmatter.compile).toMatchObject({ engine: "fm-pcc", status: "compiled", fallback: "none" });
   });
 
   it("and for a team whose notes Ambient writes, the note filed under the recording's id", async () => {

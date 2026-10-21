@@ -82,11 +82,11 @@ describe("deleting an account", () => {
 
   it("asks before Claude reads notes: upkeep is off until the user says yes", async () => {
     const u = await signIn(s, "apple-consent", "Clara Consent");
-    expect((await appCall(s, u.access_token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: false, consolidateAsked: false, digest: true });
-    expect((await appCall(s, u.access_token, "POST", "/v1/app/me/prefs", { consolidate: true })).json).toEqual({ prefs: { consolidate: true, consolidateAsked: true, digest: true } });
-    expect((await appCall(s, u.access_token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: true, consolidateAsked: true, digest: true });
+    expect((await appCall(s, u.access_token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: false, consolidateAsked: false, digest: true, pcc: true });
+    expect((await appCall(s, u.access_token, "POST", "/v1/app/me/prefs", { consolidate: true })).json).toEqual({ prefs: { consolidate: true, consolidateAsked: true, digest: true, pcc: true } });
+    expect((await appCall(s, u.access_token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: true, consolidateAsked: true, digest: true, pcc: true });
     // The morning push is its own switch; turning it off leaves upkeep as it was.
-    expect((await appCall(s, u.access_token, "POST", "/v1/app/me/prefs", { digest: false })).json).toEqual({ prefs: { consolidate: true, consolidateAsked: true, digest: false } });
+    expect((await appCall(s, u.access_token, "POST", "/v1/app/me/prefs", { digest: false })).json).toEqual({ prefs: { consolidate: true, consolidateAsked: true, digest: false, pcc: true } });
   });
 });
 
