@@ -143,7 +143,7 @@ export async function ingestNote(
   const recordedBy = opts.recordedBySlug && REF.test(opts.recordedBySlug) ? opts.recordedBySlug : undefined;
   // The id names the raw transcript's file: never a path (the schema says so too).
   if (!NoteId.safeParse(note.note_id).success) throw new IngestError(422, "invalid note: note_id");
-  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [], notes: { by: "ambient" } };
+  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [], notes: { by: "ambient", pcc: false } };
   const files = opts.outbox ? destinationFiles(wiki, note, settings) : [];
   const author = personAuthor(note.recorded_by_name, recordedBy);
   const by = author ? { by: author } : {};
@@ -211,7 +211,9 @@ export async function ingestNote(
       ? { engine: "fm-ondevice", status: "partial", fallback: "extractive" }
       : note.client.compiler === "session-summary"
         ? { engine: "server", status: "compiled", fallback: "none" }
-        : { engine: "fm-ondevice", status: "compiled", fallback: "none" },
+        : note.client.compiler === "fm-pcc"
+          ? { engine: "fm-pcc", status: "compiled", fallback: "none" }
+          : { engine: "fm-ondevice", status: "compiled", fallback: "none" },
     updated: today,
   };
   const parsed = NoteFrontmatter.safeParse(frontmatter);

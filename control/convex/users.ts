@@ -186,16 +186,21 @@ export const get = query({
       consolidate: u.consolidate === true,
       consolidateAsked: u.consolidate !== undefined,
       digest: u.digest !== false,
+      pcc: u.pcc !== false,
     };
   },
 });
 
 /** The user's switches. `consolidate`: let Claude keep the personal wiki current (opt-in); `digest`: the morning push of open action items (on unless turned off). */
 export const setPrefs = mutation({
-  args: { ...secretArg, uid: v.id("users"), consolidate: v.optional(v.boolean()), digest: v.optional(v.boolean()) },
-  handler: async (ctx, { secret, uid, consolidate, digest }) => {
+  args: { ...secretArg, uid: v.id("users"), consolidate: v.optional(v.boolean()), digest: v.optional(v.boolean()), pcc: v.optional(v.boolean()) },
+  handler: async (ctx, { secret, uid, consolidate, digest, pcc }) => {
     assertService(secret);
-    await ctx.db.patch(uid, { ...(consolidate !== undefined ? { consolidate } : {}), ...(digest !== undefined ? { digest } : {}) });
+    await ctx.db.patch(uid, {
+      ...(consolidate !== undefined ? { consolidate } : {}),
+      ...(digest !== undefined ? { digest } : {}),
+      ...(pcc !== undefined ? { pcc } : {}),
+    });
   },
 });
 

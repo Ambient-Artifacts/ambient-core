@@ -50,7 +50,7 @@ beforeAll(async () => {
   token = lena.access_token;
   uid = lena.user.uid;
   // Claude upkeep is opt-in.
-  expect((await appCall(s, token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: false, consolidateAsked: false, digest: true });
+  expect((await appCall(s, token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: false, consolidateAsked: false, digest: true, pcc: true });
   await appCall(s, token, "POST", "/v1/app/me/prefs", { consolidate: true });
   await appCall(s, token, "POST", "/v1/app/personal/sync", { device_id: "iphone", ops: fixturePersonalOps(), since_seq: 0 });
 });
@@ -135,8 +135,8 @@ describe("personal worker", () => {
     expect(await s.personal.transcript(uid, "raw/2026/10/01JBRAWTRANSCRIPT0000000001.md")).toBe(raw);
     expect((await (await s.personal.reader(uid)).search("Hallo zusammen")).length).toBe(0);
 
-    expect((await appCall(s, token, "POST", "/v1/app/me/prefs", { consolidate: false })).json).toEqual({ prefs: { consolidate: false, consolidateAsked: true, digest: true } });
-    expect((await appCall(s, token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: false, consolidateAsked: true, digest: true });
+    expect((await appCall(s, token, "POST", "/v1/app/me/prefs", { consolidate: false })).json).toEqual({ prefs: { consolidate: false, consolidateAsked: true, digest: true, pcc: true } });
+    expect((await appCall(s, token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: false, consolidateAsked: true, digest: true, pcc: true });
     expect(await run(new FakeUpdater())).toEqual([]);
   });
 });

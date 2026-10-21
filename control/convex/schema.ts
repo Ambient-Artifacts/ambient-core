@@ -45,6 +45,12 @@ export default defineSchema({
     consolidate: v.optional(v.boolean()),
     /** The morning push of open action items ("waiting on you"): absent means on. */
     digest: v.optional(v.boolean()),
+    /**
+     * The app writes the notes of personal recordings with Apple's Private Cloud Compute (the
+     * transcript goes to Apple's servers for that, and isn't kept there) instead of the model on
+     * the device: absent means on.
+     */
+    pcc: v.optional(v.boolean()),
     /** The user's local date (YYYY-MM-DD) the last morning push was considered, so it goes once a day. */
     digestSentOn: v.optional(v.string()),
     /** The user deleted their account: everything is refused while their data is removed. */

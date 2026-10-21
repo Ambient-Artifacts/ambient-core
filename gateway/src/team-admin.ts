@@ -22,6 +22,8 @@ export interface Prefs {
   consolidate: boolean;
   consolidateAsked: boolean;
   digest: boolean;
+  /** Personal recordings' notes written with Apple's Private Cloud Compute (on unless turned off). */
+  pcc: boolean;
 }
 
 export class SettingsService {
@@ -96,11 +98,11 @@ export class SettingsService {
   }
 
   /** The user's own preferences; with a change, changed first. */
-  async prefs(uid: string, change?: { consolidate?: boolean; digest?: boolean }): Promise<Prefs> {
-    if (change && (change.consolidate !== undefined || change.digest !== undefined)) {
-      await this.d.control.m(api.users.setPrefs, { uid: uid as never, consolidate: change.consolidate, digest: change.digest });
+  async prefs(uid: string, change?: { consolidate?: boolean; digest?: boolean; pcc?: boolean }): Promise<Prefs> {
+    if (change && (change.consolidate !== undefined || change.digest !== undefined || change.pcc !== undefined)) {
+      await this.d.control.m(api.users.setPrefs, { uid: uid as never, consolidate: change.consolidate, digest: change.digest, pcc: change.pcc });
     }
     const record = await this.d.control.q(api.users.get, { uid: uid as never });
-    return { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true };
+    return { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true, pcc: record?.pcc ?? true };
   }
 }

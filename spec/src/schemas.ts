@@ -210,8 +210,10 @@ export const IgnorePaths = z
  * it's the team's note. "own": the team's own pipeline writes it from the transcript it's sent
  * (a recording then brings no note of Ambient's, only its transcript); the page it writes names
  * the recording in its front matter (`recording_id`), so the app shows it on the recording.
+ * `pcc`: when the device writes it, it may use Apple's Private Cloud Compute (the transcript goes
+ * to Apple's servers for that) instead of the model on the device. Off unless an admin turns it on.
  */
-export const MeetingNotes = z.object({ by: z.enum(["ambient", "own"]) });
+export const MeetingNotes = z.object({ by: z.enum(["ambient", "own"]), pcc: z.boolean().default(false) });
 export type MeetingNotes = z.infer<typeof MeetingNotes>;
 
 /**
@@ -223,7 +225,7 @@ export const TeamSettings = z.object({
   work: WorkDestination.default({ kind: "none" }),
   microsoft: MicrosoftConnection.nullable().default(null),
   ignore: IgnorePaths.default([]),
-  notes: MeetingNotes.default({ by: "ambient" }),
+  notes: MeetingNotes.default({ by: "ambient", pcc: false }),
 });
 export type TeamSettings = z.infer<typeof TeamSettings>;
 

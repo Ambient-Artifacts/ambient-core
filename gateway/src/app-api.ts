@@ -223,7 +223,7 @@ export function appApiRouter(d: AppApiDeps): Router {
       user,
       teams: teams.map((t) => ({ slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug })),
       // Claude upkeep is opt-in: the app asks once (consolidateAsked) and it's off until then.
-      prefs: { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true },
+      prefs: { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true, pcc: record?.pcc ?? true },
       // What's left to set up (the app's reminder dot).
       setup: { aiAppConnected: aiApp.connected },
     });
@@ -257,11 +257,12 @@ export function appApiRouter(d: AppApiDeps): Router {
   r.post("/v1/app/me/prefs", auth, json, async (req, res) => {
     const consolidate = typeof req.body?.consolidate === "boolean" ? (req.body.consolidate as boolean) : undefined;
     const digest = typeof req.body?.digest === "boolean" ? (req.body.digest as boolean) : undefined;
-    if (consolidate === undefined && digest === undefined) {
+    const pcc = typeof req.body?.pcc === "boolean" ? (req.body.pcc as boolean) : undefined;
+    if (consolidate === undefined && digest === undefined && pcc === undefined) {
       res.status(400).json({ error: "bad_request" });
       return;
     }
-    res.json({ prefs: await settings.prefs(uidOf(res), { consolidate, digest }) });
+    res.json({ prefs: await settings.prefs(uidOf(res), { consolidate, digest, pcc }) });
   });
 
   // ---- before a meeting, and what's waiting on you (briefs.ts) ----

@@ -94,9 +94,14 @@ describe("settings over MCP", () => {
     expect(read).toContain("Your preferences");
     expect(read).toContain("Acme (team \"acme\"");
     expect(read).toContain("- Meeting notes written by: Ambient");
-    const off = await client.callTool({ name: "change_preferences", arguments: { morning_digest: false } });
+    // Apple's Private Cloud Compute for personal notes: on unless turned off.
+    expect((await appCall(s, lena, "GET", "/v1/app/me")).json.prefs).toMatchObject({ pcc: true });
+    expect(read).toContain("Write personal notes with Apple's Private Cloud Compute: on");
+    const off = await client.callTool({ name: "change_preferences", arguments: { morning_digest: false, apple_private_cloud_compute: false } });
     expect(text(off)).toContain("What's waiting on you, each morning: off");
-    expect((await appCall(s, lena, "GET", "/v1/app/me")).json.prefs).toMatchObject({ digest: false });
+    expect(text(off)).toContain("Private Cloud Compute: off (on the device only)");
+    expect((await appCall(s, lena, "GET", "/v1/app/me")).json.prefs).toMatchObject({ digest: false, pcc: false });
+    expect((await appCall(s, lena, "POST", "/v1/app/me/prefs", { pcc: true })).json.prefs).toMatchObject({ pcc: true, digest: false });
     const team = await client.callTool({ name: "change_team_settings", arguments: { team: "acme", meeting_notes: "own_pipeline" } });
     expect(team.isError).toBe(true);
     expect(text(team)).toContain("no team:write");
@@ -110,7 +115,11 @@ describe("settings over MCP", () => {
     const own = await client.callTool({ name: "change_team_settings", arguments: { team: "Acme", meeting_notes: "own_pipeline" } });
     expect(own.isError).toBeFalsy();
     expect(text(own)).toContain("- Meeting notes written by: the team's own pipeline");
-    expect((await appCall(s, lena, "GET", "/v1/app/teams/acme/settings")).json.settings).toMatchObject({ notes: { by: "own" } });
+    expect((await appCall(s, lena, "GET", "/v1/app/teams/acme/settings")).json.settings).toMatchObject({ notes: { by: "own", pcc: false } });
+    // Apple's Private Cloud Compute for the team's notes, on its own: who writes them stays.
+    const pcc = await client.callTool({ name: "change_team_settings", arguments: { team: "acme", apple_private_cloud_compute: true } });
+    expect(pcc.isError).toBeFalsy();
+    expect((await appCall(s, lena, "GET", "/v1/app/teams/acme/settings")).json.settings).toMatchObject({ notes: { by: "own", pcc: true } });
     // The server's own rules and sentences come back as they are.
     const nowhere = await client.callTool({ name: "change_team_settings", arguments: { team: "acme", transcripts: "nowhere" } });
     expect(nowhere.isError).toBe(true);

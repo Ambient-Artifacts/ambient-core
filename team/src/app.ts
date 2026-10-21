@@ -302,8 +302,10 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
         next.ignore = normalizeIgnore(paths.data);
       }
       if (body.notes !== undefined) {
-        const notes = MeetingNotes.safeParse(body.notes);
-        if (!notes.success) throw new SettingsError("Meeting notes are written by Ambient or by your own pipeline.");
+        // Only what's given changes: {pcc: true} keeps who writes them, and the other way round.
+        const given = body.notes && typeof body.notes === "object" ? (body.notes as Record<string, unknown>) : null;
+        const notes = given ? MeetingNotes.safeParse({ ...next.notes, ...given }) : null;
+        if (!notes?.success) throw new SettingsError("Meeting notes are written by Ambient or by your own pipeline, with Apple's Private Cloud Compute or without.");
         next.notes = notes.data;
       }
       if (!next.microsoft && (next.transcripts.kind === "drive" || next.work.kind === "drive")) {
