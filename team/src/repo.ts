@@ -11,6 +11,25 @@ const run = promisify(execFile);
 
 export const BOT = { name: "Ambient Bot", email: "bot@ambient.invalid" };
 
+/** Who a change is by: the commit's author. Ambient stays the committer. */
+export interface Author {
+  name: string;
+  email: string;
+}
+
+/**
+ * The person a note, recording or saved page is from, as a commit author: their name as the
+ * gateway sends it (from their account, never from the device) and their page in the team
+ * (`people/lena-vogel`) as the address, so `git log` and the history in GitHub or Azure DevOps say
+ * who changed what. Undefined without a name: Ambient's own work stays the bot's.
+ */
+export function personAuthor(name: string | null | undefined, ref?: string | null): Author | undefined {
+  const clean = (name ?? "").replace(/[<>\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!clean) return undefined;
+  const slug = ref?.startsWith("people/") ? ref.slice("people/".length) : "";
+  return { name: clean, email: `${/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug) ? slug : "member"}@people.ambient.invalid` };
+}
+
 export class Repo {
   constructor(readonly dir: string) {}
 
@@ -39,13 +58,13 @@ export class Repo {
     await this.git("commit", "-q", "-m", "init: team wiki");
   }
 
-  async commit(paths: string[], message: string): Promise<string | null> {
+  async commit(paths: string[], message: string, author?: Author): Promise<string | null> {
     if (paths.length === 0) return null;
     // -f: only files Ambient just wrote are listed, and a team's own .gitignore may name raw/.
     await this.git("add", "-f", "--", ...paths);
     const { stdout: staged } = await this.git("diff", "--cached", "--name-only");
     if (!staged.trim()) return null;
-    await this.git("commit", "-q", "-m", message);
+    await this.git("commit", "-q", "-m", message, ...(author ? [`--author=${author.name} <${author.email}>`] : []));
     return this.head();
   }
 

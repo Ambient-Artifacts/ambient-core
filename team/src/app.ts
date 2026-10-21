@@ -5,7 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JWK, type JWTPayload } from "jose";
-import { clock, IgnorePaths, MicrosoftConnection, TeamNoteV1, TeamSettings, withKind, WorkDestination } from "@brain/spec";
+import { clock, IgnorePaths, MeetingNotes, MicrosoftConnection, TeamNoteV1, TeamSettings, withKind, WorkDestination } from "@brain/spec";
 import { dispatchQuery, GitError, HasContent, LocalReader, normalizeIgnore, QueryRequest, type WikiStore } from "@brain/wiki";
 import type { Deliverer } from "./destination.ts";
 import { GraphError, graphFor as defaultGraphFor, GraphTokens, type DriveFolder, type MicrosoftGraph } from "./graph.ts";
@@ -274,8 +274,18 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
         if (!paths.success) throw new SettingsError("Left-out paths are folders or files in the repo, like templates or README.md.");
         next.ignore = normalizeIgnore(paths.data);
       }
+      if (body.notes !== undefined) {
+        const notes = MeetingNotes.safeParse(body.notes);
+        if (!notes.success) throw new SettingsError("Meeting notes are written by Ambient or by your own pipeline.");
+        next.notes = notes.data;
+      }
       if (!next.microsoft && (next.transcripts.kind === "drive" || next.work.kind === "drive")) {
         throw new SettingsError("A OneDrive or SharePoint folder needs the Microsoft 365 connection. Choose another place first.");
+      }
+      // The team's own pipeline writes meeting notes from the transcripts, so they have to reach it.
+      const transcriptsGo = next.transcripts.kind === "drive" || (next.transcripts.kind === "repo" && !wiki.remote?.readOnly);
+      if (next.notes.by === "own" && !transcriptsGo) {
+        throw new SettingsError("Your own pipeline writes meeting notes from the transcripts, so choose where transcripts go first.");
       }
       const valid = TeamSettings.safeParse(next);
       if (!valid.success) throw new SettingsError(`Those settings aren't valid (${valid.error.issues[0]?.path.join(".")}).`);

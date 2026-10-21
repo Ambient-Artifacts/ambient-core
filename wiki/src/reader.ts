@@ -25,6 +25,8 @@ export interface WikiReader {
   links?(): Promise<{ src: string; dst: string }[]>;
   /** People, orgs, projects and topics with their names (title and aliases). */
   entityNames?(): Promise<EntityNames[]>;
+  /** The team's page for one recording (WikiStore.findByRecording). */
+  byRecording?(id: string): Promise<Page | undefined>;
 }
 
 export class LocalReader implements WikiReader {
@@ -61,6 +63,9 @@ export class LocalReader implements WikiReader {
   }
   async entityNames() {
     return this.store.entityNames();
+  }
+  async byRecording(id: string) {
+    return this.store.findByRecording(id);
   }
   async links() {
     const seen = new Set<string>();
@@ -114,6 +119,7 @@ export const QueryRequest = z.discriminatedUnion("op", [
   z.object({ op: z.literal("transcript"), ref }),
   z.object({ op: z.literal("links") }),
   z.object({ op: z.literal("entityNames") }),
+  z.object({ op: z.literal("recording"), id: z.string().regex(/^[0-9A-Za-z_-]{10,64}$/) }),
 ]);
 export type QueryRequest = z.infer<typeof QueryRequest>;
 
@@ -146,6 +152,8 @@ export async function dispatchQuery(reader: WikiReader, req: QueryRequest): Prom
       return reader.links ? reader.links() : [];
     case "entityNames":
       return reader.entityNames ? reader.entityNames() : [];
+    case "recording":
+      return reader.byRecording ? ((await reader.byRecording(req.id)) ?? null) : null;
   }
 }
 
@@ -190,5 +198,8 @@ export class RemoteReader implements WikiReader {
   }
   async entityNames() {
     return (await this.send({ op: "entityNames" })) as EntityNames[];
+  }
+  async byRecording(id: string) {
+    return ((await this.send({ op: "recording", id })) ?? undefined) as Page | undefined;
   }
 }

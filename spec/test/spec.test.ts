@@ -275,7 +275,7 @@ describe("destination files", () => {
       body: "# Pricing\n\nDid it.\n",
     });
 
-    expect(TeamSettings.parse({})).toEqual({ transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [] });
+    expect(TeamSettings.parse({})).toEqual({ transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [], notes: { by: "ambient" } });
     expect(TeamSettings.safeParse({ transcripts: { kind: "repo", folder: "../etc" } }).success).toBe(false);
     expect(TeamSettings.safeParse({ work: { kind: "repo" } }).success).toBe(false);
     // Folders and files of the team's repo that stay out of the brain: paths in the repo, nothing else.

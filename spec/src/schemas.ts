@@ -206,6 +206,15 @@ export const IgnorePaths = z
   .max(50);
 
 /**
+ * Who writes a team's meeting notes. "ambient": the device that recorded writes the note, and
+ * it's the team's note. "own": the team's own pipeline writes it from the transcript it's sent
+ * (a recording then brings no note of Ambient's, only its transcript); the page it writes names
+ * the recording in its front matter (`recording_id`), so the app shows it on the recording.
+ */
+export const MeetingNotes = z.object({ by: z.enum(["ambient", "own"]) });
+export type MeetingNotes = z.infer<typeof MeetingNotes>;
+
+/**
  * Per-team settings, kept on the team server (0600, the secret sealed). Who maintains the wiki
  * isn't one of them: a repo connected read-only means another tool does.
  */
@@ -214,6 +223,7 @@ export const TeamSettings = z.object({
   work: WorkDestination.default({ kind: "none" }),
   microsoft: MicrosoftConnection.nullable().default(null),
   ignore: IgnorePaths.default([]),
+  notes: MeetingNotes.default({ by: "ambient" }),
 });
 export type TeamSettings = z.infer<typeof TeamSettings>;
 
