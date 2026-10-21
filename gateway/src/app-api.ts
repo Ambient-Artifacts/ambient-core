@@ -23,6 +23,7 @@ import type { RoutineService } from "./routines/service.ts";
 import type { SessionService } from "./sessions/service.ts";
 import type { EventHub, Revisions } from "./revisions.ts";
 import { TeamServerError, type TeamLink } from "./teams.ts";
+import { SettingsService } from "./team-admin.ts";
 import type { CodeHasher } from "./auth/codes.ts";
 import type { MicrosoftConnectFlow } from "./microsoft-connect.ts";
 import type { SignInNonces } from "./auth/signin-nonce.ts";
@@ -85,6 +86,7 @@ export const MAX_STREAMS = 8;
 
 export function appApiRouter(d: AppApiDeps): Router {
   const r = express.Router();
+  const settings = new SettingsService(d);
   // Sync batches may carry transcripts; the app splits batches well below this. Routes put `auth`
   // before `json`, so nobody can make the gateway inflate and buffer a body without signing in,
   // and an account has a few bodies in the works at a time (its devices), not hundreds at 8 MB.
@@ -259,9 +261,7 @@ export function appApiRouter(d: AppApiDeps): Router {
       res.status(400).json({ error: "bad_request" });
       return;
     }
-    await d.control.m(api.users.setPrefs, { uid: uidOf(res) as never, consolidate, digest });
-    const record = await d.control.q(api.users.get, { uid: uidOf(res) });
-    res.json({ prefs: { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true } });
+    res.json({ prefs: await settings.prefs(uidOf(res), { consolidate, digest }) });
   });
 
   // ---- before a meeting, and what's waiting on you (briefs.ts) ----
@@ -779,91 +779,23 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.status(204).end();
   });
 
-  // A team wiki's own repo: any member sees the status; owners and admins connect it.
+  // A team wiki's own repo: any member sees the status; owners and admins connect it (SettingsService).
   const teamRepo = (method: "GET" | "POST" | "PATCH" | "DELETE") => async (req: Request, res: Response) => {
-    const uid = uidOf(res);
-    // Changing the repo: the role as it is now, not as cached a minute ago.
-    const team = method === "GET" ? await d.directory.membership(uid, String(req.params.slug)) : await d.directory.freshMembership(uid, String(req.params.slug));
-    if (!team || team.status !== "active") {
-      res.status(403).json({ error: "not_a_member" });
-      return;
-    }
-    if (method !== "GET" && team.role !== "owner" && team.role !== "admin") {
-      res.status(403).json({ error: "admins_only", message: "Only team owners and admins can change the team repo." });
-      return;
-    }
-    try {
-      // How: Ambient keeps the wiki (two-way), or another tool does and Ambient only reads it
-      // (read-only) or writes into one folder of it (folder).
-      const mode = req.body?.mode === "read-only" ? "read-only" : req.body?.mode === "folder" ? "folder" : "two-way";
-      const folder = typeof req.body?.folder === "string" ? { folder: req.body.folder.slice(0, 100) } : {};
-      const body =
-        method === "POST"
-          ? {
-              url: String(req.body?.url ?? ""),
-              token: String(req.body?.token ?? ""),
-              mode,
-              ...folder,
-              // The person saw what the repo already holds (the 409 has_content answer) and connects it anyway.
-              existing: req.body?.existing === true,
-            }
-          : method === "PATCH"
-            ? { mode: req.body?.mode === "read-only" ? "read-only" : "folder", ...folder }
-            : undefined;
-      const out = await d.teams.repo(team, uid, method, body);
-      if (out.status === 204) res.status(204).end();
-      else res.status(out.status).json(out.json);
-    } catch (err) {
-      if (err instanceof TeamServerError) {
-        res.status(err.status).json({ error: "team_unavailable", message: "The team server didn't answer. Try again in a minute." });
-        return;
-      }
-      throw err;
-    }
+    const out = await settings.teamRepo(uidOf(res), String(req.params.slug), method, (req.body ?? {}) as Record<string, unknown>);
+    if (out.status === 204) res.status(204).end();
+    else res.status(out.status).json(out.json);
   };
   r.get("/v1/app/teams/:slug/repo", auth, teamRepo("GET"));
   r.post("/v1/app/teams/:slug/repo", auth, json, teamRepo("POST"));
   r.patch("/v1/app/teams/:slug/repo", auth, json, teamRepo("PATCH"));
   r.delete("/v1/app/teams/:slug/repo", auth, teamRepo("DELETE"));
 
-  // Team settings (product/sources.md): where transcripts and copies of work logs go, and the
-  // Microsoft 365 connection. Members see them (never the secret); owners and admins change them.
+  // Team settings (product/sources.md): where transcripts and copies of work logs go, the
+  // Microsoft 365 connection and who writes meeting notes. Members see them (never the secret);
+  // owners and admins change them (SettingsService, which AI apps use too).
   const teamSettings = (method: "GET" | "PUT") => async (req: Request, res: Response) => {
-    const uid = uidOf(res);
-    const team = method === "GET" ? await d.directory.membership(uid, String(req.params.slug)) : await d.directory.freshMembership(uid, String(req.params.slug));
-    if (!team || team.status !== "active") {
-      res.status(403).json({ error: "not_a_member" });
-      return;
-    }
-    if (method !== "GET" && team.role !== "owner" && team.role !== "admin") {
-      res.status(403).json({ error: "admins_only", message: "Only team owners and admins can change the team settings." });
-      return;
-    }
-    try {
-      const b = (req.body ?? {}) as Record<string, unknown>;
-      // Ambient's own Microsoft app is connected only through "Connect Microsoft 365", where an
-      // admin of that company approved it: never by naming a tenant here.
-      const m = b.microsoft as { kind?: unknown } | null | undefined;
-      if (method === "PUT" && m && typeof m === "object" && m.kind === "ambient") {
-        res.status(400).json({ error: "settings", message: "Use Connect Microsoft 365 to connect Ambient's Microsoft app." });
-        return;
-      }
-      const body = method === "PUT"
-        ? Object.fromEntries((["transcripts", "work", "microsoft", "ignore", "notes"] as const).filter((k) => k in b).map((k) => [k, b[k]]))
-        : undefined;
-      const out = await d.teams.settings(team, uid, method, body);
-      // Disconnected (or switched to the company's own app): no more tokens for that tenant.
-      if (method === "PUT" && out.status === 200 && "microsoft" in b) {
-        await d.control.m(api.teams.setMicrosoftTenant, { slug: team.slug, tenantId: null });
-      }
-      res.status(out.status).json(out.json);
-    } catch (err) {
-      if (err instanceof TeamServerError) {
-        res.status(err.status).json({ error: "team_unavailable", message: "The team server didn't answer. Try again in a minute." });
-        return;
-      }
-      throw err;
-    }
+    const out = await settings.teamSettings(uidOf(res), String(req.params.slug), method, (req.body ?? {}) as Record<string, unknown>);
+    res.status(out.status).json(out.json);
   };
   // "Connect Microsoft 365": the address the app opens in a browser sheet, for an owner or admin.
   r.post("/v1/app/teams/:slug/microsoft/connect", auth, json, async (req, res) => {

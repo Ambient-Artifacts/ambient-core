@@ -78,9 +78,9 @@ const INTERACTION_MS = 3_600_000;
 
 const SCOPE_TEXT: Record<string, string> = {
   "personal:read": "Read your notes and your brain",
-  "personal:write": "Save notes into your brain, and draft loops that run only once you turn them on in the app",
+  "personal:write": "Save notes into your brain, change your preferences, and draft loops that run only once you turn them on in the app",
   "team:read": "Read the brains of the teams you belong to",
-  "team:write": "Log finished work to your team's brain (after a 30-minute hold you can undo in the app), and draft team loops that run only once someone turns them on in the app",
+  "team:write": "Log finished work to your team's brain (after a 30-minute hold you can undo in the app), draft team loops that run only once someone turns them on in the app, and change a team's settings where you're an owner or admin",
   "team:review": "See and act on team review items",
   offline_access: "Stay connected without signing in again",
   openid: "Know who you are",

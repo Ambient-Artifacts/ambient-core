@@ -44,7 +44,7 @@ Every commit the team server makes for a person (their note, recording or saved 
 
 ## How agents read it
 
-The MCP server is at `/mcp` (personal and team, for one person) and `/t/<team>/mcp` (that team only). Its tools are `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items` and `transcript`, plus `save_note`, `log_work` and the routine tools. Results carry stable ids (`personal:people/anna-mueller`, `team:acme:decisions/0001-…`) and `ambient://` links.
+The MCP server is at `/mcp` (personal and team, for one person) and `/t/<team>/mcp` (that team only). Its tools are `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items` and `transcript`, plus `save_note`, `log_work`, the routine tools and the settings tools (`get_settings`, `change_team_settings`, `change_preferences`). What the app can change, an AI app can change for its user: the app's routes and the tools call the same functions. Results carry stable ids (`personal:people/anna-mueller`, `team:acme:decisions/0001-…`) and `ambient://` links.
 
 ## Identity and tokens
 
