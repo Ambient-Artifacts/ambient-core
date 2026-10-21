@@ -53,9 +53,11 @@ describe("team settings", () => {
     const r = await appCall(s, lena, "POST", "/v1/app/teams/acme/notes", note("01JGWSETTINGS0000000000001"));
     expect([200, 201, 202]).toContain(r.status);
     const file = join(s.dataDir, "wiki", "raw", "2026-10", "2026-10-12-planung-q4-000001.md");
-    for (let i = 0; i < 50 && !existsSync(file); i++) await new Promise((res) => setTimeout(res, 100));
+    // Delivered after the answer: wait for the commit, not just the file (written a moment before it).
+    const committed = () => execFileSync("git", ["-C", join(s.dataDir, "wiki"), "ls-files", "raw"], { encoding: "utf8" });
+    for (let i = 0; i < 50 && !committed().includes("planung-q4-000001.md"); i++) await new Promise((res) => setTimeout(res, 100));
     expect(existsSync(file)).toBe(true);
-    expect(execFileSync("git", ["-C", join(s.dataDir, "wiki"), "ls-files", "raw"], { encoding: "utf8" })).toContain("planung-q4-000001.md");
+    expect(committed()).toContain("planung-q4-000001.md");
   });
 
   it("an admin switches transcripts off and gets a message for bad input; unknown fields are dropped", async () => {
