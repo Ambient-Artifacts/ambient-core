@@ -27,9 +27,10 @@ const missingKey: PageUpdater = {
 
 if (cmd === "consolidate" || cmd === "rewrite") {
   const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir, {}, cfg.teamSecret));
-  // Another tool keeps this wiki (its repo is connected read-only): its upkeep isn't ours to do.
-  if (wiki.remote?.readOnly) {
-    console.log(JSON.stringify({ status: "skipped", reason: "the team's repo is connected read-only; another tool keeps the wiki" }));
+  // Another tool keeps this wiki (its repo is connected read-only, or Ambient writes only one
+  // folder of it): its upkeep isn't ours to do.
+  if (wiki.remote?.readOnly || wiki.fence) {
+    console.log(JSON.stringify({ status: "skipped", reason: "another tool keeps the wiki (the team's repo is connected read-only or with a folder for Ambient)" }));
     process.exit(0);
   }
   const updater = cfg.anthropicApiKey ? new AnthropicUpdater(cfg.anthropicApiKey, cfg.model) : missingKey;

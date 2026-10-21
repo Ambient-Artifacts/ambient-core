@@ -68,7 +68,7 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     res.json({
       ...base,
       pages: wiki.store.size,
-      consolidate: await jobState(wiki, cfg.outDir, !!wiki.remote?.readOnly),
+      consolidate: await jobState(wiki, cfg.outDir, !!wiki.remote?.readOnly || !!wiki.fence),
       repo: wiki.remote?.status() ?? null,
       delivery: (await cfg.deliverer?.status()) ?? null,
       // The wiki's git head: the gateway's health check tells the apps when it moves.
@@ -113,11 +113,12 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     }
     const url = typeof req.body?.url === "string" ? req.body.url : "";
     const token = typeof req.body?.token === "string" ? req.body.token : "";
-    const mode = req.body?.mode === "read-only" ? "read-only" : "two-way";
+    const mode = req.body?.mode === "read-only" ? "read-only" : req.body?.mode === "folder" ? "folder" : "two-way";
     const existing = req.body?.existing === true;
+    const folder = typeof req.body?.folder === "string" ? req.body.folder : undefined;
     try {
       const repo = await wiki.exclusive(async () => {
-        const status = await remote.connect(url, token, { mode, existing });
+        const status = await remote.connect(url, token, { mode, existing, folder });
         wiki.reload();
         return status;
       });
@@ -128,6 +129,30 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
         res.status(409).json({ error: err.code, message: err.message, files: err.files, sample: err.sample });
         return;
       }
+      if (err instanceof GitError) {
+        res.status(400).json({ error: err.code, message: err.message });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  // Between read-only and a folder for Ambient, without connecting again (the token stays).
+  app.patch("/v1/repo", express.json({ limit: "4kb" }), auth("repo"), async (req, res) => {
+    const remote = wiki.remote;
+    const mode = req.body?.mode;
+    if (!remote?.connected || (mode !== "read-only" && mode !== "folder")) {
+      res.status(400).json({ error: "bad_request", message: remote?.connected ? "Choose read-only or a folder for Ambient." : "Connect the repo first." });
+      return;
+    }
+    try {
+      const repo = await wiki.exclusive(async () => {
+        const status = await remote.setMode(mode, req.body?.folder);
+        wiki.reload();
+        return status;
+      });
+      res.json({ repo });
+    } catch (err) {
       if (err instanceof GitError) {
         res.status(400).json({ error: err.code, message: err.message });
         return;
@@ -212,7 +237,9 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     return {
       settings: store.public(readOnly),
       delivery: (await cfg.deliverer?.status()) ?? null,
-      repo_mode: wiki.remote?.connected ? (readOnly ? "read-only" : "two-way") : null,
+      repo_mode: wiki.remote?.connected ? wiki.remote.mode : null,
+      /** Mode "folder": where Ambient writes in the team's repo. */
+      repo_folder: wiki.fence,
     };
   };
 
