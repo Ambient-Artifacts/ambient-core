@@ -121,6 +121,10 @@ describe("team repo", () => {
     expect(existsSync(join(check, "README.md"))).toBe(true);
     expect(existsSync(join(check, "index.md"))).toBe(true);
 
+    // Switching to another tool keeping it (read-only, or a folder for Ambient) is for repos
+    // connected that way; a wiki Ambient keeps is connected again for that.
+    expect(await appCall(s, lena, "PATCH", "/v1/app/teams/acme/repo", { mode: "folder", folder: "ambient" })).toMatchObject({ status: 400, json: { error: "bad_url" } });
+
     expect((await appCall(s, lena, "DELETE", "/v1/app/teams/acme/repo")).status).toBe(204);
     expect((await appCall(s, lena, "GET", "/v1/app/teams/acme/repo")).json.repo).toBeNull();
   });

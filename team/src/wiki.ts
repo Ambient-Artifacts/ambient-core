@@ -20,6 +20,14 @@ export class ReadOnlyWiki extends Error {
   }
 }
 
+/** A write outside the one folder Ambient may write in a repo another tool keeps (mode "folder"). */
+export class FencedWrite extends ReadOnlyWiki {
+  constructor(readonly fence: string, readonly path: string) {
+    super();
+    this.message = `Another tool keeps this team's brain; Ambient writes only into ${fence}/ there, not ${path}.`;
+  }
+}
+
 export class TeamWiki {
   readonly repo: Repo;
   store: WikiStore;
@@ -68,9 +76,9 @@ export class TeamWiki {
       wiki.remote = remote;
     }
     wiki.knownHead = await wiki.repo.head();
-    // Repos from before index pages existed (or edited by hand) get them now; a read-only
-    // wiki is the repo's, as it is.
-    if (!remote?.readOnly) {
+    // Repos from before index pages existed (or edited by hand) get them now; a wiki another
+    // tool keeps (read-only, or Ambient writing into one folder) is the repo's, as it is.
+    if (!remote?.readOnly && !remote?.fence) {
       await wiki.write(async () => ({ message: "index: rebuild", result: {} }));
       await wiki.trackRaw();
     }
@@ -119,6 +127,17 @@ export class TeamWiki {
     return readFileSync(inside(this.dir, path), "utf8");
   }
 
+  /** The one folder Ambient may write when another tool keeps this wiki (mode "folder"), else null. */
+  get fence(): string | null {
+    return this.remote?.fence ?? null;
+  }
+
+  /** Where a file Ambient writes goes: inside the fence when there is one ("notes/…" → "ambient/notes/…"). */
+  place(path: string): string {
+    const fence = this.fence;
+    return fence ? `${fence}/${path}` : path;
+  }
+
   /** Serialize writers: each callback runs alone and its files land in one commit. */
   write<T>(
     fn: (put: Put, remove: (path: string) => Promise<void>) => Promise<{ message: string; result: T; author?: Author }>,
@@ -128,7 +147,14 @@ export class TeamWiki {
       // Start from the repo's latest state, so edits made there aren't overwritten.
       if (this.remote?.connected && (await this.remote.pull())) this.reload();
       const touched: string[] = [];
+      // Another tool keeps this wiki and Ambient writes one folder of it: anything else is refused
+      // before a byte is written, whoever asks.
+      const fence = this.fence;
+      const fenced = (path: string) => {
+        if (fence && !path.startsWith(`${fence}/`)) throw new FencedWrite(fence, path);
+      };
       const put: Put = async (path, text, opts = {}) => {
+        fenced(path);
         const file = inside(this.dir, path);
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, text);
@@ -137,13 +163,17 @@ export class TeamWiki {
         touched.push(path);
       };
       const remove = async (path: string) => {
+        fenced(path);
         await rm(inside(this.dir, path), { force: true });
         this.store.remove(path);
         touched.push(path);
       };
       const { message, result, author } = await fn(put, remove);
-      if (touched.length) touched.push(await this.appendLog(message));
-      touched.push(...(await this.writeIndexes()));
+      // log.md and the folder indexes are the wiki's own: not Ambient's to write when it has one folder.
+      if (!fence) {
+        if (touched.length) touched.push(await this.appendLog(message));
+        touched.push(...(await this.writeIndexes()));
+      }
       const commit = touched.length ? await this.repo.commit(touched, message, author) : null;
       if (commit) {
         this.knownHead = commit;

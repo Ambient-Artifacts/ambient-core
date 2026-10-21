@@ -5,6 +5,10 @@
 //              every commit.
 //   read-only  another tool keeps the wiki (a company's own pipeline, say): the team server
 //              follows the repo exactly (fetch, reset) and never writes, commits or pushes.
+//   folder     another tool keeps the wiki, and Ambient writes into one folder of it only (its
+//              notes, work sessions and transcripts, each commit by the person they're from), for
+//              that tool to file. Like GBrain's slug-bound clients: the fence is enforced here,
+//              in TeamWiki.write, not left to the writer.
 // A repo with files of its own is connected only once someone has seen what's in it
 // (`existing`). Then, two-way, Ambient never overwrites the repo's own AGENTS.md or index.md
 // (`keep`). The token lives only on this server, in a file only the service user can read, and
@@ -14,7 +18,22 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { checkRepoUrl, git, GitError, HasContent, remoteInfo, type GitOptions, type RemoteRepo } from "@brain/wiki";
 import { sealer, type Sealer } from "./seal.ts";
 
-export type RepoMode = "two-way" | "read-only";
+export type RepoMode = "two-way" | "read-only" | "folder";
+
+/** Where Ambient writes in a repo connected with mode "folder", unless the admin names another. */
+export const DEFAULT_FOLDER = "ambient";
+
+/**
+ * A folder for Ambient in someone else's repo: one to three plain segments ("ambient",
+ * "inbox/ambient"), no dots or hidden folders, never a path out of the repo. Null when it isn't one.
+ */
+export function cleanFolder(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const f = raw.trim().replace(/^\/+|\/+$/g, "");
+  const parts = f.split("/");
+  if (!f || f.length > 80 || parts.length > 3) return null;
+  return parts.every((p) => /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/.test(p) && p.trim() === p) ? f : null;
+}
 
 interface RemoteConfig {
   url: string;
@@ -26,6 +45,8 @@ interface RemoteConfig {
   lastError: string | null;
   /** Absent: two-way (connected before there was a choice). */
   mode?: RepoMode;
+  /** Mode "folder": where Ambient writes. */
+  folder?: string;
   /** Files the repo had of its own when it was connected, which Ambient never writes. */
   keep?: string[];
 }
@@ -84,6 +105,15 @@ export class TeamRemote {
     return this.config?.mode === "read-only";
   }
 
+  get mode(): RepoMode | null {
+    return this.config ? (this.config.mode ?? "two-way") : null;
+  }
+
+  /** Mode "folder": the one folder Ambient may write (TeamWiki.write enforces it). */
+  get fence(): string | null {
+    return this.config?.mode === "folder" ? (this.config.folder ?? DEFAULT_FOLDER) : null;
+  }
+
   /** Paths Ambient doesn't write in this wiki (the repo's own AGENTS.md or index.md). */
   get keep(): string[] {
     return this.config?.keep ?? [];
@@ -123,13 +153,17 @@ export class TeamRemote {
    * a file, and its own AGENTS.md and index.md are never written after). Read-only, the wiki
    * becomes the repo's content, and only for a wiki that has no notes yet: they'd be lost.
    */
-  async connect(rawUrl: string, token: string, opts: { mode?: RepoMode; existing?: boolean } = {}): Promise<RemoteStatus> {
+  async connect(rawUrl: string, token: string, opts: { mode?: RepoMode; existing?: boolean; folder?: string } = {}): Promise<RemoteStatus> {
     const mode = opts.mode ?? "two-way";
+    // Another tool keeps it: the repo's content becomes the wiki, as it is.
+    const adopt = mode !== "two-way";
+    const folder = mode === "folder" ? (opts.folder === undefined ? DEFAULT_FOLDER : cleanFolder(opts.folder)) : undefined;
+    if (folder === null) throw new GitError("The folder for Ambient is a plain path in the repo, like ambient or inbox/ambient.", "bad_url");
     const url = await checkRepoUrl(rawUrl, this.opts);
     if (!token.trim()) throw new GitError("Add an access token for the repo.", "auth");
     const remote: RemoteRepo = { url, token: token.trim() };
     const info = await remoteInfo(remote, this.opts);
-    if (mode === "read-only" && info.empty) throw new GitError("This repo is empty, so there's nothing to read. Connect it as \"Ambient keeps this wiki\" instead.", "bad_url");
+    if (adopt && info.empty) throw new GitError("This repo is empty, so there's nothing to read. Connect it as \"Ambient keeps this wiki\" instead.", "bad_url");
     const g = (args: string[], withAuth = false) => git(args, { cwd: this.wikiDir, ...(withAuth ? { remote } : {}), ...this.opts });
     const forget = () => g(["remote", "remove", "origin"]).catch(() => undefined);
     await forget();
@@ -144,11 +178,11 @@ export class TeamRemote {
           await forget();
           throw HasContent.of(files);
         }
-        if (mode === "read-only") {
+        if (adopt) {
           const notes = (await g(["ls-files", "--", "notes"])).trim();
           if (notes) {
             await forget();
-            throw new GitError("This team's brain already has notes, which a read-only repo would replace. Connect a read-only repo to a new team.", "not_empty");
+            throw new GitError("This team's brain already has notes, which the repo would replace. Connect a repo another tool keeps to a new team.", "not_empty");
           }
         } else {
           keep = ["AGENTS.md", "index.md"].filter((f) => files.includes(f));
@@ -159,7 +193,7 @@ export class TeamRemote {
           });
         }
       }
-      if (mode === "read-only") {
+      if (adopt) {
         // The repo is the wiki: what was here (the new team's empty skeleton) gives way.
         await g(["reset", "-q", "--hard", "FETCH_HEAD"]);
       } else if (shared) {
@@ -171,8 +205,27 @@ export class TeamRemote {
     }
     if (mode === "two-way") await g(["push", "-q", "origin", `HEAD:refs/heads/${info.branch}`], true);
     const now = new Date().toISOString();
-    this.config = { url, token: remote.token, branch: info.branch, status: "ok", lastPushAt: mode === "two-way" ? now : null, lastPullAt: now, lastError: null, mode, keep };
+    this.config = { url, token: remote.token, branch: info.branch, status: "ok", lastPushAt: mode === "two-way" ? now : null, lastPullAt: now, lastError: null, mode, keep, ...(folder ? { folder } : {}) };
     await this.save();
+    return this.status()!;
+  }
+
+  /**
+   * Between the two ways another tool keeps the wiki, without connecting again (the token stays):
+   * read-only, or Ambient writing into `folder`. Ambient's commits are pushed before it stops
+   * writing; from read-only the wiki is already the repo's.
+   */
+  async setMode(mode: "read-only" | "folder", rawFolder?: unknown): Promise<RemoteStatus> {
+    if (!this.config) throw new GitError("Connect the repo first.", "bad_url");
+    if (this.mode === "two-way") throw new GitError("Ambient keeps this wiki. To let another tool keep it, connect the repo again.", "bad_url");
+    const folder = mode === "folder" ? (rawFolder === undefined ? (this.config.folder ?? DEFAULT_FOLDER) : cleanFolder(rawFolder)) : undefined;
+    if (folder === null) throw new GitError("The folder for Ambient is a plain path in the repo, like ambient or inbox/ambient.", "bad_url");
+    if (mode === "read-only") await this.push();
+    this.config.mode = mode;
+    // Kept while read-only, so switching back needs no folder again.
+    if (folder) this.config.folder = folder;
+    await this.save();
+    await this.pull();
     return this.status()!;
   }
 

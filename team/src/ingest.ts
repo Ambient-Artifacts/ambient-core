@@ -154,7 +154,7 @@ export async function ingestNote(
   const ownNotes = settings.notes.by === "own" && note.kind !== "session";
   if (opts.readOnly || ownNotes) {
     if (!files.length) throw new IngestError(409, opts.readOnly ? "read_only" : "no_transcript_destination");
-    const where = (f: DestinationFile) => (f.kind === "transcript" && settings.transcripts.kind === "repo" ? `${settings.transcripts.folder}/${f.file}` : `drive:${f.file}`);
+    const where = (f: DestinationFile) => (f.kind === "transcript" && settings.transcripts.kind === "repo" ? wiki.place(`${settings.transcripts.folder}/${f.file}`) : `drive:${f.file}`);
     if ((await Promise.all(files.map((f) => opts.outbox!.seen(note.note_id, f.kind)))).every(Boolean)) {
       return { status: "duplicate", path: where(files[0]!) };
     }
@@ -175,7 +175,7 @@ export async function ingestNote(
   // note is queued again into the same file.
   for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f, ...by });
   const transcript = files.find((f) => f.kind === "transcript");
-  const rawPath = transcript && settings.transcripts.kind === "repo" ? `${settings.transcripts.folder}/${transcript.file}` : undefined;
+  const rawPath = transcript && settings.transcripts.kind === "repo" ? wiki.place(`${settings.transcripts.folder}/${transcript.file}`) : undefined;
 
   const fm = note.entry_page.frontmatter;
   const title = str(fm.title, 60) || "Untitled note";
@@ -220,7 +220,7 @@ export async function ingestNote(
   // Replaced at its old address, so links to it stay. A new note whose address is already
   // another note's (same day, title and last six characters of the id, by chance or made so by a
   // member) gets its whole id in the name instead: it must never overwrite someone else's note.
-  let path = existing?.path ?? notePath(note, title);
+  let path = existing?.path ?? wiki.place(notePath(note, title));
   const taken = wiki.store.getByRef(path.replace(/\.md$/, ""));
   if (!existing && taken && taken.frontmatter.id !== note.note_id) {
     path = path.replace(/-[0-9a-z_-]{6}\.md$/, `-${note.note_id.toLowerCase()}.md`);

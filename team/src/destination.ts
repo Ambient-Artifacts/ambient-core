@@ -110,7 +110,7 @@ export class RepoDestination implements Destination {
 
   async write(item: OutboxItem): Promise<void> {
     await this.wiki.write(async (put) => {
-      await put(`${this.folder}/${item.file}`, item.text, { index: false });
+      await put(this.wiki.place(`${this.folder}/${item.file}`), item.text, { index: false });
       const by = item.by ? ` by ${item.by.name}` : "";
       return { message: `transcript: ${item.title} (${item.note_id.slice(-6).toLowerCase()})${by}`, result: {}, author: item.by };
     });

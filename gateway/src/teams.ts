@@ -149,7 +149,7 @@ export class TeamLink {
   }
 
   /** The team repo endpoints, passed through with their status (400s carry a message for the user). */
-  repo(team: Team, uid: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<{ status: number; json: unknown }> {
+  repo(team: Team, uid: string, method: "GET" | "POST" | "PATCH" | "DELETE", body?: unknown): Promise<{ status: number; json: unknown }> {
     return this.passThrough(team, uid, "repo", "/v1/repo", method, body, 120_000);
   }
 

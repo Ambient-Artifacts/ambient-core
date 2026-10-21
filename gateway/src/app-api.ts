@@ -780,7 +780,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   });
 
   // A team wiki's own repo: any member sees the status; owners and admins connect it.
-  const teamRepo = (method: "GET" | "POST" | "DELETE") => async (req: Request, res: Response) => {
+  const teamRepo = (method: "GET" | "POST" | "PATCH" | "DELETE") => async (req: Request, res: Response) => {
     const uid = uidOf(res);
     // Changing the repo: the role as it is now, not as cached a minute ago.
     const team = method === "GET" ? await d.directory.membership(uid, String(req.params.slug)) : await d.directory.freshMembership(uid, String(req.params.slug));
@@ -793,17 +793,23 @@ export function appApiRouter(d: AppApiDeps): Router {
       return;
     }
     try {
+      // How: Ambient keeps the wiki (two-way), or another tool does and Ambient only reads it
+      // (read-only) or writes into one folder of it (folder).
+      const mode = req.body?.mode === "read-only" ? "read-only" : req.body?.mode === "folder" ? "folder" : "two-way";
+      const folder = typeof req.body?.folder === "string" ? { folder: req.body.folder.slice(0, 100) } : {};
       const body =
         method === "POST"
           ? {
               url: String(req.body?.url ?? ""),
               token: String(req.body?.token ?? ""),
-              // How: Ambient keeps the wiki (two-way), or another tool does and Ambient only reads.
-              mode: req.body?.mode === "read-only" ? "read-only" : "two-way",
+              mode,
+              ...folder,
               // The person saw what the repo already holds (the 409 has_content answer) and connects it anyway.
               existing: req.body?.existing === true,
             }
-          : undefined;
+          : method === "PATCH"
+            ? { mode: req.body?.mode === "read-only" ? "read-only" : "folder", ...folder }
+            : undefined;
       const out = await d.teams.repo(team, uid, method, body);
       if (out.status === 204) res.status(204).end();
       else res.status(out.status).json(out.json);
@@ -817,6 +823,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   };
   r.get("/v1/app/teams/:slug/repo", auth, teamRepo("GET"));
   r.post("/v1/app/teams/:slug/repo", auth, json, teamRepo("POST"));
+  r.patch("/v1/app/teams/:slug/repo", auth, json, teamRepo("PATCH"));
   r.delete("/v1/app/teams/:slug/repo", auth, teamRepo("DELETE"));
 
   // Team settings (product/sources.md): where transcripts and copies of work logs go, and the
