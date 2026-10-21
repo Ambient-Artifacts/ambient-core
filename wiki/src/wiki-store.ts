@@ -235,6 +235,20 @@ export class WikiStore {
     return r ? this.toPage(r) : undefined;
   }
 
+  /**
+   * The team's page for one recording: the one a team's own pipeline wrote and named it in
+   * (`recording_id`), else the note Ambient filed under the recording's id. The recording's id is
+   * the `id` of the transcript file the team was sent.
+   */
+  findByRecording(id: string): Page | undefined {
+    const r = (this.db
+      .prepare("SELECT * FROM pages WHERE json_extract(frontmatter_json, '$.recording_id') = ? ORDER BY path LIMIT 1")
+      .get(id) ?? this.db
+      .prepare("SELECT * FROM pages WHERE type = 'note' AND json_extract(frontmatter_json, '$.id') = ? LIMIT 1")
+      .get(id)) as PageRow | undefined;
+    return r ? this.toPage(r) : undefined;
+  }
+
   /** Every page of one type, oldest first by sort date. */
   ofType(type: string): Page[] {
     return (this.db.prepare("SELECT * FROM pages WHERE type = ? ORDER BY sort_date ASC").all(type) as PageRow[]).map((r) =>

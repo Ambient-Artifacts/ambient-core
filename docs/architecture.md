@@ -38,6 +38,9 @@ A wiki is a folder of markdown files with YAML front matter: the same format for
 - **Claude Code** (the plugin) uploads a finished session. The gateway cuts it down to prompts, answers and one line per action, removes secrets in the formats it knows (tokens, keys, credentials in URLs, headers and connection strings, values named secret, token, password or key), keeps only that (encrypted) until Claude has written the note, then drops it. A session is split into working blocks at breaks of an hour or more. The user's folder and repo rules decide which blocks go to a team, after a 30-minute hold in which they can keep a block personal.
 - **Any AI app** can call `save_note` (personal) and `log_work` (a summary of finished work, personal or team).
 - **A connected git repo**: edits made in a user's or team's own repo come back into the wiki.
+- **The team's own pipeline**, when a team chooses that it writes its meeting notes (team settings, `notes: {by: "own"}`): a recording then brings only its transcript, sent to the team's folder, and the device writes no note for it. The pipeline writes the meeting page and puts the transcript's `id` in its front matter as `recording_id`; the app finds that page with the `recording` query and shows it on the recording. Work sessions are filed as usual.
+
+Every commit the team server makes for a person (their note, recording or saved work) has that person as its author and names them in the message (`ingest: Kickoff (a1b2c3) by Lena Vogel`); Ambient's own upkeep commits as Ambient Bot. The name comes from the person's account through the gateway, never from the device.
 
 ## How agents read it
 

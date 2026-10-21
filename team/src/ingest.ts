@@ -16,6 +16,7 @@ import {
 } from "@brain/spec";
 import { EntityIndex } from "@brain/wiki";
 import type { OutboxKind, TranscriptOutbox } from "./destination.ts";
+import { personAuthor } from "./repo.ts";
 import type { TeamWiki } from "./wiki.ts";
 
 const REF = /^(people|orgs|projects|topics)\/[a-z0-9][a-z0-9-]{0,79}$/;
@@ -142,18 +143,22 @@ export async function ingestNote(
   const recordedBy = opts.recordedBySlug && REF.test(opts.recordedBySlug) ? opts.recordedBySlug : undefined;
   // The id names the raw transcript's file: never a path (the schema says so too).
   if (!NoteId.safeParse(note.note_id).success) throw new IngestError(422, "invalid note: note_id");
-  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [] };
+  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [], notes: { by: "ambient" } };
   const files = opts.outbox ? destinationFiles(wiki, note, settings) : [];
+  const author = personAuthor(note.recorded_by_name, recordedBy);
+  const by = author ? { by: author } : {};
 
-  if (opts.readOnly) {
-    // Another tool keeps the wiki: Ambient adds no page, and its copy of the transcript would be
-    // out of reach (the MCP finds transcripts through their note), so only the files go out.
-    if (!files.length) throw new IngestError(409, "read_only");
-    const where = (f: DestinationFile) => `drive:${f.file}`;
+  // Another tool keeps the wiki, or the team's own pipeline writes its meeting notes from the
+  // transcripts: Ambient adds no page for this note, and only its files go out. (Read-only, a
+  // transcript kept here would be out of reach: the MCP finds transcripts through their note.)
+  const ownNotes = settings.notes.by === "own" && note.kind !== "session";
+  if (opts.readOnly || ownNotes) {
+    if (!files.length) throw new IngestError(409, opts.readOnly ? "read_only" : "no_transcript_destination");
+    const where = (f: DestinationFile) => (f.kind === "transcript" && settings.transcripts.kind === "repo" ? `${settings.transcripts.folder}/${f.file}` : `drive:${f.file}`);
     if ((await Promise.all(files.map((f) => opts.outbox!.seen(note.note_id, f.kind)))).every(Boolean)) {
       return { status: "duplicate", path: where(files[0]!) };
     }
-    for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f });
+    for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f, ...by });
     return { status: "stored", path: where(files[0]!) };
   }
 
@@ -168,7 +173,7 @@ export async function ingestNote(
 
   // Queued before the page is written: if a later step fails, the phone retries, and the same
   // note is queued again into the same file.
-  for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f });
+  for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f, ...by });
   const transcript = files.find((f) => f.kind === "transcript");
   const rawPath = transcript && settings.transcripts.kind === "repo" ? `${settings.transcripts.folder}/${transcript.file}` : undefined;
 
@@ -242,7 +247,7 @@ export async function ingestNote(
     await put(path, text);
     const id6 = note.note_id.slice(-6).toLowerCase();
     const result: IngestResult = { status: replacing ? "replaced" : "stored", path };
-    return { message: `${replacing ? "summarized again" : "ingest"}: ${title} (${id6})`, result };
+    return { message: `${replacing ? "summarized again" : "ingest"}: ${title} (${id6})${author ? ` by ${author.name}` : ""}`, result, author };
   });
   return out;
 }

@@ -7,6 +7,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/p
 import { join } from "node:path";
 import type { MicrosoftConnection, TeamSettings } from "@brain/spec";
 import { GraphError, graphFor, GraphTokens, MicrosoftGraph, WAITING_FOR_TOKEN } from "./graph.ts";
+import type { Author } from "./repo.ts";
 import type { TeamSettingsStore } from "./settings.ts";
 import type { TeamWiki } from "./wiki.ts";
 
@@ -23,6 +24,8 @@ export interface OutboxItem {
   attempts: number;
   next_at: number;
   last_error?: string;
+  /** Whose recording or work log it is: the commit's author when it goes into the repo. */
+  by?: Author;
 }
 
 /** Waits between attempts: 1 min, 5 min, 30 min, then every 2 hours. */
@@ -38,7 +41,7 @@ export class TranscriptOutbox {
   }
 
   /** Queue (or queue again) a file. The same note always lands in the same file. */
-  async add(item: Pick<OutboxItem, "note_id" | "kind" | "title" | "file" | "text">, now = Date.now()): Promise<void> {
+  async add(item: Pick<OutboxItem, "note_id" | "kind" | "title" | "file" | "text" | "by">, now = Date.now()): Promise<void> {
     await this.put({ ...item, queued_at: new Date(now).toISOString(), attempts: 0, next_at: now });
   }
 
@@ -108,7 +111,8 @@ export class RepoDestination implements Destination {
   async write(item: OutboxItem): Promise<void> {
     await this.wiki.write(async (put) => {
       await put(`${this.folder}/${item.file}`, item.text, { index: false });
-      return { message: `transcript: ${item.title} (${item.note_id.slice(-6).toLowerCase()})`, result: {} };
+      const by = item.by ? ` by ${item.by.name}` : "";
+      return { message: `transcript: ${item.title} (${item.note_id.slice(-6).toLowerCase()})${by}`, result: {}, author: item.by };
     });
   }
 }

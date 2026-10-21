@@ -5,7 +5,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { attention, LocalReader, indexFilesIn, normalizeIgnore, renderIndexFiles, WikiStore } from "@brain/wiki";
 import type { TeamRemote } from "./remote.ts";
-import { Repo } from "./repo.ts";
+import { Repo, type Author } from "./repo.ts";
 
 /** Write a file in the wiki; `index: false` keeps it out of the page index (raw transcripts). */
 export type Put = (path: string, text: string, opts?: { index?: boolean }) => Promise<void>;
@@ -121,7 +121,7 @@ export class TeamWiki {
 
   /** Serialize writers: each callback runs alone and its files land in one commit. */
   write<T>(
-    fn: (put: Put, remove: (path: string) => Promise<void>) => Promise<{ message: string; result: T }>,
+    fn: (put: Put, remove: (path: string) => Promise<void>) => Promise<{ message: string; result: T; author?: Author }>,
   ): Promise<T & { commit: string | null }> {
     if (this.remote?.readOnly) return Promise.reject(new ReadOnlyWiki());
     const next = this.chain.then(async () => {
@@ -141,10 +141,10 @@ export class TeamWiki {
         this.store.remove(path);
         touched.push(path);
       };
-      const { message, result } = await fn(put, remove);
+      const { message, result, author } = await fn(put, remove);
       if (touched.length) touched.push(await this.appendLog(message));
       touched.push(...(await this.writeIndexes()));
-      const commit = touched.length ? await this.repo.commit(touched, message) : null;
+      const commit = touched.length ? await this.repo.commit(touched, message, author) : null;
       if (commit) {
         this.knownHead = commit;
         await this.remote?.push();
