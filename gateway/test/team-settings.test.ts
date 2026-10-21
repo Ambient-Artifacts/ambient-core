@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { appCall, INVITE, signIn, startStack, type Stack } from "./helpers.ts";
+import { appCall, INVITE, mcpClient, signIn, startStack, text, type Stack } from "./helpers.ts";
 
 let s: Stack;
 let lena: string;
@@ -80,5 +80,57 @@ describe("team settings", () => {
     const bad = await appCall(s, lena, "PUT", "/v1/app/teams/acme/settings", { ignore: ["../secrets"] });
     expect(bad).toMatchObject({ status: 400, json: { error: "settings" } });
     expect((await appCall(s, lena, "PUT", "/v1/app/teams/acme/settings", { ignore: [] })).status).toBe(200);
+  });
+});
+
+// Agents first: what the app changes, an AI app can change for its user (product/architecture.md).
+describe("settings over MCP", () => {
+  it("a personal connection reads them and changes the user's preferences, but not a team's (no team:write)", async () => {
+    const pat = String((await appCall(s, lena, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
+    const client = await mcpClient(`${s.origin}/mcp`, pat);
+    const read = text(await client.callTool({ name: "get_settings", arguments: {} }));
+    expect(read).toContain("Your preferences");
+    expect(read).toContain("Acme (team \"acme\"");
+    expect(read).toContain("- Meeting notes written by: Ambient");
+    const off = await client.callTool({ name: "change_preferences", arguments: { morning_digest: false } });
+    expect(text(off)).toContain("What's waiting on you, each morning: off");
+    expect((await appCall(s, lena, "GET", "/v1/app/me")).json.prefs).toMatchObject({ digest: false });
+    const team = await client.callTool({ name: "change_team_settings", arguments: { team: "acme", meeting_notes: "own_pipeline" } });
+    expect(team.isError).toBe(true);
+    expect(text(team)).toContain("no team:write");
+  });
+
+  it("a team connection changes the team's settings, with the app's rules, and not the user's preferences", async () => {
+    const pat = String((await appCall(s, lena, "POST", "/v1/app/pats", { label: "Copilot", team: "acme" })).json.token);
+    const client = await mcpClient(`${s.origin}/t/acme/mcp`, pat);
+    // By name too; meeting notes by the team's own pipeline need transcripts that reach it.
+    await appCall(s, lena, "PUT", "/v1/app/teams/acme/settings", { transcripts: { kind: "repo" } });
+    const own = await client.callTool({ name: "change_team_settings", arguments: { team: "Acme", meeting_notes: "own_pipeline" } });
+    expect(own.isError).toBeFalsy();
+    expect(text(own)).toContain("- Meeting notes written by: the team's own pipeline");
+    expect((await appCall(s, lena, "GET", "/v1/app/teams/acme/settings")).json.settings).toMatchObject({ notes: { by: "own" } });
+    // The server's own rules and sentences come back as they are.
+    const nowhere = await client.callTool({ name: "change_team_settings", arguments: { team: "acme", transcripts: "nowhere" } });
+    expect(nowhere.isError).toBe(true);
+    expect(text(nowhere)).toContain("choose where transcripts go first");
+    expect((await client.callTool({ name: "change_team_settings", arguments: { team: "acme", transcripts: "folder" } })).isError).toBe(true);
+    const noRepo = await client.callTool({ name: "change_team_settings", arguments: { team: "acme", repo_writes: "one_folder" } });
+    expect(noRepo.isError).toBe(true);
+    expect(text(noRepo)).toContain("Connect the repo first");
+    expect((await client.callTool({ name: "change_team_settings", arguments: { team: "acme" } })).isError).toBe(true);
+    await client.callTool({ name: "change_team_settings", arguments: { team: "acme", meeting_notes: "ambient" } });
+    // A team connection has no say over the user's own preferences.
+    expect((await client.callTool({ name: "change_preferences", arguments: { morning_digest: true } })).isError).toBe(true);
+  });
+
+  it("a member who isn't an owner or admin can't change them", async () => {
+    const ben = (await signIn(s, "apple-ben-team-settings-mcp", "Ben Koch")).access_token;
+    await appCall(s, ben, "POST", "/v1/app/teams/join", { code: INVITE });
+    const pat = String((await appCall(s, ben, "POST", "/v1/app/pats", { label: "Copilot", team: "acme" })).json.token);
+    const client = await mcpClient(`${s.origin}/t/acme/mcp`, pat);
+    const r = await client.callTool({ name: "change_team_settings", arguments: { team: "acme", meeting_notes: "own_pipeline" } });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("Only team owners and admins");
+    expect(text(await client.callTool({ name: "get_settings", arguments: {} }))).toContain("you're a member");
   });
 });

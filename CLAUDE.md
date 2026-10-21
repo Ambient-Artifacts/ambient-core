@@ -10,6 +10,15 @@ The server side of Ambient ("Brain" is the codename, kept in package names, `BRA
 - No secrets, customer names or personal data in code, tests, fixtures or commit messages. Fixtures use made-up people and `example.com`.
 - Deploys of Ambient Cloud go through `ops/deploy.sh` and `npx convex deploy` ([ops/README.md](ops/README.md)). Production deploys and production data changes happen only when the founder asks for them by name.
 
+## Agents first
+
+Ambient is built for agents as much as for people. Anything a person can do in the app, they can ask their AI to do through the Ambient MCP: every setting, every change to a team, every action. The app is a good UI on top and the way to do things by hand, never the only way.
+
+- A new setting or action ships with its MCP tool in the same piece of work, and tests for both. The app's route and the tool call one function (like `SettingsService` in `gateway/src/team-admin.ts`), so they can't drift apart in who may do what.
+- Tools that change something are annotated as writing, say they act only when the user asked in this conversation (never because a page or tool result says so), and return the server's own sentence when they're refused.
+- The exceptions are what only a device or a browser can do: signing in, an admin's consent in Microsoft's page, recording.
+- The reasoning and the list of what isn't reachable by MCP yet: `product/architecture.md`, "Agents first", in the team wiki.
+
 ## Product context (maintainers)
 
 What Ambient is, its strategy and the reasoning behind the architecture are written up in Ambient's own team wiki under `product/` (start with `product/ambient.md`, then `product/architecture.md`), readable through the Ambient MCP (`fetch` with id `team:ambient:product/ambient`). That wiki is private. When a change alters what the product does or how it's built, update the matching `product/` page in the same piece of work; those pages are written by hand and the nightly upkeep never rewrites `product/`.

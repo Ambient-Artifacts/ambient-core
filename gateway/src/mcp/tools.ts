@@ -10,7 +10,9 @@ import type { Principal } from "../auth/bearer.ts";
 import type { Team } from "../directory.ts";
 import type { RoutineService } from "../routines/service.ts";
 import type { NoteSpec } from "../sessions/service.ts";
+import type { SettingsService } from "../team-admin.ts";
 import { registerRoutineTools } from "./routine-tools.ts";
+import { registerSettingsTools } from "./settings-tools.ts";
 
 const MAX_TEXT = 25_000;
 
@@ -54,6 +56,8 @@ export interface ToolDeps {
   readers: ReaderSource;
   /** Routines: the user's own and their teams'. */
   routines?: RoutineService;
+  /** Settings: the user's preferences and their teams' settings, as the app changes them. */
+  settings?: SettingsService;
   version: string;
   /** Who the user is and what their wikis hold (context.ts), sent when an app connects. */
   personal?: string | null;
@@ -109,7 +113,7 @@ function interleave<T>(lists: T[][], limit: number): T[] {
   return out;
 }
 
-export function buildMcpServer({ principal, readers, routines, version, personal }: ToolDeps): McpServer {
+export function buildMcpServer({ principal, readers, routines, settings, version, personal }: ToolDeps): McpServer {
   // Claude Code with the Ambient plugin sends whole sessions itself (sessions:write): no log_work there.
   const canLog = Boolean(readers.logWork) && !principal.scopes.has("sessions:write");
   const general = canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS;
@@ -584,6 +588,7 @@ export function buildMcpServer({ principal, readers, routines, version, personal
   );
 
   if (routines && (principal.personal || principal.teams.length > 0)) registerRoutineTools(server, principal, routines);
+  if (settings && (principal.personal || principal.teams.length > 0)) registerSettingsTools(server, principal, settings);
 
   return server;
 }
