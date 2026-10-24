@@ -172,7 +172,7 @@ services:
   dashboard:
     networks: [backend]
     security_opt: ["no-new-privileges:true"]
-    image: ${CONVEX_DASHBOARD_IMAGE:-ghcr.io/convex/convex-dashboard:latest@sha256:f85cf0d0448b9c835ae3df5c7c1c6f0145dd4c8f0f92eb0245daf304efdd9f1a}
+    image: ${CONVEX_DASHBOARD_IMAGE:-ghcr.io/convex/convex-dashboard:latest@sha256:64f69f6f5620c639676b7fe04218693e7d533ed31fcbd3f17e1f9f48461360b4}
     profiles: ["dashboard"]
     restart: unless-stopped
     ports:
