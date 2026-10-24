@@ -52,7 +52,7 @@ services:
   convex:
     networks: [backend]
     security_opt: ["no-new-privileges:true"]
-    image: ${CONVEX_BACKEND_IMAGE:-ghcr.io/convex/convex-backend:latest@sha256:d715e9ec088784407ca4ba2d3db592702cd328d02c76cdca3852c0018f2a76b4}
+    image: ${CONVEX_BACKEND_IMAGE:-ghcr.io/convex/convex-backend:latest@sha256:df3e32d53c4305188f593c770c32640417ab2d5b4ba57013057741e80e52f6dd}
     restart: unless-stopped
     stop_grace_period: 10s
     stop_signal: SIGINT
