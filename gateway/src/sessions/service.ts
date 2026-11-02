@@ -392,7 +392,8 @@ function validIso(s: string | null | undefined): string | null {
   return s && !Number.isNaN(Date.parse(s)) ? new Date(s).toISOString() : null;
 }
 
-function newNoteId(now: number): string {
+/** A note's id: base36 time and random hex (NoteId). Also suggest_correction's. */
+export function newNoteId(now: number): string {
   return `${now.toString(36).toUpperCase()}${randomBytes(5).toString("hex").toUpperCase()}`;
 }
 

@@ -214,6 +214,12 @@ describe("a folder for Ambient in a repo another tool keeps", () => {
     expect(second.path.startsWith("ambient/")).toBe(true);
     expect(commits(theirs.url)).toBe(before + 2);
 
+    // A correction lands in the folder too, for the team's own upkeep, linked to their page.
+    const fix = await ingestNote(wiki, { ...session("01JFENCED00000000000000005"), kind: "correction", entry_page: { frontmatter: { title: "Correction: Lena Vogel", summary: "Lena leads support.", people: ["people/lena-vogel"] }, body_md: "## What is true\nLena leads support." } }, { rawDir: raw, recordedBySlug: "people/lena-vogel" });
+    expect(fix.path).toMatch(/^ambient\/corrections\/2026-10\/2026-10-21-correction-lena-vogel-000005\.md$/);
+    expect(readFileSync(join(dir, fix.path), "utf8")).toContain("- [Lena Vogel](../../../people/lena-vogel.md)");
+    expect(commits(theirs.url)).toBe(before + 3);
+
     // A restart keeps it as it is: no index rebuild into their repo.
     const again = await TeamWiki.open(dir, "team-acme", "Acme", new TeamRemote(join(dir, "..", "remote.json"), dir, opts));
     expect(again.fence).toBe("ambient");

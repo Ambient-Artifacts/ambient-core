@@ -152,6 +152,23 @@ describe("tools", () => {
     await client.close();
   });
 
+  it("a team token sends a correction to the team wiki right away, for whoever keeps the page", async () => {
+    const client = await mcpClient(`${s.origin}/t/acme/mcp`, lenaTeam);
+    const r = await client.callTool({
+      name: "suggest_correction",
+      arguments: { wrong: "Bergmann Logistik is based in Hamburg.", right: "Bergmann Logistik moved to Bremen.", pages: ["team:acme:orgs/bergmann-logistik"], app: "Copilot" },
+    });
+    expect(text(r)).toContain("The page isn't changed yet");
+    const { id, path } = r.structuredContent as { id: string; path: string };
+    expect(path).toMatch(/^corrections\/\d{4}-\d{2}\/\d{4}-\d{2}-\d{2}-correction-bergmann-logistik-[0-9a-z]{6}\.md$/);
+    const page = (await client.callTool({ name: "fetch", arguments: { id } })).structuredContent as { text: string; metadata: { frontmatter: Record<string, unknown> } };
+    expect(page.metadata.frontmatter).toMatchObject({ kind: "correction", orgs: ["orgs/bergmann-logistik"], scope: "team" });
+    expect(page.text).toContain("Suggested by Lena Vogel on");
+    // The org page itself is as it was.
+    expect(text(await client.callTool({ name: "fetch", arguments: { id: "team:acme:orgs/bergmann-logistik" } }))).not.toContain("Bremen");
+    await client.close();
+  });
+
   it("briefs, lists action items and decisions", async () => {
     const client = await mcpClient(`${s.origin}/mcp`, lenaAll);
     const b = text(await client.callTool({ name: "brief", arguments: { about: "Anna", scope: "personal" } }));

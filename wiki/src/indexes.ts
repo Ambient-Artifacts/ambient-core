@@ -69,12 +69,13 @@ const SECTIONS: Record<string, { label: string; about: string }> = {
   decisions: { label: "Decisions", about: "decisions, numbered" },
   notes: { label: "Notes", about: "one page per recorded conversation, newest first" },
   sessions: { label: "Work sessions", about: "one page per stretch of work with an AI agent (Claude Code, Claude, ChatGPT, Copilot), newest first" },
+  corrections: { label: "Corrections", about: "what a team member said the wiki got wrong, for whoever keeps the page, newest first" },
 };
 const SECTION_ORDER = Object.keys(SECTIONS);
 
 const day = (s: string) => s.slice(0, 10);
 const dirOf = (ref: string) => (ref.includes("/") ? ref.slice(0, ref.lastIndexOf("/")) : "");
-const isDated = (folder: string) => ["notes", "sessions"].some((d) => folder === d || folder.startsWith(`${d}/`));
+const isDated = (folder: string) => ["notes", "sessions", "corrections"].some((d) => folder === d || folder.startsWith(`${d}/`));
 
 function entry(p: ListedPage): IndexEntry {
   return { ref: p.ref, type: p.type, title: p.title, summary: p.summary, date: day(p.type === "note" ? p.sortDate : p.updated || p.sortDate) };
@@ -264,7 +265,7 @@ This wiki is written by Ambient from recorded conversations. Read it like this:
 
 1. Start with \`${p}index.md\` (and \`${p}overview.md\` for what's going on now). Every folder has an \`_index.md\` listing its pages with a one-line summary.
 2. ${notes}: one page per recorded conversation (summary, key points, decisions, action items). ${sessions}: one page per stretch of work with an AI agent (what was worked on, decisions, next steps, the repo and commits). Written by Ambient; don't edit.
-3. \`${p}people/\`, \`${p}orgs/\`, \`${p}projects/\`, \`${p}topics/\`: living pages. The current truth is on top; \`## Timeline\` below is a dated, append-only log with a link to the note behind each line.${o.kind === "team" ? "\n4. `decisions/`: numbered decisions; `supersedes` points at the decision a newer one replaces." : ""}
+3. \`${p}people/\`, \`${p}orgs/\`, \`${p}projects/\`, \`${p}topics/\`: living pages. The current truth is on top; \`## Timeline\` below is a dated, append-only log with a link to the note behind each line.${o.kind === "team" ? "\n4. `decisions/`: numbered decisions; `supersedes` points at the decision a newer one replaces.\n5. `corrections/YYYY-MM/`: a team member saying what a page got wrong (what it said, what is true, how they know). Find why (the page misread its source, the source is outdated, it was made up, the wrong person) and fix it at the source, then the page. Don't edit the correction." : ""}
 
 Rules for agents that edit this wiki:
 - Rewrite only the part above \`## Timeline\`. Never edit or delete timeline lines; add new ones at the end.

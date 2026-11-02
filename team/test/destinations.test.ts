@@ -148,6 +148,22 @@ function session(teamId: string, id: string): TeamNoteV1 {
   });
 }
 
+/** A team member's correction (MCP suggest_correction), as the gateway sends it. */
+function correction(teamId: string, id: string): TeamNoteV1 {
+  return note(teamId, id, {
+    kind: "correction",
+    duration_s: 0,
+    transcript: null,
+    meeting: undefined,
+    speakers: undefined,
+    entry_page: {
+      frontmatter: { title: "Correction: Acme kickoff", summary: "Acme starts in December, not November." },
+      body_md: "# Correction: Acme kickoff\n\n## What the wiki says\n> Acme starts in November.\n\n## What is true\nAcme starts in December.\n",
+    },
+    client: { app: "ai:claude", transcriber: "none", compiler: "none" },
+  });
+}
+
 const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
 const connect = { microsoft: { tenant_id: TENANT, client_id: CLIENT, client_secret: SECRET } };
 const meetingsLink = "https://example-my.sharepoint.com/personal/office_example_com/Documents/Company/Unternehmen/Meetings";
@@ -417,6 +433,13 @@ describe("a repo kept by another tool (connected read-only)", () => {
     expect(res).toMatchObject({ status: 201, json: { path: "drive:2026-10/2026-10-12-pricing-page-rewrite-000003.md" } });
     expect((await ro.health()).consolidate?.pendingNotes ?? 0).toBe(0);
   });
+
+  it("refuses a correction: it has no file for the drive folders, and the repo takes no pages", async () => {
+    const before = commits();
+    expect(await ro.call("POST", "/v1/inbox", "inbox", correction("t_ro", "01JDESTRO00000000000000004"))).toMatchObject({ status: 409, json: { error: "read_only" } });
+    expect(await ro.deliverer.outbox.all()).toEqual([]);
+    expect(commits()).toBe(before);
+  });
 });
 
 describe("who changed what", () => {
@@ -479,6 +502,12 @@ describe("meeting notes written by the team's own pipeline", () => {
   it("still files work sessions: the setting is about meetings", async () => {
     expect((await s.call("POST", "/v1/inbox", "inbox", session("t_own", "01JOWNNOTES000000000000002"))).status).toBe(201);
     expect(s.wiki.store.findById("01JOWNNOTES000000000000002")?.type).toBe("note");
+  });
+
+  it("still files corrections: they're for whoever keeps the page, not meeting notes", async () => {
+    const res = await s.call("POST", "/v1/inbox", "inbox", correction("t_own", "01JOWNNOTES000000000000003"), { recorded_by_slug: "people/lena-vogel" });
+    expect(res).toMatchObject({ status: 201, json: { path: "corrections/2026-10/2026-10-12-correction-acme-kickoff-000003.md" } });
+    expect(s.wiki.store.findById("01JOWNNOTES000000000000003")?.frontmatter.kind).toBe("correction");
   });
 
   it("finds the team's page for a recording: the one the pipeline wrote, by recording_id", async () => {
