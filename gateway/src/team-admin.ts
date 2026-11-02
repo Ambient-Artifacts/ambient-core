@@ -73,15 +73,15 @@ export class SettingsService {
     if ("reply" in m) return m.reply;
     const b = body ?? {};
     // How: Ambient keeps the wiki (two-way), or another tool does and Ambient only reads it
-    // (read-only) or writes into one folder of it (folder).
-    const mode = b.mode === "read-only" ? "read-only" : b.mode === "folder" ? "folder" : "two-way";
+    // (read-only) or writes into one folder of it (folder). None yet: the team server asks first.
+    const mode = b.mode === "read-only" || b.mode === "folder" || b.mode === "two-way" ? { mode: b.mode } : {};
     const folder = typeof b.folder === "string" ? { folder: b.folder.slice(0, 100) } : {};
     const payload =
       method === "POST"
         ? {
             url: String(b.url ?? ""),
             token: String(b.token ?? ""),
-            mode,
+            ...mode,
             ...folder,
             // The person saw what the repo already holds (the 409 has_content answer) and connects it anyway.
             existing: b.existing === true,
