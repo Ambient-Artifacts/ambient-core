@@ -143,8 +143,10 @@ export async function checkRepoUrl(raw: string, opts: GitOptions = {}): Promise<
 /** checkRepoUrl, plus the public address git must use for it (none for file://). */
 async function resolveRepoUrl(raw: string, opts: GitOptions = {}): Promise<{ url: string; pin?: string }> {
   let u: URL;
+  // Pasted without a scheme (dev.azure.com/org/project/_git/repo): https is the only one there is.
+  const text = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw.trim()) ? raw.trim() : `https://${raw.trim()}`;
   try {
-    u = new URL(raw.trim());
+    u = new URL(text);
   } catch {
     throw new GitError("That isn't a valid URL.", "bad_url");
   }

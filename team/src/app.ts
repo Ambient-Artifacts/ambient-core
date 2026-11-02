@@ -113,7 +113,8 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     }
     const url = typeof req.body?.url === "string" ? req.body.url : "";
     const token = typeof req.body?.token === "string" ? req.body.token : "";
-    const mode = req.body?.mode === "read-only" ? "read-only" : req.body?.mode === "folder" ? "folder" : "two-way";
+    // No mode: nobody has said who keeps the repo yet (see TeamRemote.connect).
+    const mode = req.body?.mode === "read-only" ? "read-only" : req.body?.mode === "folder" ? "folder" : req.body?.mode === "two-way" ? "two-way" : undefined;
     const existing = req.body?.existing === true;
     const folder = typeof req.body?.folder === "string" ? req.body.folder : undefined;
     try {

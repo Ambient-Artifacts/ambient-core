@@ -65,6 +65,52 @@ describe("a team repo with files of its own", () => {
     expect(commits(theirs.url)).toBe(1);
   });
 
+  it("asks again when connected again, though the repo shares the wiki's history", async () => {
+    // Ambient's wiki went there once; since then another tool keeps it.
+    const theirs = theirRepo({});
+    const { wiki, remote, dir } = await freshWiki();
+    await remote.connect(theirs.url, "t");
+    await remote.disconnect();
+    sh(["-c", "protocol.file.allow=always", "pull", "-q", "origin", "main"], theirs.work);
+    theirs.push({ "clients/acme.md": page("Acme", "client", "A client.") }, "pipeline: filed");
+    const head = sh(["rev-parse", "main"], theirs.url.replace("file://", "")).trim();
+
+    const asked = await remote.connect(theirs.url, "t").catch((e: unknown) => e);
+    expect(asked).toBeInstanceOf(HasContent);
+    expect(remote.connected).toBe(false);
+
+    // Told: another tool keeps it, Ambient writes one folder. Nothing goes there on connecting.
+    const status = await remote.connect(theirs.url, "t", { mode: "folder", existing: true });
+    wiki.reload();
+    expect(status).toMatchObject({ mode: "folder", folder: "ambient", lastPushAt: null });
+    expect(sh(["rev-parse", "main"], theirs.url.replace("file://", "")).trim()).toBe(head);
+    expect(sh(["rev-parse", "HEAD"], dir).trim()).toBe(head);
+    expect(wiki.fence).toBe("ambient");
+  });
+
+  it("two-way, connected again once told: the wiki's own commits go on top of the repo's", async () => {
+    const theirs = theirRepo({});
+    const { wiki, remote } = await freshWiki();
+    await remote.connect(theirs.url, "t");
+    await remote.disconnect();
+    sh(["-c", "protocol.file.allow=always", "pull", "-q", "origin", "main"], theirs.work);
+    theirs.push({ "topics/pricing.md": page("Pricing", "topic", "Prices.") }, "edit in the repo");
+    await wiki.write(async (put) => {
+      await put("topics/onboarding.md", page("Onboarding", "topic", "How people start."));
+      return { message: "test: onboarding", result: {} };
+    });
+    const before = commits(theirs.url);
+
+    await expect(remote.connect(theirs.url, "t")).rejects.toBeInstanceOf(HasContent);
+    expect(await remote.connect(theirs.url, "t", { mode: "two-way", existing: true })).toMatchObject({ mode: "two-way", status: "ok" });
+    const pushed = mkdtempSync(join(tmp, "check-"));
+    sh(["-c", "protocol.file.allow=always", "clone", "-q", theirs.url, pushed]);
+    expect(commits(theirs.url)).toBeGreaterThan(before);
+    expect(sh(["log", "--format=%s"], pushed)).toContain("edit in the repo");
+    expect(existsSync(join(pushed, "topics/onboarding.md"))).toBe(true);
+    expect(existsSync(join(pushed, "topics/pricing.md"))).toBe(true);
+  });
+
   it("read-only: becomes the repo's content, follows it, and never writes, commits or pushes", async () => {
     const theirs = theirRepo({ "AGENTS.md": "# Our rules\n", "index.md": "# Our wiki\n", "clients/acme.md": page("Acme", "client", "A client.") });
     const { wiki, remote, dir } = await freshWiki();
