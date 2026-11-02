@@ -31,7 +31,7 @@ export interface LintSource {
 }
 
 const LIVING_TYPES = ["person", "org", "project", "topic"];
-const PAGE_FOLDERS = new Set(["people", "orgs", "projects", "topics", "notes", "sessions", "decisions"]);
+const PAGE_FOLDERS = new Set(["people", "orgs", "projects", "topics", "notes", "sessions", "corrections", "decisions"]);
 const STALE_DAYS = 120;
 
 const words = (s: string) => foldText(s).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];

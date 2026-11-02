@@ -187,6 +187,29 @@
         "minLength": 1,
         "maxLength": 200
       }
+    },
+    "notes": {
+      "default": {
+        "by": "ambient",
+        "pcc": false
+      },
+      "type": "object",
+      "properties": {
+        "by": {
+          "type": "string",
+          "enum": [
+            "ambient",
+            "own"
+          ]
+        },
+        "pcc": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "by"
+      ]
     }
   }
 }

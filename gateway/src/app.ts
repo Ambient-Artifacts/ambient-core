@@ -100,6 +100,7 @@ export function createApp(deps: AppDeps) {
     runner: runner && { version: runner.version, sha256: runner.sha256, signature: runner.signature },
     notifier,
   });
+  const userName = async (uid: string) => (await directory.user(uid))?.name;
   const readers: ReaderSource = {
     personal: (uid) => personal.reader(uid),
     personalTranscript: (uid, rawPath) => personal.transcript(uid, rawPath),
@@ -108,6 +109,9 @@ export function createApp(deps: AppDeps) {
     },
     team: (team, uid) => (team.serverUrl ? teams.reader(team, uid) : undefined),
     logWork: (uid, spec) => sessions.writeNote(uid, spec),
+    userName,
+    // No hold: the person asked for the correction to go to the team.
+    deliverToTeam: (team, uid, note) => teams.deliver(team, note, uid, team.peopleSlug ?? null),
   };
 
   const app: Express = express();
@@ -126,7 +130,6 @@ export function createApp(deps: AppDeps) {
     next();
   });
 
-  const userName = async (uid: string) => (await directory.user(uid))?.name;
   // Settings an AI app can change for its user, the same service as the app's routes.
   const settings = new SettingsService({ directory, teams, control });
   app.use(mcpRouter({ origin: config.origin, verify, readers, routines, settings, version: VERSION, userName }));
