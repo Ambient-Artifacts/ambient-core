@@ -34,6 +34,11 @@ import { sessionUploadRouter } from "./sessions/route.ts";
 import { SessionService } from "./sessions/service.ts";
 import { MicrosoftConnectFlow, MicrosoftConnector } from "./microsoft-connect.ts";
 import { TeamLink } from "./teams.ts";
+import { correctionNote } from "./mcp/tools.ts";
+import { MsTeamsBot } from "./msteams/bot.ts";
+import { BotClient, InboundVerifier } from "./msteams/botframework.ts";
+import { msteamsRouter } from "./msteams/route.ts";
+import { FileBotStore, type BotStore } from "./msteams/store.ts";
 
 export const VERSION = "0.1.0";
 
@@ -57,6 +62,8 @@ export interface AppDeps {
   /** Tests: how often the polling source asks, and how long an event stream stays open. */
   revisionPollMs?: number;
   streamMaxMs?: number;
+  /** Tests: the Teams bots against a fake Bot Framework, with their state in memory. */
+  msteams?: { fetchImpl?: typeof fetch; verifier?: InboundVerifier; store?: (appId: string) => BotStore; now?: () => Date };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
   microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
@@ -114,6 +121,32 @@ export function createApp(deps: AppDeps) {
     deliverToTeam: (team, uid, note) => teams.deliver(team, note, uid, team.peopleSlug ?? null),
   };
 
+  // Teams' bots in Microsoft Teams: they read the team's wiki as a member and file corrections
+  // as the member who clicked, through the same team link as everything else.
+  const msteamsBots = (config.msteamsBots ?? []).map(
+    (b) =>
+      new MsTeamsBot({
+        config: b,
+        client: new BotClient(b, deps.msteams?.fetchImpl ?? deps.fetchImpl),
+        store: deps.msteams?.store?.(b.appId) ?? new FileBotStore(config.msteamsStateDir ?? "/srv/brain/msteams", b.appId),
+        now: deps.msteams?.now,
+        reader: async () => {
+          const team = await directory.teamBySlug(b.team);
+          return team?.serverUrl ? teams.reader(team, b.readAs) : undefined;
+        },
+        accounts: async () => {
+          const members = (await control.q(api.teams.members, { uid: b.readAs as never, slug: b.team })) ?? [];
+          return Promise.all(members.map(async (m) => ({ uid: String(m.uid), name: m.name, email: (await directory.user(String(m.uid)))?.email ?? null })));
+        },
+        correct: async (c) => {
+          const team = await directory.membership(c.uid, b.team);
+          if (!team?.serverUrl) throw new Error(`${c.name} isn't in the team ${b.team}, or it has no server`);
+          const note = correctionNote({ team, uid: c.uid, name: c.name, app: "Microsoft Teams", source: "msteams", wrong: c.wrong, right: c.right, howKnown: c.howKnown, refs: c.refs, subject: c.subject, now: deps.msteams?.now?.() ?? new Date() });
+          return teams.deliver(team, note, c.uid, team.peopleSlug ?? null);
+        },
+      }),
+  );
+
   const app: Express = express();
   app.disable("x-powered-by");
   app.set("trust proxy", config.trustProxy ?? "loopback");
@@ -162,6 +195,7 @@ export function createApp(deps: AppDeps) {
       streamMaxMs: deps.streamMaxMs,
     }),
   );
+  app.use(msteamsRouter(msteamsBots, deps.msteams?.verifier ?? new InboundVerifier(deps.fetchImpl)));
   app.use(joinRouter());
   if (microsoftConnect) app.use(microsoftConnect.router());
   // Where people get the code for an AI app: from the app; without Apple, Microsoft or Google sign-in
@@ -187,5 +221,5 @@ export function createApp(deps: AppDeps) {
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });
 
-  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, revisions, events, notifier, teams, microsoftConnect };
+  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
 }

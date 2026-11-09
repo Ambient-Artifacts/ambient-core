@@ -33,6 +33,8 @@ x-gateway-env: &gateway-env
   BRAIN_SESSION_MODEL: ${BRAIN_SESSION_MODEL:-}
   BRAIN_CONSOLIDATE_MODEL: ${BRAIN_CONSOLIDATE_MODEL:-}
   BRAIN_ALERT_WEBHOOK: ${BRAIN_ALERT_WEBHOOK:-}
+  # Optional: a team's bot in Microsoft Teams (docs/configuration.md).
+  BRAIN_MSTEAMS_BOTS: ${BRAIN_MSTEAMS_BOTS:-}
   TZ: ${TZ:-UTC}
 
 x-team-env: &team-env
@@ -97,6 +99,9 @@ services:
       PORT: "8080"
       # Caddy (or your own proxy) on Docker's network: believe its X-Forwarded-For.
       BRAIN_TRUST_PROXY: loopback, uniquelocal
+      BRAIN_MSTEAMS_STATE_DIR: /data/msteams
+    volumes:
+      - gateway-data:/data
     ports:
       # This machine only: for your own reverse proxy, or to try it without a domain.
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
@@ -193,6 +198,7 @@ networks:
 
 volumes:
   convex-data:
+  gateway-data:
   team-data:
   jobs-state:
   caddy-data:

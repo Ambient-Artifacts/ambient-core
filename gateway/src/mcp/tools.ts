@@ -135,7 +135,7 @@ function teamPageRef(id: string, slug: string): string | null {
  * A correction as a team note: an attributed, dated proposal for whoever keeps the pages it
  * names, never an edit of them (the next sync from a source document would undo a hand edit).
  */
-function correctionNote(o: {
+export function correctionNote(o: {
   team: Team;
   uid: string;
   name: string | undefined;

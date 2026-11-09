@@ -10,7 +10,7 @@ const config = loadConfig();
 const convex = new ConvexHttpClient(config.convexUrl);
 // One WebSocket to Convex for the apps' live revisions (Node has WebSocket built in).
 const live = new ConvexClient(config.convexUrl);
-const { app, microsoftConnect } = createApp({
+const { app, microsoftConnect, msteamsBots } = createApp({
   config,
   convex: { query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args) },
   apple: appleVerifier(config.appleAudiences),
@@ -50,3 +50,18 @@ if (microsoftConnect) {
   setTimeout(push, 5_000).unref();
   setInterval(push, TOKEN_PUSH_MS).unref();
 }
+
+// Teams' bots in Microsoft Teams: every ten minutes, tell owners about corrections that wait for
+// them and post the morning report (msteams/bot.ts decides whether now is the time).
+for (const bot of msteamsBots) {
+  const tick = () =>
+    bot
+      .tick()
+      .then((r) => {
+        if (r.told || r.reported) console.log(`[msteams] ${bot.appId}: told ${r.told}${r.reported ? ", morning report sent" : ""}`);
+      })
+      .catch((err) => console.error(`[msteams] ${bot.appId} tick: ${(err as Error).message}`));
+  setTimeout(tick, 30_000).unref();
+  setInterval(tick, 10 * 60_000).unref();
+}
+if (msteamsBots.length) console.log(`[gateway] Microsoft Teams bots: ${msteamsBots.length} (${config.msteamsBots!.map((b) => b.team).join(", ")})`);
