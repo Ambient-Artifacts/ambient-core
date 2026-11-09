@@ -68,6 +68,11 @@ export interface NoteSpec {
   /** Write the note into the personal wiki (false on a team-only connection). */
   personal: boolean;
   team: Team | null;
+  /**
+   * Send the team copy now instead of after the hold (a team-only connection: there is nothing
+   * personal to keep it in). If the team server doesn't take it, it is retried like a held copy.
+   */
+  immediate?: boolean;
 }
 
 export interface SessionDeps {
@@ -235,7 +240,7 @@ export class SessionService {
   }
 
   /** Write (or rewrite) a session's note, and hold a copy for the team when there is one. */
-  async writeNote(uid: string, spec: NoteSpec, now = Date.now()): Promise<{ path: string; noteId: string; share: string | null }> {
+  async writeNote(uid: string, spec: NoteSpec, now = Date.now()): Promise<{ path: string; noteId: string; share: string | null; teamPath?: string }> {
     const existing = await this.d.control.q(api.sessions.noteFor, { uid: uid as never, sessionId: spec.sessionId });
     const noteId = existing?.noteId ?? newNoteId(now);
     const s = spec.summary;
@@ -291,6 +296,7 @@ export class SessionService {
     }
 
     let share: { teamId: never; iv: string; ciphertext: string; dueAt: number } | undefined;
+    let teamPath: string | undefined;
     if (spec.team) {
       const note: TeamNoteV1 = TeamNoteV1.parse({
         schema: "brain.team-note/v1",
@@ -318,8 +324,19 @@ export class SessionService {
         participants_hint: fullNames,
         client: { app: spec.source, transcriber: "none", compiler: "session-summary" },
       });
-      const sealed = await this.d.personal.seal(uid, `share:${spec.sessionId}`, JSON.stringify(note));
-      share = { teamId: spec.team.id as never, iv: sealed.iv, ciphertext: sealed.ciphertext, dueAt: now + (this.d.holdMs ?? SHARE_HOLD_MS) };
+      if (spec.immediate) {
+        try {
+          const out = await this.d.teams.deliver(spec.team, note, uid, spec.team.peopleSlug ?? null);
+          teamPath = out.path;
+        } catch (err) {
+          if (err instanceof TeamServerError && err.status === 409) throw err;
+          // Down for a moment: the worker sends it within a minute or two.
+        }
+      }
+      if (!teamPath) {
+        const sealed = await this.d.personal.seal(uid, `share:${spec.sessionId}`, JSON.stringify(note));
+        share = { teamId: spec.team.id as never, iv: sealed.iv, ciphertext: sealed.ciphertext, dueAt: now + (spec.immediate ? 0 : (this.d.holdMs ?? SHARE_HOLD_MS)) };
+      }
     }
     const saved = await this.d.control.m(api.sessions.saveNote, {
       uid: uid as never,
@@ -332,7 +349,7 @@ export class SessionService {
       share,
       now,
     });
-    return { path, noteId, share: saved.share };
+    return { path, noteId, share: teamPath ? "delivered" : saved.share, ...(teamPath ? { teamPath } : {}) };
   }
 
   /**
