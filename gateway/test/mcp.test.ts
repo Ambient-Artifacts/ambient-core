@@ -145,10 +145,15 @@ describe("tools", () => {
     await client.close();
   });
 
-  it("a team-only token can't save notes", async () => {
+  it("a team-only token saves notes to the team wiki, right away", async () => {
     const client = await mcpClient(`${s.origin}/t/acme/mcp`, lenaTeam);
-    const r = await client.callTool({ name: "save_note", arguments: { title: "x", content: "y" } });
-    expect(r.isError).toBe(true);
+    const r = await client.callTool({ name: "save_note", arguments: { title: "Hosting notes", content: "The website runs behind a CDN.", related: ["team:acme:orgs/bergmann-logistik"] } });
+    expect(r.isError).toBeFalsy();
+    const saved = r.structuredContent as { id: string; path: string; team: string };
+    expect(saved).toMatchObject({ team: "acme", path: expect.stringMatching(/notes\/.*hosting-notes.*\.md$/) });
+    const back = (await client.callTool({ name: "fetch", arguments: { id: saved.id } })).structuredContent as { text: string; metadata: { frontmatter: Record<string, unknown> } };
+    expect(back.text).toContain("The website runs behind a CDN.");
+    expect(back.metadata.frontmatter).toMatchObject({ kind: "memo", orgs: ["orgs/bergmann-logistik"] });
     await client.close();
   });
 
