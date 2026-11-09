@@ -94,11 +94,17 @@ export async function answer(o: {
           content: [{ type: "text", text: err.message }],
           isError: true,
         }));
-        const text = ((out.content ?? []) as { type: string; text?: string }[])
-          .filter((c) => c.type === "text")
-          .map((c) => c.text ?? "")
-          .join("\n")
-          .slice(0, 40_000);
+        // The structured result when the tool gives one: it carries what the text leaves out (a page's
+        // front matter: owner, sources, status), as Claude Code and other MCP clients see it.
+        const structured = (out as { structuredContent?: unknown }).structuredContent;
+        const text = (
+          structured
+            ? JSON.stringify(structured)
+            : ((out.content ?? []) as { type: string; text?: string }[])
+                .filter((c) => c.type === "text")
+                .map((c) => c.text ?? "")
+                .join("\n")
+        ).slice(0, 40_000);
         results.push({ type: "tool_result", tool_use_id: call.id, content: text || "(empty)", ...(out.isError ? { is_error: true } : {}) });
       }
       messages.push({ role: "user", content: results });
