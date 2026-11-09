@@ -220,6 +220,9 @@ describe("the bot", () => {
     expect(first.tools.map((t) => t.name)).toContain("search");
     expect(first.tools.map((t) => t.name)).not.toContain("save_note");
     expect(first.system).toMatch(/answering Anna Müller in Microsoft Teams/);
+    // Claude gets the tool's structured result (front matter and all), not only its text.
+    const toolResult = (anthropic.requests[1]!.messages.at(-1)!.content as { content: string }[])[0]!.content;
+    expect(JSON.parse(toolResult).results[0]).toMatchObject({ id: "team:acme:products/kudo", title: "Kudo" });
 
     // A follow-up has the earlier turn.
     await bot.handle(dm(ANNA, { text: "And who decides?" }));
