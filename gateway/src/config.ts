@@ -70,8 +70,6 @@ export interface GatewayConfig {
   requireSignInNonce?: boolean;
   /** Teams' bots in Microsoft Teams (msteams/), from BRAIN_MSTEAMS_BOTS. None: /teams/messages answers 401. */
   msteamsBots?: MsTeamsBotConfig[];
-  /** Where the bots keep their small state files. */
-  msteamsStateDir?: string;
 }
 
 export async function generateSigningKey(): Promise<JWK> {
@@ -135,7 +133,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     signups: parseSignups(env.BRAIN_SIGNUPS),
     requireSignInNonce: env.BRAIN_SIGNIN_NONCE === "required",
     msteamsBots: parseMsTeamsBots(env.BRAIN_MSTEAMS_BOTS),
-    msteamsStateDir: env.BRAIN_MSTEAMS_STATE_DIR || "/srv/brain/msteams",
     apns:
       env.BRAIN_APNS_KEY_ID && env.BRAIN_APNS_PRIVATE_KEY
         ? {

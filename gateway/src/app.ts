@@ -34,11 +34,11 @@ import { sessionUploadRouter } from "./sessions/route.ts";
 import { SessionService } from "./sessions/service.ts";
 import { MicrosoftConnectFlow, MicrosoftConnector } from "./microsoft-connect.ts";
 import { TeamLink } from "./teams.ts";
-import { correctionNote } from "./mcp/tools.ts";
+import { buildMcpServer, correctionNote } from "./mcp/tools.ts";
+import { TEAM_MCP_SCOPES } from "./mcp/route.ts";
 import { MsTeamsBot } from "./msteams/bot.ts";
 import { BotClient, InboundVerifier } from "./msteams/botframework.ts";
 import { msteamsRouter } from "./msteams/route.ts";
-import { FileBotStore, type BotStore } from "./msteams/store.ts";
 
 export const VERSION = "0.1.0";
 
@@ -63,7 +63,7 @@ export interface AppDeps {
   revisionPollMs?: number;
   streamMaxMs?: number;
   /** Tests: the Teams bots against a fake Bot Framework, with their state in memory. */
-  msteams?: { fetchImpl?: typeof fetch; verifier?: InboundVerifier; store?: (appId: string) => BotStore; now?: () => Date };
+  msteams?: { fetchImpl?: typeof fetch; verifier?: InboundVerifier; apiKey?: string };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
   microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
@@ -121,27 +121,36 @@ export function createApp(deps: AppDeps) {
     deliverToTeam: (team, uid, note) => teams.deliver(team, note, uid, team.peopleSlug ?? null),
   };
 
-  // Teams' bots in Microsoft Teams: they read the team's wiki as a member and file corrections
-  // as the member who clicked, through the same team link as everything else.
+  // Teams' bots in Microsoft Teams: a click is filed as the clicker's own correction, a question is
+  // answered by Claude with the team's MCP server built for the person who asked (team scope, as
+  // /t/<team>/mcp gives it). The morning report and the cards come from the team's own loops.
   const msteamsBots = (config.msteamsBots ?? []).map(
     (b) =>
       new MsTeamsBot({
         config: b,
         client: new BotClient(b, deps.msteams?.fetchImpl ?? deps.fetchImpl),
-        store: deps.msteams?.store?.(b.appId) ?? new FileBotStore(config.msteamsStateDir ?? "/srv/brain/msteams", b.appId),
-        now: deps.msteams?.now,
-        reader: async () => {
-          const team = await directory.teamBySlug(b.team);
-          return team?.serverUrl ? teams.reader(team, b.readAs) : undefined;
-        },
+        apiKey: deps.msteams?.apiKey ?? process.env.ANTHROPIC_API_KEY,
+        fetchImpl: deps.msteams?.fetchImpl ?? deps.fetchImpl,
+        // The team's members with their sign-in email (Convex has no lookup by email; a team is small).
         accounts: async () => {
-          const members = (await control.q(api.teams.members, { uid: b.readAs as never, slug: b.team })) ?? [];
-          return Promise.all(members.map(async (m) => ({ uid: String(m.uid), name: m.name, email: (await directory.user(String(m.uid)))?.email ?? null })));
+          const { users } = await control.q(api.admin.overview, {});
+          const inTeam = await Promise.all(users.map(async (u) => ((await directory.membership(String(u.uid), b.team)) ? u : undefined)));
+          return inTeam.filter((u): u is NonNullable<typeof u> => !!u).map((u) => ({ uid: String(u.uid), name: u.name, email: u.email ?? null }));
+        },
+        reader: async (uid) => {
+          const team = await directory.membership(uid, b.team);
+          return team?.serverUrl ? teams.reader(team, uid) : undefined;
+        },
+        mcp: async (uid) => {
+          const team = await directory.membership(uid, b.team);
+          if (!team) return undefined;
+          const principal = { uid, scopes: new Set(TEAM_MCP_SCOPES), via: "pat" as const, clientId: "msteams", personal: false, teams: [team] };
+          return buildMcpServer({ principal, readers, version: VERSION, personal: null });
         },
         correct: async (c) => {
           const team = await directory.membership(c.uid, b.team);
           if (!team?.serverUrl) throw new Error(`${c.name} isn't in the team ${b.team}, or it has no server`);
-          const note = correctionNote({ team, uid: c.uid, name: c.name, app: "Microsoft Teams", source: "msteams", wrong: c.wrong, right: c.right, howKnown: c.howKnown, refs: c.refs, subject: c.subject, now: deps.msteams?.now?.() ?? new Date() });
+          const note = correctionNote({ team, uid: c.uid, name: c.name, app: "Microsoft Teams", source: "msteams", wrong: c.wrong, right: c.right, howKnown: c.howKnown, refs: c.refs, subject: c.subject, now: new Date() });
           return teams.deliver(team, note, c.uid, team.peopleSlug ?? null);
         },
       }),

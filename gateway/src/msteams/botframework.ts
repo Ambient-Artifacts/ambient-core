@@ -174,6 +174,16 @@ export class BotClient {
     return out.id;
   }
 
+  /** One person in a conversation (a channel or a direct chat), with the email Teams knows. */
+  async member(serviceUrl: string, conversationId: string, userId: string): Promise<Member> {
+    return (await this.call("GET", `${trimSlash(serviceUrl)}/v3/conversations/${encodeURIComponent(conversationId.split(";")[0]!)}/members/${encodeURIComponent(userId)}`)) as Member;
+  }
+
+  /** "…is typing" while an answer is being written. */
+  async typing(serviceUrl: string, conversationId: string): Promise<void> {
+    await this.call("POST", `${trimSlash(serviceUrl)}/v3/conversations/${encodeURIComponent(conversationId)}/activities`, { type: "typing" });
+  }
+
   /** Everyone in the team the bot is installed in. */
   async members(serviceUrl: string, teamId: string): Promise<Member[]> {
     const out: Member[] = [];
