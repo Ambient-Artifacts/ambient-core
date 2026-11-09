@@ -3,6 +3,7 @@ import type { AppleRevokeConfig } from "./auth/apple-revoke.ts";
 import { parseMasterKey, type MasterKey } from "./crypto.ts";
 import { loadMicrosoftConnect, type MicrosoftConnectConfig } from "./microsoft-connect.ts";
 import type { ApnsConfig } from "./push.ts";
+import { parseMsTeamsBots, type MsTeamsBotConfig } from "./msteams/config.ts";
 
 export interface GatewayConfig {
   /** Public origin without trailing slash, e.g. https://mcp.example.com. Also the token issuer. */
@@ -67,6 +68,8 @@ export interface GatewayConfig {
    * the first that does); until then a token without a nonce is still taken.
    */
   requireSignInNonce?: boolean;
+  /** Teams' bots in Microsoft Teams (msteams/), from BRAIN_MSTEAMS_BOTS. None: /teams/messages answers 401. */
+  msteamsBots?: MsTeamsBotConfig[];
 }
 
 export async function generateSigningKey(): Promise<JWK> {
@@ -129,6 +132,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     adminCodes: env.BRAIN_ADMIN_CODES === "true",
     signups: parseSignups(env.BRAIN_SIGNUPS),
     requireSignInNonce: env.BRAIN_SIGNIN_NONCE === "required",
+    msteamsBots: parseMsTeamsBots(env.BRAIN_MSTEAMS_BOTS),
     apns:
       env.BRAIN_APNS_KEY_ID && env.BRAIN_APNS_PRIVATE_KEY
         ? {
