@@ -350,19 +350,47 @@ describe("log_work for AI apps over MCP", () => {
     await client.close();
   });
 
+  it("work shared with the team on request goes there at once, and stays in the personal wiki", async () => {
+    const uid = ((await appCall(s, app, "GET", "/v1/app/me")).json.user as { uid: string }).uid;
+    const team = (await s.directory.teamsOf(uid)).find((t) => t.slug === "acme")!;
+    const out = await s.sessions.writeNote(uid, {
+      sessionId: `mcp-shared-${Date.now()}`,
+      tool: "Claude",
+      source: "ai:claude",
+      summary: { substantial: true, title: "Rollout plan", summary: "Planned the rollout.", workedOn: [], decisions: [], nextSteps: [], openQuestions: [], people: [], projects: [], orgs: [], language: "en" },
+      startedAt: null,
+      endedAt: null,
+      place: { cwd: null, repo: null, files: [] },
+      branch: null,
+      prs: [],
+      commits: [],
+      personal: true,
+      team,
+      immediate: true,
+    });
+    expect(out.share).toBe("delivered");
+    expect(out.teamPath).toMatch(/sessions\/.*rollout-plan/);
+    expect(out.path).toMatch(/^wiki\/sessions\//);
+    const pending = (await appCall(s, app, "GET", "/v1/app/sessions")).json.pending as { title: string }[];
+    expect(pending.filter((p) => p.title === "Rollout plan")).toEqual([]);
+  });
+
   it("the Claude Code plugin's connection doesn't get log_work (its sessions arrive whole)", async () => {
     const client = await mcpClient(`${s.origin}/mcp`, token);
     expect((await client.listTools()).tools.map((t) => t.name)).not.toContain("log_work");
     await client.close();
   });
 
-  it("a team-only connection (Copilot) logs to the team, after the hold", async () => {
+  it("a team-only connection (Copilot) logs to the team right away: there's nothing personal to hold it in", async () => {
     const copilot = String((await appCall(s, app, "POST", "/v1/app/pats", { label: "Copilot", team: "acme" })).json.token);
     const client = await mcpClient(`${s.origin}/t/acme/mcp`, copilot);
     const res = await client.callTool({ name: "log_work", arguments: { title: "Quarterly plan", summary: "Outlined the Q4 plan.", app: "Copilot" } });
-    expect(text(res)).toContain("Acme team wiki in 30 minutes");
-    const pending = (await appCall(s, app, "GET", "/v1/app/sessions")).json.pending as { title: string; path: string | null; team: { slug: string } }[];
-    expect(pending.filter((p) => p.title === "Quarterly plan")).toMatchObject([{ path: null, team: { slug: "acme" } }]);
+    expect(text(res)).toMatch(/^Logged "Quarterly plan" to the Acme team wiki as .*sessions\/.*quarterly-plan.*\.md; it can be found there now/);
+    const id = (res.structuredContent as { id: string }).id;
+    const back = (await client.callTool({ name: "fetch", arguments: { id } })).structuredContent as { title: string };
+    expect(back.title).toBe("Quarterly plan");
+    const pending = (await appCall(s, app, "GET", "/v1/app/sessions")).json.pending as { title: string }[];
+    expect(pending.filter((p) => p.title === "Quarterly plan")).toEqual([]);
     await client.close();
   });
 
