@@ -350,6 +350,31 @@ describe("log_work for AI apps over MCP", () => {
     await client.close();
   });
 
+  it("work shared with the team on request goes there at once, and stays in the personal wiki", async () => {
+    const uid = ((await appCall(s, app, "GET", "/v1/app/me")).json.user as { uid: string }).uid;
+    const team = (await s.directory.teamsOf(uid)).find((t) => t.slug === "acme")!;
+    const out = await s.sessions.writeNote(uid, {
+      sessionId: `mcp-shared-${Date.now()}`,
+      tool: "Claude",
+      source: "ai:claude",
+      summary: { substantial: true, title: "Rollout plan", summary: "Planned the rollout.", workedOn: [], decisions: [], nextSteps: [], openQuestions: [], people: [], projects: [], orgs: [], language: "en" },
+      startedAt: null,
+      endedAt: null,
+      place: { cwd: null, repo: null, files: [] },
+      branch: null,
+      prs: [],
+      commits: [],
+      personal: true,
+      team,
+      immediate: true,
+    });
+    expect(out.share).toBe("delivered");
+    expect(out.teamPath).toMatch(/sessions\/.*rollout-plan/);
+    expect(out.path).toMatch(/^wiki\/sessions\//);
+    const pending = (await appCall(s, app, "GET", "/v1/app/sessions")).json.pending as { title: string }[];
+    expect(pending.filter((p) => p.title === "Rollout plan")).toEqual([]);
+  });
+
   it("the Claude Code plugin's connection doesn't get log_work (its sessions arrive whole)", async () => {
     const client = await mcpClient(`${s.origin}/mcp`, token);
     expect((await client.listTools()).tools.map((t) => t.name)).not.toContain("log_work");

@@ -504,7 +504,7 @@ export function buildMcpServer({ principal, readers, routines, settings, version
           "Record a piece of work you and the user just finished (a decision, a plan, a draft, an analysis, a fix) as a work-session note in their Ambient wiki, so they and their team can find it later. Call it once when the work is done, summarizing in your own words; skip small talk and quick lookups, and don't call it if the user said not to." +
           (teamOnly
             ? ` On this connection it goes straight to the ${teamOnly.name} team wiki.`
-            : " It goes to the user's personal wiki; pass share_with_team only when the user asks to share it."),
+            : " It goes to the user's personal wiki; pass share_with_team only when the user asks to share it, and it goes to that team's wiki at once."),
         inputSchema: {
           title: z.string().min(1).max(60).describe("What was worked on or achieved."),
           summary: z.string().min(1).max(200).describe("One sentence: what was done and how it ended."),
@@ -561,8 +561,9 @@ export function buildMcpServer({ principal, readers, routines, settings, version
           commits: [],
           personal: principal.personal,
           team,
-          // A team-only connection has nothing personal to keep it in: no hold.
-          immediate: !!teamOnly,
+          // The person asked for the team (a team-only connection, or share_with_team): no hold.
+          // The hold is for sessions shared by a folder rule, which nobody decided one by one.
+          immediate: !!team,
         });
         } catch (err) {
           if (err instanceof TeamServerError && err.status === 409) {
@@ -572,10 +573,11 @@ export function buildMcpServer({ principal, readers, routines, settings, version
         }
         if (out.teamPath) {
           const id = `team:${team!.slug}:${out.teamPath.replace(/\.md$/, "")}`;
-          return textResult(`Logged "${a.title}" to the ${team!.name} team wiki as ${out.teamPath}; it can be found there now (fetch ${id}).`, { id, path: out.teamPath, team: team!.slug });
+          const also = principal.personal ? " and to the user's Ambient wiki" : "";
+          return textResult(`Logged "${a.title}" to the ${team!.name} team wiki as ${out.teamPath}${also}; it can be found there now (fetch ${id}).`, { id, path: out.teamPath, personalPath: out.path || null, team: team!.slug });
         }
         const where = principal.personal ? "the user's Ambient wiki" : `Ambient for the ${team!.name} team`;
-        const shared = !team ? "" : teamOnly ? ` The ${team.name} team server didn't answer just now; it is sent again within a few minutes.` : ` It goes to the ${team.name} team wiki in 30 minutes unless the user keeps it personal in the Ambient app.`;
+        const shared = team ? ` The ${team.name} team server didn't answer just now; it is sent again within a few minutes.` : "";
         return textResult(`Logged "${a.title}" to ${where}.${shared}`, { path: out.path || null, team: team?.slug ?? null });
       },
     );
