@@ -183,6 +183,7 @@ export async function startStack(
     teams: stack.teams,
     notifier: stack.notifier,
     sessions: stack.sessions,
+    pats: stack.pats,
     revisions: stack.revisions,
     events: stack.events,
     microsoftConnect: stack.microsoftConnect,

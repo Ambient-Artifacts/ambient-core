@@ -39,7 +39,8 @@ async function connect(p: Principal, fail?: Error) {
   return { client, sent };
 }
 
-const ask = { wrong: "Anna Mueller leads sales.", right: "Anna leads support since October; Petra leads sales.", app: "Claude" };
+const ask = {
+  project: "none", wrong: "Anna Mueller leads sales.", right: "Anna leads support since October; Petra leads sales.", app: "Claude" };
 
 describe("suggest_correction", () => {
   it("is offered only to connections that may write to a team", async () => {
