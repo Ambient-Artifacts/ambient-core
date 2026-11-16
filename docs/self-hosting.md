@@ -304,7 +304,7 @@ Found a vulnerability? See [SECURITY.md](../SECURITY.md).
 | The app says it isn't an Ambient server, or can't reach it | Type the address the way people open it in a browser (`ambient.example.com`); `curl https://ambient.example.com/health` must answer `"service":"brain-gateway"`. |
 | An AI app says the sign-in failed | Codes work once, for 5 minutes, and ten wrong codes from one address lock it for a while. Make a new one with `admin connect-code`. |
 | `admin team create` says there's no free team server | The pool is empty: add a team server ([More teams](#more-teams)). |
-| Team notes don't show up | `log_work` and shared work sessions reach the team wiki after a 30-minute hold. Then check `docker compose logs jobs team`. |
+| Team notes don't show up | Claude Code sessions shared by a folder rule reach the team wiki after a 30-minute hold; `save_note` and `log_work` arrive at once, but stay personal in a private project or when the app didn't say which project. Then check `docker compose logs jobs team`. |
 | Session notes never appear | `ANTHROPIC_API_KEY` set? `docker compose logs jobs \| grep sessions`. The plugin logs to `~/.claude/plugins/data/ambient-ambient/capture.log`. |
 
 Still stuck? Open an issue with the output of `docker compose ps` and the relevant logs. Remove secrets and note text first.
