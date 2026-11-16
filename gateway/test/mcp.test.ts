@@ -233,6 +233,12 @@ describe("scoping and membership", () => {
 });
 
 describe("private projects and sharing a personal note later", () => {
+  // Lena left the team in "scoping and membership": she joins again, with a fresh team token.
+  let teamToken: string;
+  beforeAll(async () => {
+    await appCall(s, lenaApp, "POST", "/v1/app/teams/join", { code: INVITE });
+    teamToken = String((await appCall(s, lenaApp, "POST", "/v1/app/pats", { label: "Copilot again", team: "acme" })).json.token);
+  });
   // A connection like Claude's: the personal wiki and the user's teams, allowed to write to both.
   const claude = async () =>
     String((await s.pats.create({ uid: lenaUid, scopes: ["personal:read", "personal:write", "team:read", "team:write"], resource: { kind: "personal" }, label: "Claude" })).token);
@@ -258,7 +264,7 @@ describe("private projects and sharing a personal note later", () => {
   });
 
   it("a team-only connection refuses a note from a private project too", async () => {
-    const client = await mcpClient(`${s.origin}/t/acme/mcp`, lenaTeam);
+    const client = await mcpClient(`${s.origin}/t/acme/mcp`, teamToken);
     const r = await client.callTool({ name: "save_note", arguments: { title: "Salaries", content: "x", project: "Privat" } });
     expect(r.isError).toBe(true);
     await client.close();
@@ -286,7 +292,7 @@ describe("private projects and sharing a personal note later", () => {
   });
 
   it("isn't offered where nothing personal can be read or nothing can go to a team", async () => {
-    const team = await mcpClient(`${s.origin}/t/acme/mcp`, lenaTeam);
+    const team = await mcpClient(`${s.origin}/t/acme/mcp`, teamToken);
     expect((await team.listTools()).tools.map((t) => t.name)).not.toContain("share_with_team");
     await team.close();
     const readOnlyTeams = await mcpClient(`${s.origin}/mcp`, lenaAll);
