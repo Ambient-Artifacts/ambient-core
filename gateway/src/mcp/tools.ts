@@ -146,6 +146,17 @@ function projectRefusal(project: string | undefined): string | null {
   return null;
 }
 
+/**
+ * The default when no team is named (decided 2026-11-16): on a connection with a personal wiki and a
+ * team it may write to, save_note and log_work go to the team unless the project is private
+ * (privateProject). Without a project they stay personal: the server can't tell.
+ */
+const TEAM_DEFAULT_INSTRUCTIONS = `
+Where writes go: save_note and log_work go to the user's team brain, unless this conversation is in a
+private project (its name contains "privat" or "private"): there they stay in the personal wiki. Always
+pass project: the Claude project's exact name, or "none" outside a project. For reading, choose
+personal, team or both, whatever answers the question.`;
+
 /** "[00:01:05] Lena: text" lines of a stored transcript, as a team note's segments. */
 function transcriptSegments(text: string): { t0: number; t1: number; text: string; speaker?: string }[] {
   const out: { t0: number; t1: number; text: string; speaker?: string }[] = [];
@@ -232,9 +243,32 @@ function interleave<T>(lists: T[][], limit: number): T[] {
 export function buildMcpServer({ principal, readers, routines, settings, version, personal }: ToolDeps): McpServer {
   // Claude Code with the Ambient plugin sends whole sessions itself (sessions:write): no log_work there.
   const canLog = Boolean(readers.logWork) && !principal.scopes.has("sessions:write");
-  const general = canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS;
+  // Teams this connection writes to when no team is named (it also has a personal wiki for private work).
+  const writeTeams = principal.personal && principal.scopes.has("team:write") ? principal.teams : [];
+  const teamDefault = writeTeams.length > 0;
+  const teamList = writeTeams.map((t) => `${t.slug} (${t.name})`).join(", ");
+  const defaultRule = teamDefault
+    ? TEAM_DEFAULT_INSTRUCTIONS + (writeTeams.length > 1 ? ` The user is in more than one team (${teamList}): name the one the work belongs to, and ask if that isn't clear.` : "")
+    : "";
+  const general = (canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS) + (defaultRule ? `\n${defaultRule}` : "");
   const server = new McpServer({ name: "ambient", version }, { instructions: personal ? `${general}\n\n${personal}` : general });
   const warnings: string[] = [];
+
+  /**
+   * Where a personal connection's save_note or log_work goes when no team was named: the team,
+   * unless the project is private or wasn't given. `note` tells the model why it stayed personal.
+   */
+  function byProject(project: string | undefined, slug: string | undefined, teamParam: string): { team: Team | null; note?: string } | { error: string } {
+    if (!teamDefault) return { team: null };
+    if (!project?.trim()) return { team: null, note: ` No project was given, so it stayed personal; pass project (the Claude project's name, or "none") and work outside a private project goes to the team.` };
+    if (privateProject(project)) return { team: null };
+    if (slug) {
+      const team = writeTeams.find((t) => t.slug === slug);
+      return team ? { team } : { error: `The user isn't in a team "${slug}" on this connection. Their teams: ${teamList}.` };
+    }
+    if (writeTeams.length === 1) return { team: writeTeams[0]! };
+    return { error: `The user is in more than one team (${teamList}). Pass ${teamParam} with the one this belongs to (ask the user if it isn't clear).` };
+  }
 
   async function stores(scope: "personal" | "team" | "all" = "all", teamSlug?: string): Promise<ScopedStore[]> {
     const out: ScopedStore[] = [];
@@ -434,30 +468,41 @@ export function buildMcpServer({ principal, readers, routines, settings, version
     {
       title: "Save a note to Ambient",
       description:
-        "Save something into the user's Ambient wiki as a new note (a summary, a decision, research, an answer worth keeping). Only when the user asks to save or remember something. On a personal connection it goes to their personal wiki (it syncs to their phone, and nightly upkeep folds it into the related pages); on a team's connection it goes straight to that team's wiki.",
+        "Save something into the user's Ambient wiki as a new note (a summary, a decision, research, an answer worth keeping). Only when the user asks to save or remember something. " +
+        (!principal.personal
+          ? "On a team's connection it goes straight to that team's wiki."
+          : teamDefault
+            ? `It goes to the team brain${writeTeams.length === 1 ? ` (${writeTeams[0]!.name})` : ""} at once, unless this conversation is in a private project (its name contains "privat" or "private"): then to the personal wiki (it syncs to their phone, and nightly upkeep folds it into the related pages). Always pass project.`
+            : "It goes to their personal wiki (it syncs to their phone, and nightly upkeep folds it into the related pages)."),
       inputSchema: {
         title: z.string().min(1).max(80),
         content: z.string().min(1).max(20_000).describe("The note in markdown."),
         summary: z.string().max(200).optional().describe("One sentence; defaults to the start of the content."),
         related: z.array(z.string().max(300)).max(10).optional().describe("Ids of existing pages it is about, e.g. personal:people/anna-mueller."),
         project: ProjectArg,
+        ...(writeTeams.length > 1 ? { team: z.string().max(80).optional().describe(`The team it belongs to: ${teamList}. Not in a private project.`) } : {}),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ title, content, summary, related, project }) => {
+    async (args) => {
+      const { title, content, summary, related, project, team: teamSlug } = args as { title: string; content: string; summary?: string; related?: string[]; project?: string; team?: string };
       // A team-only connection: the note goes to the team's wiki, at once (there's no personal wiki here).
+      // A personal one: to the team too, unless the project is private or wasn't given (byProject).
       const teamOnly = !principal.personal && principal.teams.length === 1 ? principal.teams[0]! : undefined;
-      if (teamOnly && principal.scopes.has("team:write") && readers.deliverToTeam) {
+      const pick = teamOnly ? { team: teamOnly } : byProject(project, teamSlug, "team");
+      if ("error" in pick) return errorResult(pick.error);
+      const toTeam = pick.team;
+      if (toTeam && principal.scopes.has("team:write") && readers.deliverToTeam) {
         const refusal = projectRefusal(project);
         if (refusal) return errorResult(refusal);
         const now = new Date();
-        const refs = (related ?? []).map((r) => teamPageRef(r, teamOnly.slug)).filter((r): r is string => !!r);
+        const refs = (related ?? []).map((r) => teamPageRef(r, toTeam.slug)).filter((r): r is string => !!r);
         const linked = (folder: string) => refs.filter((r) => r.startsWith(`${folder}/`));
         const name = await readers.userName?.(principal.uid).catch(() => undefined);
         const note = TeamNoteV1.parse({
           schema: "brain.team-note/v1",
           note_id: newNoteId(now.getTime()),
-          team_id: teamOnly.id,
+          team_id: toTeam.id,
           recorded_by: principal.uid,
           ...(name ? { recorded_by_name: name.slice(0, 80) } : {}),
           recorded_at: now.toISOString(),
@@ -481,14 +526,14 @@ export function buildMcpServer({ principal, readers, routines, settings, version
           client: { app: principal.clientId ? `ai:${principal.clientId}` : "ai", transcriber: "none", compiler: "none" },
         });
         try {
-          const out = await readers.deliverToTeam(teamOnly, principal.uid, note);
-          const id = `team:${teamOnly.slug}:${out.path.replace(/\.md$/, "")}`;
-          return textResult(`Saved "${title}" to the ${teamOnly.name} team wiki as ${out.path}; it can be found there now (fetch ${id}).`, { id, path: out.path, team: teamOnly.slug });
+          const out = await readers.deliverToTeam(toTeam, principal.uid, note);
+          const id = `team:${toTeam.slug}:${out.path.replace(/\.md$/, "")}`;
+          return textResult(`Saved "${title}" to the ${toTeam.name} team wiki as ${out.path}; it can be found there now (fetch ${id}).`, { id, path: out.path, team: toTeam.slug });
         } catch (err) {
           if (err instanceof TeamServerError && err.status === 409) {
-            return errorResult(`${teamOnly.name}'s brain is kept by another tool and Ambient may not write into it. An admin can let Ambient write one folder (change_team_settings repo_writes one_folder).`);
+            return errorResult(`${toTeam.name}'s brain is kept by another tool and Ambient may not write into it. An admin can let Ambient write one folder (change_team_settings repo_writes one_folder).`);
           }
-          if (err instanceof TeamServerError) return errorResult(`The ${teamOnly.name} team server didn't take the note (${err.status}). Try again in a few minutes.`);
+          if (err instanceof TeamServerError) return errorResult(`The ${toTeam.name} team server didn't take the note (${err.status}). Try again in a few minutes.`);
           throw err;
         }
       }
@@ -527,7 +572,8 @@ export function buildMcpServer({ principal, readers, routines, settings, version
         body: `\n${content.trim()}\n\n_Saved from an AI app on ${day}._\n`,
       });
       await readers.savePersonal(principal.uid, path, text);
-      return textResult(`Saved "${title}" to the user's Ambient wiki as ${path.replace(/^wiki\//, "")}.`, { id: `personal:${path.slice(5, -3)}`, path });
+      const why = "note" in pick ? (pick.note ?? "") : "";
+      return textResult(`Saved "${title}" to the user's Ambient wiki as ${path.replace(/^wiki\//, "")}.${why}`, { id: `personal:${path.slice(5, -3)}`, path });
     },
   );
 
@@ -542,7 +588,9 @@ export function buildMcpServer({ principal, readers, routines, settings, version
           "Record a piece of work you and the user just finished (a decision, a plan, a draft, an analysis, a fix) as a work-session note in their Ambient wiki, so they and their team can find it later. Call it once when the work is done, summarizing in your own words; skip small talk and quick lookups, and don't call it if the user said not to." +
           (teamOnly
             ? ` On this connection it goes straight to the ${teamOnly.name} team wiki.`
-            : " It goes to the user's personal wiki; pass share_with_team only when the user asks to share it, and it goes to that team's wiki at once."),
+            : teamDefault
+              ? ` It goes to the team brain${writeTeams.length === 1 ? ` (${writeTeams[0]!.name})` : ""} at once, and into the user's own wiki too, unless this conversation is in a private project (its name contains "privat" or "private"): then only to the personal wiki. Always pass project.`
+              : " It goes to the user's personal wiki."),
         inputSchema: {
           title: z.string().min(1).max(60).describe("What was worked on or achieved."),
           summary: z.string().min(1).max(200).describe("One sentence: what was done and how it ended."),
@@ -555,16 +603,37 @@ export function buildMcpServer({ principal, readers, routines, settings, version
           orgs: z.array(z.string().min(1).max(80)).max(5).optional().describe("Companies or organizations it was about: customers, competitors, suppliers, partners. Proper names only."),
           app: z.string().max(40).optional().describe("Your app's name, e.g. Claude, ChatGPT, Copilot."),
           project: ProjectArg,
-          ...(teamOnly ? {} : { share_with_team: z.string().max(80).optional().describe("Team slug. Only when the user asks to share this with their team.") }),
+          ...(teamOnly
+            ? {}
+            : {
+                share_with_team: z
+                  .string()
+                  .max(80)
+                  .optional()
+                  .describe(
+                    !teamDefault
+                      ? "Team slug. Only when the user asks to share this with their team."
+                      : writeTeams.length > 1
+                        ? `The team this work belongs to: ${teamList}. Not in a private project.`
+                        : `Team slug (${writeTeams[0]!.slug}); optional, it goes there anyway outside a private project.`,
+                  ),
+              }),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       },
       async (args) => {
         const a = args as { title: string; summary: string; worked_on?: string[]; decisions?: string[]; next_steps?: string[]; open_questions?: string[]; people?: string[]; projects?: string[]; orgs?: string[]; app?: string; share_with_team?: string; project?: string };
         let team: Team | null = teamOnly ?? null;
+        let stayed = "";
         if (!teamOnly && a.share_with_team) {
           team = principal.teams.find((t) => t.slug === a.share_with_team) ?? null;
           if (!team) return errorResult(`The user isn't in a team "${a.share_with_team}" on this connection.`);
+        } else if (!teamOnly) {
+          // No team named: the team anyway, unless the project is private (or not given).
+          const pick = byProject(a.project, undefined, "share_with_team");
+          if ("error" in pick) return errorResult(pick.error);
+          team = pick.team;
+          stayed = pick.note ?? "";
         }
         if (team && !principal.scopes.has("team:write")) {
           return errorResult("This connection can't send work to the team. Reconnect Ambient in this app and allow logging work to your team.");
@@ -621,7 +690,7 @@ export function buildMcpServer({ principal, readers, routines, settings, version
         }
         const where = principal.personal ? "the user's Ambient wiki" : `Ambient for the ${team!.name} team`;
         const shared = team ? ` The ${team.name} team server didn't answer just now; it is sent again within a few minutes.` : "";
-        return textResult(`Logged "${a.title}" to ${where}.${shared}`, { path: out.path || null, team: team?.slug ?? null });
+        return textResult(`Logged "${a.title}" to ${where}.${shared}${team ? "" : stayed}`, { path: out.path || null, team: team?.slug ?? null });
       },
     );
   }
