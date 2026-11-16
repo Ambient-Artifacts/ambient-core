@@ -186,6 +186,70 @@ describe("tools", () => {
   });
 });
 
+describe("private projects and sharing a personal note later", () => {
+  // Runs before "scoping and membership", which removes Lena from the team.
+  // A connection like Claude's: the personal wiki and the user's teams, allowed to write to both.
+  const claude = async () =>
+    String((await s.pats.create({ uid: lenaUid, scopes: ["personal:read", "personal:write", "team:read", "team:write"], resource: { kind: "personal" }, label: "Claude" })).token);
+  const NOTE = "personal:notes/2026/10/2026-10-01-preisgespraech-mit-anna-1xq7zk";
+
+  it("nothing from a project with privat in its name goes to a team, in any spelling", async () => {
+    const client = await mcpClient(`${s.origin}/mcp`, await claude());
+    for (const project of ["Privat", "HR - Privat", "private: Verrechnung", "PRIVATE notes"]) {
+      const shared = await client.callTool({ name: "share_with_team", arguments: { id: NOTE, team: "acme", project } });
+      expect(shared.isError, project).toBe(true);
+      expect(text(shared)).toContain("is a private project: nothing from it goes to a team");
+      const logged = await client.callTool({ name: "log_work", arguments: { title: "Payroll", summary: "Checked the payroll.", share_with_team: "acme", project } });
+      expect(logged.isError, project).toBe(true);
+      const corrected = await client.callTool({ name: "suggest_correction", arguments: { wrong: "x", right: "y", team: "acme", project } });
+      expect(corrected.isError, project).toBe(true);
+    }
+    // Personal work in a private project is fine.
+    const personal = await client.callTool({ name: "log_work", arguments: { title: "Payroll", summary: "Checked the payroll.", project: "HR - Privat" } });
+    expect(personal.isError).toBeFalsy();
+    // Without saying which project, nothing goes to a team either.
+    expect(text(await client.callTool({ name: "share_with_team", arguments: { id: NOTE, team: "acme" } }))).toContain("Say which Claude project");
+    await client.close();
+  });
+
+  it("a team-only connection refuses a note from a private project too", async () => {
+    const client = await mcpClient(`${s.origin}/t/acme/mcp`, lenaTeam);
+    const r = await client.callTool({ name: "save_note", arguments: { title: "Salaries", content: "x", project: "Privat" } });
+    expect(r.isError).toBe(true);
+    await client.close();
+  });
+
+  it("shares a personal note with the team on request: the summary, at once, attributed", async () => {
+    const client = await mcpClient(`${s.origin}/mcp`, await claude());
+    const r = await client.callTool({ name: "share_with_team", arguments: { id: NOTE, team: "acme", project: "Vertrieb" } });
+    expect(r.isError).toBeFalsy();
+    expect(text(r)).toMatch(/^Shared "Preisgespräch mit Anna" with the Acme team wiki as .*; it can be found there now/);
+    const { id } = r.structuredContent as { id: string };
+    const page = (await client.callTool({ name: "fetch", arguments: { id } })).structuredContent as { text: string; metadata: { frontmatter: Record<string, unknown> } };
+    expect(page.text).toContain("Shared from Lena Vogel's personal wiki on");
+    expect(page.metadata.frontmatter).toMatchObject({ kind: "call", scope: "team" });
+    // The personal note stays where it was.
+    expect((await client.callTool({ name: "fetch", arguments: { id: NOTE } })).isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("shares only notes, and only from the personal wiki", async () => {
+    const client = await mcpClient(`${s.origin}/mcp`, await claude());
+    expect(text(await client.callTool({ name: "share_with_team", arguments: { id: "personal:people/anna-mueller", team: "acme", project: "none" } }))).toContain("Only notes can be shared");
+    expect(text(await client.callTool({ name: "share_with_team", arguments: { id: "team:acme:people/anna-mueller", team: "acme", project: "none" } }))).toContain("Only notes from the personal wiki");
+    await client.close();
+  });
+
+  it("isn't offered where nothing personal can be read or nothing can go to a team", async () => {
+    const team = await mcpClient(`${s.origin}/t/acme/mcp`, lenaTeam);
+    expect((await team.listTools()).tools.map((t) => t.name)).not.toContain("share_with_team");
+    await team.close();
+    const readOnlyTeams = await mcpClient(`${s.origin}/mcp`, lenaAll);
+    expect((await readOnlyTeams.listTools()).tools.map((t) => t.name)).not.toContain("share_with_team");
+    await readOnlyTeams.close();
+  });
+});
+
 describe("scoping and membership", () => {
   it("a team token works only on its team URL and never shows personal pages", async () => {
     const client = await mcpClient(`${s.origin}/t/acme/mcp`, lenaTeam);
@@ -229,75 +293,6 @@ describe("scoping and membership", () => {
       body: rpc("tools/list"),
     });
     expect(res.status).toBe(403);
-  });
-});
-
-describe("private projects and sharing a personal note later", () => {
-  // Lena left the team in "scoping and membership": she joins again, with a fresh team token.
-  let teamToken: string;
-  beforeAll(async () => {
-    await appCall(s, lenaApp, "POST", "/v1/app/teams/join", { code: INVITE });
-    teamToken = String((await appCall(s, lenaApp, "POST", "/v1/app/pats", { label: "Copilot again", team: "acme" })).json.token);
-  });
-  // A connection like Claude's: the personal wiki and the user's teams, allowed to write to both.
-  const claude = async () =>
-    String((await s.pats.create({ uid: lenaUid, scopes: ["personal:read", "personal:write", "team:read", "team:write"], resource: { kind: "personal" }, label: "Claude" })).token);
-  const NOTE = "personal:notes/2026/10/2026-10-01-preisgespraech-mit-anna-1xq7zk";
-
-  it("nothing from a project with privat in its name goes to a team, in any spelling", async () => {
-    const client = await mcpClient(`${s.origin}/mcp`, await claude());
-    for (const project of ["Privat", "HR - Privat", "private: Verrechnung", "PRIVATE notes"]) {
-      const shared = await client.callTool({ name: "share_with_team", arguments: { id: NOTE, team: "acme", project } });
-      expect(shared.isError, project).toBe(true);
-      expect(text(shared)).toContain("is a private project: nothing from it goes to a team");
-      const logged = await client.callTool({ name: "log_work", arguments: { title: "Payroll", summary: "Checked the payroll.", share_with_team: "acme", project } });
-      expect(logged.isError, project).toBe(true);
-      const corrected = await client.callTool({ name: "suggest_correction", arguments: { wrong: "x", right: "y", team: "acme", project } });
-      expect(corrected.isError, project).toBe(true);
-    }
-    // Personal work in a private project is fine.
-    const personal = await client.callTool({ name: "log_work", arguments: { title: "Payroll", summary: "Checked the payroll.", project: "HR - Privat" } });
-    expect(personal.isError).toBeFalsy();
-    // Without saying which project, nothing goes to a team either.
-    expect(text(await client.callTool({ name: "share_with_team", arguments: { id: NOTE, team: "acme" } }))).toContain("Say which Claude project");
-    await client.close();
-  });
-
-  it("a team-only connection refuses a note from a private project too", async () => {
-    const client = await mcpClient(`${s.origin}/t/acme/mcp`, teamToken);
-    const r = await client.callTool({ name: "save_note", arguments: { title: "Salaries", content: "x", project: "Privat" } });
-    expect(r.isError).toBe(true);
-    await client.close();
-  });
-
-  it("shares a personal note with the team on request: the summary, at once, attributed", async () => {
-    const client = await mcpClient(`${s.origin}/mcp`, await claude());
-    const r = await client.callTool({ name: "share_with_team", arguments: { id: NOTE, team: "acme", project: "Vertrieb" } });
-    expect(r.isError).toBeFalsy();
-    expect(text(r)).toMatch(/^Shared "Preisgespräch mit Anna" with the Acme team wiki as .*; it can be found there now/);
-    const { id } = r.structuredContent as { id: string };
-    const page = (await client.callTool({ name: "fetch", arguments: { id } })).structuredContent as { text: string; metadata: { frontmatter: Record<string, unknown> } };
-    expect(page.text).toContain("Shared from Lena Vogel's personal wiki on");
-    expect(page.metadata.frontmatter).toMatchObject({ kind: "call", scope: "team" });
-    // The personal note stays where it was.
-    expect((await client.callTool({ name: "fetch", arguments: { id: NOTE } })).isError).toBeFalsy();
-    await client.close();
-  });
-
-  it("shares only notes, and only from the personal wiki", async () => {
-    const client = await mcpClient(`${s.origin}/mcp`, await claude());
-    expect(text(await client.callTool({ name: "share_with_team", arguments: { id: "personal:people/anna-mueller", team: "acme", project: "none" } }))).toContain("Only notes can be shared");
-    expect(text(await client.callTool({ name: "share_with_team", arguments: { id: "team:acme:people/anna-mueller", team: "acme", project: "none" } }))).toContain("Only notes from the personal wiki");
-    await client.close();
-  });
-
-  it("isn't offered where nothing personal can be read or nothing can go to a team", async () => {
-    const team = await mcpClient(`${s.origin}/t/acme/mcp`, teamToken);
-    expect((await team.listTools()).tools.map((t) => t.name)).not.toContain("share_with_team");
-    await team.close();
-    const readOnlyTeams = await mcpClient(`${s.origin}/mcp`, lenaAll);
-    expect((await readOnlyTeams.listTools()).tools.map((t) => t.name)).not.toContain("share_with_team");
-    await readOnlyTeams.close();
   });
 });
 
