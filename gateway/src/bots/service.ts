@@ -56,6 +56,8 @@ export class BotService {
       routines: RoutineService;
       /** Where bots reach people: the app first (a push), more later. */
       channels: Channel[];
+      /** Starts a bot's run on its computer at once (its long poll) instead of at the next check. */
+      startNow?: (hostId: string, routineId: string) => boolean;
       now?: () => number;
     },
   ) {}
@@ -139,7 +141,9 @@ export class BotService {
       const [m, s] = messages[out.error] ?? ["That didn't work.", 400];
       throw refused(out.error, m, s);
     }
-    return { message: await this.message(owner, out.message as unknown as MessageRow, actor.uid), routine: await this.d.routines.get(actor, id) };
+    const routine = await this.d.routines.get(actor, id);
+    if (routine.computer) this.d.startNow?.(routine.computer.id, id);
+    return { message: await this.message(owner, out.message as unknown as MessageRow, actor.uid), routine };
   }
 
   /** What arrives on a channel for a bot (Ambient's own messages go to AmbientChat). */

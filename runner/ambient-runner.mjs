@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.7.4";
+const VERSION = "0.7.5";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -277,6 +277,12 @@ async function sync() {
   }
   ambientUnit(cfg, out.ambient === true);
   await claudeSync(cfg, state, out.claude ?? null);
+  const model = out.model ?? null;
+  if (JSON.stringify(state.model ?? null) !== JSON.stringify(model)) {
+    state.model = model;
+    log(model ? `Default model: ${model.model}${model.effort ? ` (${model.effort})` : ""}` : "Default model: Claude Code's own");
+    if (existsSync(join(UNIT_DIR, AMBIENT_UNIT))) systemctl("restart", AMBIENT_UNIT);
+  }
   writeState(state);
   if (out.runner?.sha256 && (await selfUpdate(cfg, out.runner)) && out.ambient === true) systemctl("restart", AMBIENT_UNIT);
 }
@@ -375,7 +381,7 @@ async function ambientService() {
     writeFileSync(mcpFile, JSON.stringify({ mcpServers: { ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${p.token}` } } } }), { mode: 0o600 });
     own(mcpFile);
     const args = [
-      "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs,
+      "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", ...withModel(cfg.claudeArgs, readState().model),
       "--mcp-config", mcpFile, "--allowedTools", "mcp__ambient",
       // Secrets go in through the app, never through a chat.
       "--disallowedTools", "mcp__ambient__set_routine_secret",
@@ -470,7 +476,9 @@ async function ambientService() {
       continue;
     }
     // Each person's message is answered in their own session; the next long poll doesn't wait for it.
-    if (job?.uid && job.token) void handle(job);
+    if (job?.kind === "exec") void execJob(cfg, job);
+    else if (job?.kind === "start") startJob(job);
+    else if (job?.uid && job.token) void handle(job);
   }
 }
 
@@ -627,6 +635,59 @@ async function claudeSync(cfg, state, version) {
   if (existsSync(join(UNIT_DIR, AMBIENT_UNIT))) systemctl("restart", AMBIENT_UNIT);
 }
 
+/**
+ * Claude Code's flags with `choice` (a bot's model, or the computer's default) in place of any
+ * --model, --effort or --fallback-model the computer's own arguments have; unchanged without one.
+ */
+function withModel(args, choice) {
+  if (!choice?.model) return args;
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (["--model", "--effort", "--fallback-model"].includes(args[i])) {
+      i++;
+      continue;
+    }
+    if (/^--(model|effort|fallback-model)=/.test(args[i])) continue;
+    out.push(args[i]);
+  }
+  out.push("--model", choice.model);
+  if (choice.effort) out.push("--effort", choice.effort);
+  if (choice.fallback && choice.fallback !== choice.model) out.push("--fallback-model", choice.fallback);
+  return out;
+}
+
+/** A root command Ambient was allowed to run here: bash as root, its output (the end of it) back. */
+async function execJob(cfg, job) {
+  const timeout = Math.min(Math.max(Number(job.timeoutS) || 120, 5), 600) * 1000;
+  log(`Root command (allowed in Ambient): ${String(job.command).replace(/\s+/g, " ").slice(0, 200)}`);
+  const result = await new Promise((resolve) => {
+    const p = spawn(sys("bash"), ["-lc", String(job.command)], { env: { PATH: SYSTEM_PATH.join(":") + ":/usr/local/bin", HOME: "/root", LANG: "C.UTF-8" }, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    const keep = (d) => (output = (output + d).slice(-40_000));
+    p.stdout.on("data", keep);
+    p.stderr.on("data", keep);
+    const timer = setTimeout(() => {
+      output += `\n(stopped after ${timeout / 1000} s)`;
+      p.kill("SIGKILL");
+    }, timeout);
+    p.on("error", (err) => resolve({ code: 127, output: err.message }));
+    p.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? -1, output });
+    });
+  });
+  await call(cfg, "POST", `/v1/host/ambient/${job.id}`, { text: JSON.stringify(result) }).catch((err) => log(`Couldn't report a root command: ${err.message}`));
+}
+
+/** A message reached a bot: start its run now instead of at the next check. */
+function startJob(job) {
+  if (!/^[a-z0-9]{8,64}$/.test(String(job.routineId))) return;
+  const unit = `${PREFIX}${job.routineId}.service`;
+  if (["active", "activating"].includes(systemctl("is-active", unit).stdout.trim())) return;
+  systemctl("start", "--no-block", unit);
+  log(`Started ${unit} (a message came)`);
+}
+
 function systemPrompt(routine, trigger, bot) {
   const how = trigger === "manual" ? 'started with "Run now" in the Ambient app' : "started by its schedule";
   if (bot) {
@@ -634,6 +695,7 @@ function systemPrompt(routine, trigger, bot) {
       `You're "${routine.name}", one of your owner's bots in Ambient, running on ${hostname()}, ${how}.`,
       "Nobody is watching this run. When you need a decision only your owner can make (which of two real options, a missing detail, a go-ahead for something that can't be undone), ask with the ask_owner tool: one short question, with choices when there are a few clear options. Don't ask about what you can sensibly decide yourself.",
       "If ask_owner comes back without an answer, finish the run: say in a sentence or two where you are and what you're waiting for. You'll be started again with the answer, in this same conversation.",
+      "When a run starts with a message from your owner (they wrote to you in your thread), it's a conversation: answer it, or do what it asks, and put your answer in your last message. Don't answer through ask_owner; use it only when you need their decision before you can go on.",
       "Your VERY LAST message becomes what your owner reads in your thread in the Ambient app: a short, useful summary of what you did and anything they need to look at. Nothing after it.",
     ].join(" ");
   }
@@ -913,7 +975,8 @@ async function run(id) {
   }
   const cleanup = () => rmSync(runDir, { recursive: true, force: true });
 
-  const { args, stdin } = adapter.start(cfg, routine, runInfo, bot, resume, mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile));
+  const runCfg = { ...cfg, claudeArgs: withModel(cfg.claudeArgs, bot?.model ?? readState().model) };
+  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, resume, mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile));
   let child;
   let containerName = null;
   if (contained) {

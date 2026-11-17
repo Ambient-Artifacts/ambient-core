@@ -26,6 +26,20 @@ export type BotReport = (typeof BOT_REPORTS)[number];
 export const BOT_STATES = ["asleep", "working", "needs_you", "stuck", "done"] as const;
 export type BotState = (typeof BOT_STATES)[number];
 
+/** A model, its effort and what to fall back to (docs/bots.md); the runner passes them to Claude Code. */
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const ModelChoice = z.object({
+  model: z.string().regex(/^claude-[a-z0-9.-]{2,60}$/),
+  effort: z.enum(EFFORTS).nullable().optional(),
+  fallback: z.string().regex(/^claude-[a-z0-9.-]{2,60}$/).nullable().optional(),
+});
+export type ModelChoice = z.infer<typeof ModelChoice>;
+
+/** As stored: no nulls. */
+export function storedModel(m: ModelChoice): { model: string; effort?: string; fallback?: string } {
+  return { model: m.model, ...(m.effort ? { effort: m.effort } : {}), ...(m.fallback ? { fallback: m.fallback } : {}) };
+}
+
 const SecretNameList = z.array(z.string().regex(/^[A-Z_][A-Z0-9_]{0,63}$/)).max(30);
 
 /** What's stored with a routine that is a bot. `secrets` undefined: all of its owner's (loops from before). */
@@ -35,6 +49,8 @@ export const BotSettings = z.object({
   isolation: z.enum(BOT_ISOLATIONS),
   secrets: SecretNameList.optional(),
   report: z.enum(BOT_REPORTS),
+  /** Absent: the computer's default model. */
+  model: z.object({ model: z.string(), effort: z.string().optional(), fallback: z.string().optional() }).optional(),
 });
 export type BotSettings = z.infer<typeof BotSettings>;
 
@@ -46,6 +62,8 @@ export const BotInput = z.object({
   /** null: all of the owner's secrets. */
   secrets: SecretNameList.nullable().optional(),
   report: z.enum(BOT_REPORTS).optional(),
+  /** null: the computer's default model. */
+  model: ModelChoice.nullable().optional(),
 });
 export type BotInput = z.infer<typeof BotInput>;
 
@@ -55,12 +73,14 @@ export const BOT_DEFAULTS: BotSettings = { face: "classic", runtime: "claude-cod
 export function botSettings(input: BotInput, current?: BotSettings): BotSettings {
   const base = current ?? BOT_DEFAULTS;
   const secrets = input.secrets === null ? undefined : (input.secrets ?? base.secrets);
+  const model = input.model === null ? undefined : input.model ? storedModel(input.model) : base.model;
   return {
     face: input.face ?? base.face,
     runtime: input.runtime ?? base.runtime,
     isolation: input.isolation ?? base.isolation,
     ...(secrets ? { secrets: [...new Set(secrets)].sort() } : {}),
     report: input.report ?? base.report,
+    ...(model ? { model } : {}),
   };
 }
 

@@ -24,7 +24,11 @@ export const botSettings = v.object({
   /** Absent: every secret of its owner's (a loop from before bots). */
   secrets: v.optional(v.array(v.string())),
   report: v.union(v.literal("news"), v.literal("every_run")),
+  /** Absent: the computer's default model. */
+  model: v.optional(v.object({ model: v.string(), effort: v.optional(v.string()), fallback: v.optional(v.string()) })),
 });
+/** A model choice: the model, its effort, and a model to fall back to (docs/bots.md). */
+export const modelChoice = v.object({ model: v.string(), effort: v.optional(v.string()), fallback: v.optional(v.string()) });
 const claudeCredential = v.object({ iv: v.string(), ct: v.string(), by: v.optional(v.string()), at: v.number() });
 export const botMessageKind = v.union(v.literal("result"), v.literal("failure"), v.literal("question"), v.literal("answer"), v.literal("message"));
 
@@ -386,6 +390,12 @@ export default defineSchema({
         key: v.optional(claudeCredential),
       }),
     ),
+    /** The default model for its runs and Ambient there; absent: Claude Code's own. */
+    model: v.optional(modelChoice),
+    /** What Ambient may do there: standard (its tools), admin (root after an approval), full (root). */
+    access: v.optional(v.union(v.literal("standard"), v.literal("admin"), v.literal("full"))),
+    /** Root commands approved with "Always" (exact command lines). */
+    allowed: v.optional(v.array(v.string())),
     createdAt: v.number(),
   })
     .index("by_user", ["userId"])
@@ -479,6 +489,25 @@ export default defineSchema({
     answerId: v.optional(v.id("botMessages")),
     createdAt: v.number(),
   }).index("by_routine", ["routineId", "createdAt"]),
+
+  /**
+   * A root command Ambient asked to run on a computer, waiting for the person who asked (or who
+   * may change the computer) to allow it. The command and why are sealed with the computer's
+   * owner's key.
+   */
+  approvals: defineTable({
+    hostId: v.id("routineHosts"),
+    uid: v.id("users"),
+    iv: v.string(),
+    ct: v.string(),
+    status: v.union(v.literal("pending"), v.literal("approved"), v.literal("denied"), v.literal("expired")),
+    decision: v.optional(v.union(v.literal("once"), v.literal("session"), v.literal("always"), v.literal("deny"))),
+    decidedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+  })
+    .index("by_user", ["uid", "createdAt"])
+    .index("by_host", ["hostId", "createdAt"]),
 
   /** A person's chat with Ambient (the master bot), sealed with their own data key. */
   ambientChat: defineTable({
