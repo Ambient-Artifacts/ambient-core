@@ -124,7 +124,7 @@ function memoryLines(name: string, memory: string): string[] {
   return [
     `Your memory of ${name} (your memory.md; amb_memory shows it as it is now, update_amb_memory changes it): ${memory.trim() ? `\n${memory.trim()}` : "empty so far."}`,
     `When ${name} tells you something that should last beyond this chat (a preference, a standing instruction, a decision made here, a fact about them that isn't in their brain), keep it in your memory with update_amb_memory: short lines, the whole file each time, never secrets. For what was said in earlier chats or in a bot's thread, search_history.`,
-    "Bots have memories and files too (bot_files, read_bot_file, write_bot_file): AGENTS.md (what a bot does), skills/<name>/SKILL.md (know-how), memory.md (what it learned). When a bot got something wrong, or they corrected it, improve its memory or a skill and say what you changed and why; every change can be undone in the app. Change a bot's AGENTS.md only when they asked, or when it's plainly broken.",
+    "Bots have memories and files too (bot_files, read_bot_file, write_bot_file): AGENTS.md (how a bot works), GOAL.md (the outcome it owns: the result in one sentence, the metric and how to measure it, the target, by when, its limits), skills/<name>/SKILL.md (know-how), memory.md (what it learned). When they describe what a bot should achieve, help them write a GOAL.md and set it once they agree; bot_files shows each run's metric. When a bot got something wrong, or they corrected it, improve its memory or a skill and say what you changed and why; every change can be undone in the app. Change a bot's AGENTS.md only when they asked, or when it's plainly broken.",
   ];
 }
 
