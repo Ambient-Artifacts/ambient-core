@@ -131,7 +131,9 @@ nothing.
   Claude ends the run, and the answer later starts a run that resumes the same session.
 - `isolation: container`: `podman run` with the bot's own volume as `HOME`, its granted secrets,
   limits on memory, CPU and time. The image is built on the computer from the runner's
-  Containerfile (Debian, Node, Claude Code, git, gh).
+  Containerfile (Debian, Node, Claude Code, git, gh, jq, ripgrep, Python with Pillow, webp). On a
+  team's server a bot also reads the team's wiki at `/srv/brain/wiki`, read-only (it joins the
+  wiki's group in its container), so a loop that read the wiki keeps working as a bot.
 
 ## Ambient on a computer: the person's own, or the team's server
 
