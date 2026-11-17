@@ -32,3 +32,23 @@ export async function openMessage(keys: RoutineKeys, owner: Owner, iv: string, c
 export function resultHash(text: string): string {
   return createHash("sha256").update(text.replace(/\s+/g, " ").trim().toLowerCase()).digest("hex").slice(0, 32);
 }
+
+/** Why a run failed, when it's the computer's Claude account and not the bot: out of credit, or signed out. */
+export function claudeProblem(text: string): "credit" | "signin" | null {
+  if (/credit balance is too low|insufficient (credit|balance)|exceeded your current quota|billing/i.test(text)) return "credit";
+  if (/invalid (x-)?api[ -]key|authentication_error|not logged in|please run \/login|oauth token (has )?expired|invalid bearer token|401 unauthorized/i.test(text)) return "signin";
+  return null;
+}
+
+
+/** A failure that is the computer's Claude account: what the app offers to fix. */
+export interface ClaudeFix {
+  kind: "claude";
+  computer: string;
+  reason: "credit" | "signin";
+}
+
+export function claudeFix(kind: string, text: string, computer: string | null | undefined): ClaudeFix | null {
+  const reason = kind === "failure" && computer ? claudeProblem(text) : null;
+  return reason && computer ? { kind: "claude", computer, reason } : null;
+}

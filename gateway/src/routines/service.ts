@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { BotInput, RoutineSchedule, botSettings, botState, describeSchedule, nextRun, onCalendar, type BotSettings, type BotState } from "@brain/spec";
-import { MESSAGE_PURPOSE, openMessage, resultHash, sealMessage } from "../bots/messages.ts";
+import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix } from "../bots/messages.ts";
 import type { BotsAccess } from "../config.ts";
 import { api, type Control } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
@@ -59,6 +59,10 @@ const MESSAGES: Record<string, [string, number]> = {
   expired_code: ["That setup code has expired. Create a new one in the Ambient app.", 400],
   no_such_run: ["There's no such run.", 404],
   bots_not_enabled: ["Bots aren't switched on for this account or team yet.", 403],
+  bad_token: ["That isn't a Claude plan token (sk-ant-oat…, from claude setup-token) or an Anthropic API key (sk-ant-api…).", 400],
+  no_plan: ["There's no Claude plan stored for this computer yet. Add one in the Ambient app (the computer, then Claude).", 409],
+  no_key: ["There's no API key stored for this computer yet. Add one in the Ambient app (the computer, then Claude).", 409],
+  claude_admins_only: ["Only the person whose computer it is, or a team's owners and admins for its server, can change its Claude sign-in.", 403],
   no_such_bot: ["There's no such bot.", 404],
   run_over: ["This run is over; it can't ask anything anymore.", 409],
   no_such_question: ["There's no such question.", 404],
@@ -159,8 +163,22 @@ interface HostRow {
   codeExpiresAt: number | null;
   info: HostInfo | null;
   lastSeenAt: number | null;
+  claude: ClaudeAccount | null;
   createdAt: number;
 }
+
+/** Whose Claude a computer's runs and Ambient sign in with (docs/bots.md). Never the values. */
+export interface ClaudeAccount {
+  use: "plan" | "key" | "computer";
+  plan: { by: string | null; at: number } | null;
+  key: { by: string | null; at: number } | null;
+}
+
+/** A plan's token (claude setup-token) or an Anthropic API key, as people paste them. */
+export const ClaudeToken = z.object({
+  kind: z.enum(["plan", "key"]),
+  token: z.string().trim().min(20).max(500),
+});
 
 /**
  * Who's asking, and what they may do. The app passes a signed-in user (everything their roles
@@ -192,6 +210,8 @@ export interface Computer {
   claude: string | null;
   runner: string | null;
   lastSeenAt: number | null;
+  /** Whose Claude it signs in with: a stored plan or key, or its own (`use: "computer"`). */
+  claudeAccount: ClaudeAccount;
 }
 
 export interface Routine {
@@ -229,8 +249,8 @@ export interface BotView {
   report: BotSettings["report"];
   state: BotState;
   openQuestion: { id: string; text: string; choices: string[] | null; askedAt: number } | null;
-  /** The newest thing it said: a result, a failure or a question. */
-  lastMessage: { text: string; kind: string; at: number } | null;
+  /** The newest thing it said: a result, a failure or a question; `fix` for a Claude account problem. */
+  lastMessage: { text: string; kind: string; at: number; fix: ClaudeFix | null } | null;
 }
 
 interface LatestRow {
@@ -440,10 +460,11 @@ export class RoutineService {
       claude: h.info?.claude ?? null,
       runner: h.info?.runner ?? null,
       lastSeenAt: h.lastSeenAt,
+      claudeAccount: h.claude ?? { use: "computer", plan: null, key: null },
     };
   }
 
-  private async botView(r: RoutineRow, ready: boolean, latest: LatestRow | undefined): Promise<BotView | null> {
+  private async botView(r: RoutineRow, ready: boolean, latest: LatestRow | undefined, computer?: string): Promise<BotView | null> {
     if (!r.bot) return null;
     const owner = this.ownerOf(r);
     const open = async (m: { iv: string; ct: string }) => openMessage(this.d.keys, owner, m.iv, m.ct, MESSAGE_PURPOSE).catch(() => ({ text: "", choices: undefined }));
@@ -457,7 +478,7 @@ export class RoutineService {
       report: r.bot.report,
       state: botState({ enabled: r.enabled, ready, lastRunStatus: r.lastRun?.status ?? null, openQuestion: r.openQuestionId !== null }),
       openQuestion: q ? { id: String(q.m.id), text: q.body.text, choices: q.body.choices ?? null, askedAt: q.m.createdAt } : null,
-      lastMessage: last ? { text: last.body.text, kind: last.m.kind, at: last.m.createdAt } : null,
+      lastMessage: last ? { text: last.body.text, kind: last.m.kind, at: last.m.createdAt, fix: claudeFix(last.m.kind, last.body.text, computer) } : null,
     };
   }
 
@@ -488,7 +509,7 @@ export class RoutineService {
       runRequested: r.runRequestedAt !== null,
       source: r.source,
       lastRun: r.lastRun ? { status: r.lastRun.status, startedAt: r.lastRun.startedAt, finishedAt: r.lastRun.finishedAt ?? null } : null,
-      bot: await this.botView(r, Boolean(host?.ready), latest?.get(r.id)),
+      bot: await this.botView(r, Boolean(host?.ready), latest?.get(r.id), host?.id),
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     };
@@ -716,6 +737,65 @@ export class RoutineService {
     if (!out.ok) throw refused(out.error);
   }
 
+  // ---- whose Claude a computer uses ----
+
+  /** A computer the user may change (theirs, or a managed team's server), by id or name. */
+  private async claudeComputer(actor: Actor, ref: string): Promise<HostRow> {
+    const hosts = (await this.rows(actor)).hosts;
+    const want = ref.toLowerCase();
+    const h = hosts.find((x) => x.id === ref) ?? hosts.find((x) => x.name.toLowerCase() === want || x.info?.hostname.toLowerCase() === want);
+    if (!h) throw refused("no_such_computer");
+    if (h.teamId) {
+      const team = this.teamOf(actor, h.teamId);
+      if (!team || !isManager(team) || !actor.canWriteTeams) throw refused("claude_admins_only");
+    } else if (!actor.canWritePersonal) throw refused("read_only");
+    return h;
+  }
+
+  private computerOwner(h: HostRow, actor: Actor): Owner {
+    return h.teamId ? { kind: "team", teamId: h.teamId } : { kind: "user", uid: actor.uid };
+  }
+
+  private afterClaude(actor: Actor, out: { ok: boolean; error?: string; host?: unknown }): Computer {
+    if (!out.ok) throw refused(out.error ?? "bad_request");
+    return this.computer(out.host as HostRow, actor);
+  }
+
+  /** Store a plan token or an API key for the computer, sealed, and use it. Only from the app. */
+  async setClaude(actor: Actor, ref: string, kind: "plan" | "key", token: string): Promise<Computer> {
+    const t = token.trim().replace(/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=/, "");
+    if (!/^[A-Za-z0-9_-]+$/.test(t) || (kind === "plan" ? !t.startsWith("sk-ant-oat") : !t.startsWith("sk-ant-api"))) throw refused("bad_token");
+    const h = await this.claudeComputer(actor, ref);
+    const sealed = await this.d.keys.seal(this.computerOwner(h, actor), `host:claude:${kind}`, t);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.setClaude, { uid: actor.uid as never, id: h.id, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() }));
+  }
+
+  /** Switch the computer between its stored plan, its stored key and its own sign-in. */
+  async useClaude(actor: Actor, ref: string, use: "plan" | "key" | "computer"): Promise<Computer> {
+    const h = await this.claudeComputer(actor, ref);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.useClaude, { uid: actor.uid as never, id: h.id, use }));
+  }
+
+  async removeClaude(actor: Actor, ref: string, kind: "plan" | "key"): Promise<Computer> {
+    const h = await this.claudeComputer(actor, ref);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.removeClaude, { uid: actor.uid as never, id: h.id, kind }));
+  }
+
+  private async claudeVersion(host: Host): Promise<string | null> {
+    const c = await this.d.control.q(api.routines.hostClaude, { hostId: host.id as never });
+    return c ? `${c.kind}:${c.at}` : null;
+  }
+
+  /** The computer's chosen sign-in as environment (only the computer asks, with its token). */
+  async hostClaude(host: Host): Promise<{ version: string | null; env: Record<string, string> }> {
+    const c = await this.d.control.q(api.routines.hostClaude, { hostId: host.id as never });
+    if (!c) return { version: null, env: {} };
+    // A personal computer's is sealed with its owner's key, a team server's with the team's.
+    const owner: Owner = c.teamId ? { kind: "team", teamId: String(c.teamId) } : { kind: "user", uid: String(c.uid) };
+    const value = await this.d.keys.open(owner, `host:claude:${c.kind}`, c.iv, c.ct);
+    return { version: `${c.kind}:${c.at}`, env: c.kind === "plan" ? { CLAUDE_CODE_OAUTH_TOKEN: value } : { ANTHROPIC_API_KEY: value } };
+  }
+
   // ---- the computer's side ----
 
   async authenticate(header: string | undefined): Promise<Host | undefined> {
@@ -741,7 +821,7 @@ export class RoutineService {
   async sync(
     host: Host,
     info?: HostInfo,
-  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean }> {
+  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null }> {
     const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info, now: this.now() });
     if (!out) throw new RoutineError("unauthorized", "This computer was removed.", 401);
     return {
@@ -756,6 +836,8 @@ export class RoutineService {
       runner: this.d.runner,
       // A person's own computer runs Ambient for them, a team's server for the team's people.
       ambient: await this.ambientOn(host),
+      // Which Claude sign-in it uses, as a version: the computer fetches it when this changes.
+      claude: await this.claudeVersion(host),
     };
   }
 

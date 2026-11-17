@@ -9,7 +9,7 @@
 import { api } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Channel, Inbound } from "../channels/channel.ts";
-import { openMessage, sealMessage } from "./messages.ts";
+import { claudeFix, openMessage, sealMessage, type ClaudeFix } from "./messages.ts";
 import { RoutineError, RUN_TOKEN_PREFIX, type Actor, type Routine, type RoutineService } from "../routines/service.ts";
 import type { Owner } from "../routines/keys.ts";
 
@@ -26,6 +26,8 @@ export interface ThreadMessage {
   createdAt: number;
   /** Questions: whether someone answered; null for everything else. */
   answered: boolean | null;
+  /** A failure that's the computer's Claude account, not the bot: the app offers the fix. */
+  fix: ClaudeFix | null;
 }
 
 interface MessageRow {
@@ -85,7 +87,7 @@ export class BotService {
     return r.teamId ? { kind: "team", teamId: r.teamId } : { kind: "user", uid: r.createdBy };
   }
 
-  private async message(owner: Owner, m: MessageRow, uid: string): Promise<ThreadMessage> {
+  private async message(owner: Owner, m: MessageRow, uid: string, computer?: string | null): Promise<ThreadMessage> {
     const body = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => ({ text: "(couldn't be opened)", choices: undefined }));
     return {
       id: String(m.id),
@@ -98,6 +100,7 @@ export class BotService {
       mine: m.role === "user" && m.authorId !== null && String(m.authorId) === uid,
       createdAt: m.createdAt,
       answered: m.kind === "question" ? m.answeredAt !== null : null,
+      fix: claudeFix(m.kind, body.text, computer),
     };
   }
 
@@ -107,10 +110,11 @@ export class BotService {
     const out = await this.d.routines.control.q(api.bots.thread, { ...this.access(actor), id, limit });
     if (!out) throw refused("no_such_bot", "There's no such bot.", 404);
     const owner = this.ownerOf(r);
-    const messages = await Promise.all((out.messages as unknown as MessageRow[]).map((m) => this.message(owner, m, actor.uid)));
-    const openId = out.openQuestionId ? String(out.openQuestionId) : null;
     // The bot as the list shows it (its state while the app polls the thread).
-    return { messages, openQuestion: messages.find((m) => m.id === openId) ?? null, routine: await this.d.routines.get(actor, id) };
+    const routine = await this.d.routines.get(actor, id);
+    const messages = await Promise.all((out.messages as unknown as MessageRow[]).map((m) => this.message(owner, m, actor.uid, routine.computer?.id)));
+    const openId = out.openQuestionId ? String(out.openQuestionId) : null;
+    return { messages, openQuestion: messages.find((m) => m.id === openId) ?? null, routine };
   }
 
   /**

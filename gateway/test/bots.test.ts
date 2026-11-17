@@ -410,3 +410,81 @@ exit 1
     expect(failure).not.toContain("(success)");
   });
 });
+
+describe("whose Claude a computer uses", () => {
+  it("is stored in the app, switched over MCP, fetched by the computer and used by its runs", async () => {
+    const put = (body: unknown) => appCall(s, lena.access_token, "PUT", `/v1/app/computers/${computerId}/claude`, body);
+    expect((await put({ kind: "plan", token: "not-a-token-at-all-really" })).json.error).toBe("bad_token");
+    expect((await put({ kind: "key", token: "sk-ant-oat01-aaaaaaaaaaaaaaaaaaaa" })).json.error).toBe("bad_token");
+    const stored = await put({ kind: "plan", token: "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-lenasplan0000000000" });
+    expect(stored.status, JSON.stringify(stored.json)).toBe(200);
+    expect((stored.json.computer as { claudeAccount: unknown }).claudeAccount).toMatchObject({ use: "plan", plan: { by: "Lena Vogel" }, key: null });
+    // Never in Convex in readable form, never back to the app.
+    expect(JSON.stringify(await s.t.run(async (ctx) => ctx.db.query("routineHosts").collect()))).not.toContain("lenasplan");
+    expect(JSON.stringify((await appCall(s, lena.access_token, "GET", "/v1/app/routines")).json)).not.toContain("lenasplan");
+
+    // The computer sees a new version in sync and fetches the token.
+    const version = (await hostCall(host, "POST", "/v1/host/sync", { info })).json.claude as string;
+    expect(version).toMatch(/^plan:\d+$/);
+    expect((await hostCall(host, "GET", "/v1/host/claude")).json).toEqual({ version, env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-lenasplan0000000000" } });
+
+    // Over MCP: switching to a key that isn't stored gives the app's link instead.
+    const pat = String((await appCall(s, lena.access_token, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
+    const client = await mcpClient(`${s.origin}/mcp`, pat);
+    const missing = await client.callTool({ name: "use_claude_account", arguments: { computer: computerId, use: "key" } });
+    expect(missing.isError).toBe(true);
+    expect(text(missing)).toContain(`ambient://computer/${computerId}/claude`);
+    const own = await client.callTool({ name: "use_claude_account", arguments: { computer: computerId, use: "computer" } });
+    expect(text(own)).toContain("its own sign-in");
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.claude).toBeNull();
+    expect(text(await client.callTool({ name: "list_routines", arguments: {} }))).toContain("stored: a Claude plan (stored by Lena Vogel)");
+    await client.close();
+    await appCall(s, lena.access_token, "POST", `/v1/app/computers/${computerId}/claude/use`, { use: "plan" });
+    expect((await appCall(s, ben.access_token, "PUT", `/v1/app/computers/${computerId}/claude`, { kind: "plan", token: "sk-ant-oat01-bensplan00000000000" })).json.error).toBe("no_such_computer");
+  });
+
+  it("runs on the chosen sign-in, and a failure that's the account carries the fix", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ambient-chosen-"));
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    mkdirSync(join(dir, "work"));
+    writeFileSync(
+      join(bin, "claude"),
+      `#!/bin/sh
+env > env.txt
+cat > /dev/null
+echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'
+exit 1
+`,
+    );
+    chmodSync(join(bin, "claude"), 0o755);
+    const env = {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
+      HOME: dir,
+      AMBIENT_SERVER: s.origin,
+      AMBIENT_HOST_TOKEN: host,
+      AMBIENT_CLAUDE: join(bin, "claude"),
+      AMBIENT_STATE_DIR: join(dir, "state"),
+      AMBIENT_UNIT_DIR: dir,
+      AMBIENT_CLAUDE_ENV: join(dir, "claude.env"),
+      ANTHROPIC_API_KEY: "sk-ant-api-the-servers-own",
+    };
+    const runner = (args: string[]) =>
+      new Promise<number | null>((resolve) => {
+        const p = spawn(process.execPath, [RUNNER, ...args], { env });
+        p.on("close", resolve);
+      });
+    await runner(["sync"]);
+    expect(readFileSync(join(dir, "claude.env"), "utf8")).toBe("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-lenasplan0000000000\n");
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "On my plan", prompt: "x", schedule: daily, folder: join(dir, "work"), bot: { isolation: "host" } });
+    const id = (made.json.routine as R).id;
+    await runner(["run", id]);
+    const runEnv = readFileSync(join(dir, "work", "env.txt"), "utf8");
+    expect(runEnv).toContain("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-lenasplan0000000000");
+    expect(runEnv).not.toContain("sk-ant-api-the-servers-own");
+    const t = await thread(id);
+    expect(t.messages.at(-1)).toMatchObject({ kind: "failure", fix: { kind: "claude", computer: computerId, reason: "credit" } });
+    expect(((await one(id)).bot as Bot & { lastMessage: { fix: unknown } }).lastMessage.fix).toMatchObject({ reason: "credit" });
+  });
+});

@@ -3,7 +3,7 @@
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { z } from "zod";
 import type { Directory } from "../directory.ts";
-import { HostInfo, RoutineError, RoutineInput, RoutinePatch, RunProgress, RunResult, SecretName, SecretValue, type Actor, type Host, type RoutineService } from "./service.ts";
+import { ClaudeToken, HostInfo, RoutineError, RoutineInput, RoutinePatch, RunProgress, RunResult, SecretName, SecretValue, type Actor, type Host, type RoutineService } from "./service.ts";
 import { addressKey, limiter } from "../limiter.ts";
 
 function fail(res: Response, err: unknown) {
@@ -131,6 +131,40 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
     }
   });
 
+  // Whose Claude the computer uses: a plan token or API key goes in here only, never through a chat.
+  r.put("/v1/app/computers/:id/claude", d.auth, d.json, async (req, res) => {
+    const body = ClaudeToken.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_token", message: "Paste a Claude plan token (from claude setup-token) or an Anthropic API key." });
+      return;
+    }
+    try {
+      res.json({ computer: await d.routines.setClaude(await actor(res), id(req), body.data.kind, body.data.token) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/computers/:id/claude/use", d.auth, d.json, async (req, res) => {
+    const body = z.object({ use: z.enum(["plan", "key", "computer"]) }).safeParse(req.body);
+    if (!body.success) return badRequest(res, body.error);
+    try {
+      res.json({ computer: await d.routines.useClaude(await actor(res), id(req), body.data.use) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/computers/:id/claude/:kind", d.auth, async (req, res) => {
+    const kind = z.enum(["plan", "key"]).safeParse(req.params.kind);
+    if (!kind.success) return badRequest(res, kind.error);
+    try {
+      res.json({ computer: await d.routines.removeClaude(await actor(res), id(req), kind.data) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
   r.delete("/v1/app/computers/:id", d.auth, async (req, res) => {
     try {
       await d.routines.removeComputer(await actor(res), id(req));
@@ -192,6 +226,15 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
     const info = HostInfo.safeParse(req.body?.info);
     try {
       res.json(await d.routines.sync(hostOf(res), info.success ? info.data : undefined));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // The computer's chosen Claude sign-in, fetched when sync's `claude` version changes.
+  r.get("/v1/host/claude", host, async (_req, res) => {
+    try {
+      res.set("cache-control", "no-store").json(await d.routines.hostClaude(hostOf(res)));
     } catch (err) {
       fail(res, err);
     }

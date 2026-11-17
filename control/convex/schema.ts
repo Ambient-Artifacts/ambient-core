@@ -25,6 +25,7 @@ export const botSettings = v.object({
   secrets: v.optional(v.array(v.string())),
   report: v.union(v.literal("news"), v.literal("every_run")),
 });
+const claudeCredential = v.object({ iv: v.string(), ct: v.string(), by: v.optional(v.string()), at: v.number() });
 export const botMessageKind = v.union(v.literal("result"), v.literal("failure"), v.literal("question"), v.literal("answer"), v.literal("message"));
 
 export default defineSchema({
@@ -374,6 +375,17 @@ export default defineSchema({
     tokenHash: v.optional(v.string()),
     info: v.optional(v.object({ hostname: v.string(), os: v.string(), runner: v.string(), claude: v.string() })),
     lastSeenAt: v.optional(v.number()),
+    /**
+     * How its runs and Ambient sign in to Claude (docs/bots.md): a stored plan token or API key,
+     * sealed with the owner's data key, and which one is used. Absent: the computer's own sign-in.
+     */
+    claude: v.optional(
+      v.object({
+        use: v.union(v.literal("plan"), v.literal("key"), v.literal("computer")),
+        plan: v.optional(claudeCredential),
+        key: v.optional(claudeCredential),
+      }),
+    ),
     createdAt: v.number(),
   })
     .index("by_user", ["userId"])

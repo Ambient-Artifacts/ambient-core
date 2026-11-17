@@ -160,3 +160,48 @@ chat says no computer is connected.
 - Every run (a bot's, a loop's, Ambient's) uses a Claude plan's `CLAUDE_CODE_OAUTH_TOKEN` over
   `ANTHROPIC_API_KEY` when the computer has both (runner 0.7.2); in `extra.env` it signs in the
   team's bots and Ambient alike.
+
+## Whose Claude a computer uses
+
+Each computer (a person's own, or a team's server) signs its runs and Ambient in to Claude one
+way, set in the app or by Ambient: a person's Claude plan (a token from `claude setup-token`), an
+Anthropic API key, or whatever the computer itself has (`/etc/ambient-runner/extra.env`, the
+default). Tokens and keys go in through the app only, sealed with the owner's key like secrets;
+the computer fetches the chosen one when it changes. A plan's token wins over a key everywhere.
+
+### The app's API
+
+Computers in `GET /v1/app/routines` carry `claudeAccount` (`claude` stays the Claude Code
+version):
+
+```json
+"claudeAccount": {
+  "use": "plan",
+  "plan": { "by": "Nikolai", "at": 1763380000000 },
+  "key": null
+}
+```
+
+`use`: `plan`, `key`, or `computer` (the computer's own sign-in; nothing stored in Ambient).
+`plan` and `key` say who stored each and when (never the value), or null.
+
+- `PUT /v1/app/computers/:id/claude` with `{ "kind": "plan" | "key", "token": "…" }` stores it
+  and uses it. A plan's token starts with `sk-ant-oat`, a key with `sk-ant-api`; anything else is
+  refused (400 `bad_token`). Answers `{ "computer": Computer }`.
+- `POST /v1/app/computers/:id/claude/use` with `{ "use": "plan" | "key" | "computer" }` switches
+  (409 `no_plan` / `no_key` when that one isn't stored). Answers `{ "computer": Computer }`.
+- `DELETE /v1/app/computers/:id/claude/:kind` removes a stored plan or key (and falls back to the
+  other, or the computer's own). Answers `{ "computer": Computer }`.
+- Who: the person for their own computer; a team's owners and admins for its server.
+
+### Out of credit or signed out
+
+A thread message (and `bot.lastMessage`) has `fix`: `{ "kind": "claude", "computer": "<id>",
+"reason": "credit" | "signin" }` when a run failed because the computer's Claude account is out of
+credit or not signed in, else null. The app shows a button that opens the Claude sheet for that
+computer ("Use my Claude plan").
+
+### Links
+
+`ambient://computer/<id>/claude` opens the Bots tab on that computer with its Claude sheet open.
+Ambient's chat replies use it as a Markdown link ("[Add your Claude plan](ambient://computer/…/claude)").

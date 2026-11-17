@@ -31,11 +31,23 @@ function duration(ms: number): string {
   return min < 1 ? `${Math.round(ms / 1000)} s` : min < 120 ? `${min} min` : `${Math.round(min / 60)} h`;
 }
 
+function claudeLine(c: Computer): string {
+  const a = c.claudeAccount;
+  const stored = [a.plan ? `a Claude plan (stored by ${a.plan.by ?? "someone"})` : null, a.key ? `an API key (stored by ${a.key.by ?? "someone"})` : null].filter(Boolean).join(" and ");
+  const using = a.use === "plan" ? "its stored Claude plan" : a.use === "key" ? "its stored API key" : "its own sign-in (set on the computer)";
+  return `signs in with ${using}${stored ? `; stored: ${stored}` : ""}`;
+}
+
 function computerLine(c: Computer): string {
   const whose = c.team ? `${c.team.name}'s server` : c.name;
   if (!c.ready) return `- ${whose}: waiting to be set up (id: ${c.id})`;
   const seen = c.online ? "online" : c.lastSeenAt ? `offline since ${new Date(c.lastSeenAt).toISOString().slice(0, 16).replace("T", " ")} UTC` : "offline";
-  return `- ${whose}${c.hostname && c.hostname !== c.name ? ` (${c.hostname})` : ""}: ${seen}, Claude Code ${c.claude ?? "?"} (id: ${c.id})`;
+  return `- ${whose}${c.hostname && c.hostname !== c.name ? ` (${c.hostname})` : ""}: ${seen}, Claude Code ${c.claude ?? "?"}, ${claudeLine(c)} (id: ${c.id})`;
+}
+
+/** Where the user adds a Claude plan or key for a computer: the app, never a chat. */
+function claudeLink(c: { id: string }): string {
+  return `ambient://computer/${c.id}/claude`;
 }
 
 const STATE_WORDS: Record<string, string> = { working: "working", needs_you: "needs the user", stuck: "stuck (last run failed)", done: "done (last run went fine)", asleep: "asleep" };
@@ -300,6 +312,33 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         const stored = `Stored ${name.data} for ${whose}. Their runs get it as an environment variable.`;
         if (paused.length === 0) return result(stored);
         return result(`${stored} Because an AI app changed a secret, ${paused.length === 1 ? "this routine is" : "these routines are"} paused: ${paused.map((n) => `"${n}"`).join(", ")}. ${PAUSED}`);
+      }),
+  );
+
+  server.registerTool(
+    "use_claude_account",
+    {
+      title: "Switch whose Claude a computer uses",
+      description:
+        "Switch which Claude sign-in a computer's runs (its loops and bots) and Ambient there use: its stored Claude plan, its stored API key, or the computer's own. Only when the user asks. Tokens and keys are never set here: when the one asked for isn't stored, give the user the link from the result to add it in the Ambient app (Markdown, e.g. [Add your Claude plan](link)).",
+      inputSchema: {
+        computer: z.string().max(80).describe("The computer's id or name (see list_routines); a team's server by its id."),
+        use: z.enum(["plan", "key", "computer"]).describe('"plan": the stored Claude plan, "key": the stored API key, "computer": the computer\'s own sign-in.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ computer, use }) =>
+      guard(async () => {
+        try {
+          const c = await routines.useClaude(actor, computer, use);
+          return result(`${c.team ? `${c.team.name}'s server` : c.name} now ${claudeLine(c)}. Its next run (and Ambient there, within a minute) signs in that way.`, { computer: c });
+        } catch (err) {
+          if (err instanceof RoutineError && (err.code === "no_plan" || err.code === "no_key")) {
+            const c = (await routines.list(actor)).computers.find((x) => x.id === computer || x.name.toLowerCase() === computer.toLowerCase());
+            return error(`${err.message}${c ? ` The link that opens it in the app: ${claudeLink(c)}` : ""}`);
+          }
+          throw err;
+        }
       }),
   );
 

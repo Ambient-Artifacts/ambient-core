@@ -50,7 +50,7 @@ describe("transport", () => {
 });
 
 describe("tools", () => {
-  it("lists twenty-one tools; save_note, log_work, the routine tools, the settings changes and forget_my_voice write", async () => {
+  it("lists twenty-two tools; save_note, log_work, the routine tools, the settings changes, forget_my_voice and use_claude_account write", async () => {
     const client = await mcpClient(`${s.origin}/mcp`, lenaAll);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
@@ -75,8 +75,9 @@ describe("tools", () => {
       "set_routine_secret",
       "transcript",
       "update_routine",
+      "use_claude_account",
     ]);
-    const writers = ["save_note", "log_work", "create_routine", "update_routine", "run_routine", "delete_routine", "set_routine_secret", "change_team_settings", "change_preferences", "forget_my_voice"];
+    const writers = ["save_note", "log_work", "create_routine", "update_routine", "run_routine", "delete_routine", "set_routine_secret", "change_team_settings", "change_preferences", "forget_my_voice", "use_claude_account"];
     for (const t of tools) expect(t.annotations?.readOnlyHint, t.name).toBe(!writers.includes(t.name));
     await client.close();
   });
