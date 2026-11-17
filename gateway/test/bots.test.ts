@@ -328,7 +328,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
   it("fails a container bot clearly where there's no Podman", async () => {
     const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Boxed", prompt: "x", schedule: daily, bot: {} });
     const id = (made.json.routine as R).id;
-    const out = await runner(["run", id]);
+    // Only the stand-in bin: a CI machine may have Podman in /usr/bin.
+    const out = await runner(["run", id], { AMBIENT_SYSTEM_PATH: join(dir, "bin") });
     expect(out.code).toBe(1);
     expect((await thread(id)).messages.at(-1)?.text).toContain("Podman isn't installed");
   });
