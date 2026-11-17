@@ -96,6 +96,26 @@ describe("a person's bots", () => {
     expect(status.lastMirroredAt).toEqual(expect.any(Number));
   }, 30_000);
 
+  it("go along with the worker's 15-minute sync too (built the way worker/cli.ts builds it), goal included", async () => {
+    const { RoutineKeys } = await import("../src/routines/keys.ts");
+    const { BotFolder } = await import("../src/bots/folder.ts");
+    const { BotMirror } = await import("../src/bots/mirror.ts");
+    const { PersonalRepos } = await import("../src/repos/personal.ts");
+    const keys = new RoutineKeys({ control: s.control, personal: s.personal, master: s.config.masterKey });
+    const folder = new BotFolder({ control: s.control, keys });
+    // Written past the gateway (no debounced mirror of its own): only the worker's sync can carry it.
+    await folder.write({ kind: "user", uid: lena.user.uid }, blog, "GOAL.md", "Outcome: 300 visitors a week.", { kind: "user", name: "Lena Vogel" }, null);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(existsSync(join(fresh(), "bots/blog-draft/GOAL.md"))).toBe(false);
+    const mirror = new BotMirror({ control: s.control, keys, folder });
+    const out = await new PersonalRepos(s.control, s.personal, { allowFile: true }, { files: (uid) => mirror.personalFiles(uid) }).syncAll();
+    expect(JSON.stringify(out)).not.toContain("error");
+    const dir = fresh();
+    expect(readFileSync(join(dir, "bots/blog-draft/GOAL.md"), "utf8")).toBe("Outcome: 300 visitors a week.\n");
+    expect(sh(["log", "-1", "--format=%s"], dir).trim()).toMatch(/^Ambient: sync \(.*bot files?\)$/);
+    await settle();
+  }, 30_000);
+
   it("overwrite edits made in git, and leave the repo's own files under bots/ alone", async () => {
     const work = fresh();
     writeFileSync(join(work, "bots/blog-draft/AGENTS.md"), "Edited in GitHub.\n");

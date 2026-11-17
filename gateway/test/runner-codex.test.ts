@@ -24,9 +24,14 @@ let dir = "";
 let bin = "";
 let work = "";
 
+// The shapes as Codex CLI 0.169.0 printed them in a real `codex exec --json` run (against a
+// stand-in Responses API): a warning comes as an "error" item, a command as item.started then
+// item.completed, the answer as an agent_message, then turn.completed.
 const EVENTS = [
   '{"type":"thread.started","thread_id":"thr-1"}',
+  '{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `test-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}',
   '{"type":"turn.started"}',
+  '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}',
   '{"type":"item.completed","item":{"id":"i0","type":"reasoning","text":"thinking"}}',
   '{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"git status","aggregated_output":"","exit_code":0,"status":"completed"}}',
   '{"type":"item.completed","item":{"id":"i2","type":"file_change","changes":[{"path":"src/a.ts","kind":"update"}],"status":"completed"}}',
