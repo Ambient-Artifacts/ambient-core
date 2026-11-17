@@ -8,7 +8,7 @@ import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
-import { routineSchedule, runStatus } from "./schema.js";
+import { botSettings, routineSchedule, runStatus } from "./schema.js";
 import { emailVouched } from "./admin.js";
 
 const MAX_ROUTINES = 50;
@@ -34,6 +34,8 @@ function routineShape(r: Doc<"routines">) {
     runRequestedAt: r.runRequestedAt ?? null,
     source: r.source,
     lastRun: r.lastRun ?? null,
+    bot: r.bot ?? null,
+    openQuestionId: r.openQuestionId ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
@@ -75,13 +77,13 @@ function runShape(r: Doc<"routineRuns">) {
  * gateway's view of roles is cached for up to a minute, and an admin who was just demoted or
  * removed mustn't change what runs on the team's server in that minute.
  */
-async function manages(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamId: Id<"teams">): Promise<boolean> {
+export async function manages(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamId: Id<"teams">): Promise<boolean> {
   const m = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid)).unique();
   return !!m && (m.role === "owner" || m.role === "admin");
 }
 
 /** A routine the user may see (reads) or change (writes): theirs, or one of the given teams'. */
-async function routineFor(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamIds: Id<"teams">[], id: string) {
+export async function routineFor(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamIds: Id<"teams">[], id: string) {
   const routineId = ctx.db.normalizeId("routines", id);
   const r = routineId ? await ctx.db.get(routineId) : null;
   if (!r) return null;
@@ -135,6 +137,8 @@ export const create = mutation({
     hostId: v.optional(v.string()),
     folder: v.optional(v.string()),
     enabled: v.boolean(),
+    /** A bot (the gateway checked bots are on for this owner). */
+    bot: v.optional(botSettings),
     source: v.string(),
     now: v.number(),
   },
@@ -167,10 +171,12 @@ export const update = mutation({
     /** null: the runner's own folder. */
     folder: v.optional(v.union(v.string(), v.null())),
     enabled: v.optional(v.boolean()),
+    /** null: a plain loop again. */
+    bot: v.optional(v.union(botSettings, v.null())),
     source: v.string(),
     now: v.number(),
   },
-  handler: async (ctx, { secret, uid, teamIds, id, hostId, folder, now, ...fields }) => {
+  handler: async (ctx, { secret, uid, teamIds, id, hostId, folder, bot, now, ...fields }) => {
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r) return { ok: false as const, error: "no_such_routine" };
@@ -184,6 +190,10 @@ export const update = mutation({
     if (fields.schedule !== undefined) patch.schedule = fields.schedule;
     if (fields.enabled !== undefined) patch.enabled = fields.enabled;
     if (folder !== undefined) patch.folder = folder ?? undefined;
+    if (bot !== undefined) {
+      patch.bot = bot ?? undefined;
+      if (bot === null) Object.assign(patch, { openQuestionId: undefined, pendingMessageId: undefined });
+    }
     if (hostId !== undefined && !r.teamId) {
       if (hostId === null) patch.hostId = undefined;
       else {
@@ -206,6 +216,8 @@ export const remove = mutation({
     if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     const runs = await ctx.db.query("routineRuns").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(KEEP_RUNS * 4);
     for (const run of runs) await ctx.db.delete(run._id);
+    const messages = await ctx.db.query("botMessages").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(1000);
+    for (const m of messages) await ctx.db.delete(m._id);
     await ctx.db.delete(r._id);
     return { ok: true as const, name: r.name };
   },
@@ -464,8 +476,8 @@ async function pruneRuns(ctx: MutationCtx, routineId: Id<"routines">) {
  * Returns the routine and its owner's secrets (both sealed) for the run.
  */
 export const startRun = mutation({
-  args: { ...secretArg, hostId: v.id("routineHosts"), id: v.string(), now: v.number() },
-  handler: async (ctx, { secret, hostId, id, now }) => {
+  args: { ...secretArg, hostId: v.id("routineHosts"), id: v.string(), runTokenHash: v.optional(v.string()), now: v.number() },
+  handler: async (ctx, { secret, hostId, id, runTokenHash, now }) => {
     assertService(secret);
     const h = await ctx.db.get(hostId);
     const routineId = ctx.db.normalizeId("routines", id);
@@ -479,11 +491,25 @@ export const startRun = mutation({
     for (const run of stale) if (run.status === "running") await ctx.db.patch(run._id, { status: "failed", finishedAt: now });
     const trigger = r.runRequestedAt ? ("manual" as const) : ("schedule" as const);
     const startedByName = trigger === "manual" ? r.runRequestedBy : undefined;
-    const runId = await ctx.db.insert("routineRuns", { routineId: r._id, userId: r.userId, hostId, trigger, status: "running", startedByName, startedAt: now });
-    await ctx.db.patch(r._id, { runRequestedAt: undefined, runRequestedBy: undefined, lastRun: { status: "running", startedAt: now } });
+    const runId = await ctx.db.insert("routineRuns", {
+      routineId: r._id,
+      userId: r.userId,
+      hostId,
+      trigger,
+      status: "running",
+      startedByName,
+      startedAt: now,
+      ...(r.bot && runTokenHash ? { runTokenHash } : {}),
+    });
+    // A bot's run that starts with an answer or a message continues its last session with it.
+    const pending = r.bot && r.pendingMessageId ? await ctx.db.get(r.pendingMessageId) : null;
+    await ctx.db.patch(r._id, { runRequestedAt: undefined, runRequestedBy: undefined, pendingMessageId: undefined, lastRun: { status: "running", startedAt: now } });
     await pruneRuns(ctx, r._id);
-    const secrets = (await secretRows(ctx, r.userId, r.teamId)).map((s) => ({ name: s.name, iv: s.valueIv, ct: s.valueCt }));
-    return { ok: true as const, runId, trigger, routine: routineShape(r), secrets };
+    // A bot gets only the secrets granted to it; a loop (or a bot from before grants) all of its owner's.
+    const granted = r.bot?.secrets ? new Set(r.bot.secrets) : null;
+    const secrets = (await secretRows(ctx, r.userId, r.teamId)).filter((s) => !granted || granted.has(s.name)).map((s) => ({ name: s.name, iv: s.valueIv, ct: s.valueCt }));
+    const resume = pending ? { sessionId: r.lastSessionId ?? null, kind: pending.kind, iv: pending.iv, ct: pending.ct, authorName: pending.authorName ?? null } : null;
+    return { ok: true as const, runId, trigger, routine: routineShape(r), secrets, resume };
   },
 });
 
@@ -499,9 +525,11 @@ export const finishRun = mutation({
     costUsd: v.optional(v.number()),
     turns: v.optional(v.number()),
     sessionId: v.optional(v.string()),
+    /** A bot's run: what its thread gets (the gateway sealed it), and a hash to tell news from a repeat. */
+    message: v.optional(v.object({ iv: v.string(), ct: v.string(), hash: v.string() })),
     now: v.number(),
   },
-  handler: async (ctx, { secret, hostId, runId, now, ...fields }) => {
+  handler: async (ctx, { secret, hostId, runId, now, message, ...fields }) => {
     assertService(secret);
     const id = ctx.db.normalizeId("routineRuns", runId);
     const run = id ? await ctx.db.get(id) : null;
@@ -511,6 +539,7 @@ export const finishRun = mutation({
     if (r?.lastRun && r.lastRun.startedAt === run.startedAt) {
       await ctx.db.patch(r._id, { lastRun: { status: fields.status, startedAt: run.startedAt, finishedAt: now } });
     }
+    if (r?.bot) await botRunMessage(ctx, r, run, fields.status, fields.sessionId, message, now);
     const notice = fields.status === "failed" && r ? await failureNotice(ctx, run, r, now) : null;
     return { ok: true as const, notice };
   },
@@ -536,6 +565,34 @@ export const updateRunProgress = mutation({
     return { ok: true as const };
   },
 });
+
+/**
+ * What a bot's finished run puts in its thread: a failure always; a result when the bot reports
+ * every run, or when it says something new and isn't waiting for an answer (its question is the
+ * news then). Keeps the session to continue the conversation with.
+ */
+async function botRunMessage(
+  ctx: MutationCtx,
+  r: Doc<"routines">,
+  run: Doc<"routineRuns">,
+  status: "running" | "succeeded" | "failed",
+  sessionId: string | undefined,
+  message: { iv: string; ct: string; hash: string } | undefined,
+  now: number,
+) {
+  const patch: Partial<Doc<"routines">> = {};
+  const failed = status === "failed";
+  if (sessionId) patch.lastSessionId = sessionId;
+  // A run that failed without a session (its session to resume was gone, say) starts the next one afresh.
+  else if (failed) patch.lastSessionId = undefined;
+  const asked = r.openQuestionId !== undefined;
+  const fresh = message && message.hash !== r.lastResultHash;
+  if (message && (failed || r.bot?.report === "every_run" || (fresh && !asked))) {
+    await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "bot", kind: failed ? "failure" : "result", iv: message.iv, ct: message.ct, runId: run._id, createdAt: now });
+    if (!failed) patch.lastResultHash = message.hash;
+  }
+  if (Object.keys(patch).length) await ctx.db.patch(r._id, patch);
+}
 
 /** A routine that keeps failing is pushed about again after this long. */
 const NOTICE_REPEAT_MS = 24 * 3600_000;
@@ -575,6 +632,6 @@ export const runOwner = query({
     const run = id ? await ctx.db.get(id) : null;
     if (!run || run.hostId !== hostId) return null;
     const r = await ctx.db.get(run.routineId);
-    return { uid: run.userId, teamId: r?.teamId ?? null };
+    return { uid: run.userId, teamId: r?.teamId ?? null, bot: Boolean(r?.bot) };
   },
 });

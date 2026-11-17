@@ -2,9 +2,10 @@
 // gets in Claude with the Ambient connector: the team's MCP server, built in this process for
 // them (as /t/<team>/mcp would be), connected over an in-memory transport. Same tools, same
 // instructions, same permissions; no second implementation of the brain's reads.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { toolLoop, type Turn } from "../ai/loop.ts";
+
+export type { Turn };
 
 /** The tools the bot may use: reading the team's brain, and a correction when the person asks for one. */
 export const BOT_TOOLS = new Set([
@@ -20,13 +21,6 @@ export const BOT_TOOLS = new Set([
   "suggest_correction",
 ]);
 
-export interface Turn {
-  role: "user" | "assistant";
-  text: string;
-}
-
-const MAX_STEPS = 8;
-
 function botInstructions(language: "en" | "de", name: string): string {
   const lang = language === "de" ? "German, informal (du), Swiss/Liechtenstein spelling (ss, not ß)" : "English";
   return [
@@ -39,8 +33,6 @@ function botInstructions(language: "en" | "de", name: string): string {
   ].join("\n");
 }
 
-type ContentBlock = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: unknown };
-
 export async function answer(o: {
   server: McpServer;
   apiKey: string;
@@ -51,67 +43,15 @@ export async function answer(o: {
   question: string;
   fetchImpl?: typeof fetch;
 }): Promise<string> {
-  const f = o.fetchImpl ?? fetch;
-  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "ambient-msteams", version: "1" });
-  await o.server.connect(serverSide);
-  await client.connect(clientSide);
-  try {
-    const tools = (await client.listTools()).tools
-      .filter((t) => BOT_TOOLS.has(t.name))
-      .map((t) => ({ name: t.name, description: t.description ?? "", input_schema: t.inputSchema }));
-    const system = `${client.getInstructions() ?? ""}\n\n${botInstructions(o.language, o.name)}`.trim();
-    const messages: { role: "user" | "assistant"; content: unknown }[] = [
-      ...o.history.map((t) => ({ role: t.role, content: t.text })),
-      { role: "user", content: o.question },
-    ];
-    for (let step = 0; step < MAX_STEPS; step++) {
-      const res = await f("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": o.apiKey, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: o.model, max_tokens: 1500, system, tools, messages }),
-        signal: AbortSignal.timeout(90_000),
-      });
-      const body = (await res.json().catch(() => ({}))) as { content?: ContentBlock[]; stop_reason?: string; error?: { message?: string } };
-      if (!res.ok) throw new Error(`Anthropic ${res.status}: ${body.error?.message ?? ""}`.trim());
-      const content = body.content ?? [];
-      messages.push({ role: "assistant", content });
-      const calls = content.filter((c): c is Extract<ContentBlock, { type: "tool_use" }> => c.type === "tool_use");
-      if (body.stop_reason !== "tool_use" || !calls.length) {
-        return content
-          .filter((c): c is Extract<ContentBlock, { type: "text" }> => c.type === "text")
-          .map((c) => c.text)
-          .join("\n")
-          .trim();
-      }
-      const results = [];
-      for (const call of calls) {
-        if (!BOT_TOOLS.has(call.name)) {
-          results.push({ type: "tool_result", tool_use_id: call.id, content: "This tool isn't available here.", is_error: true });
-          continue;
-        }
-        const out = await client.callTool({ name: call.name, arguments: (call.input ?? {}) as Record<string, unknown> }).catch((err: Error) => ({
-          content: [{ type: "text", text: err.message }],
-          isError: true,
-        }));
-        // The structured result when the tool gives one: it carries what the text leaves out (a page's
-        // front matter: owner, sources, status), as Claude Code and other MCP clients see it.
-        const structured = (out as { structuredContent?: unknown }).structuredContent;
-        const text = (
-          structured
-            ? JSON.stringify(structured)
-            : ((out.content ?? []) as { type: string; text?: string }[])
-                .filter((c) => c.type === "text")
-                .map((c) => c.text ?? "")
-                .join("\n")
-        ).slice(0, 40_000);
-        results.push({ type: "tool_result", tool_use_id: call.id, content: text || "(empty)", ...(out.isError ? { is_error: true } : {}) });
-      }
-      messages.push({ role: "user", content: results });
-    }
-    return "";
-  } finally {
-    await client.close().catch(() => undefined);
-    await o.server.close().catch(() => undefined);
-  }
+  return toolLoop({
+    server: o.server,
+    apiKey: o.apiKey,
+    model: o.model,
+    instructions: botInstructions(o.language, o.name),
+    allowed: BOT_TOOLS,
+    history: o.history,
+    question: o.question,
+    clientName: "ambient-msteams",
+    fetchImpl: o.fetchImpl,
+  });
 }

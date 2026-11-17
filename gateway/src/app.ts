@@ -29,6 +29,10 @@ import { apnsSender, Notifier, type PushSender } from "./push.ts";
 import { PersonalRepos } from "./repos/personal.ts";
 import { EventHub, PollingRevisionSource, Revisions, type RevisionSource } from "./revisions.ts";
 import { hostRouter } from "./routines/route.ts";
+import { BotService } from "./bots/service.ts";
+import { AmbientChat } from "./bots/ambient.ts";
+import { botRunRouter } from "./bots/route.ts";
+import { AppChannel } from "./channels/channel.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadRunner, RoutineService } from "./routines/service.ts";
 import { sessionUploadRouter } from "./sessions/route.ts";
@@ -36,7 +40,8 @@ import { SessionService } from "./sessions/service.ts";
 import { MicrosoftConnectFlow, MicrosoftConnector } from "./microsoft-connect.ts";
 import { TeamLink } from "./teams.ts";
 import { buildMcpServer, correctionNote } from "./mcp/tools.ts";
-import { TEAM_MCP_SCOPES } from "./mcp/route.ts";
+import { MCP_SCOPES, TEAM_MCP_SCOPES } from "./mcp/route.ts";
+import { personalInstructions } from "./mcp/context.ts";
 import { MsTeamsBot } from "./msteams/bot.ts";
 import { BotClient, InboundVerifier } from "./msteams/botframework.ts";
 import { msteamsRouter } from "./msteams/route.ts";
@@ -65,6 +70,8 @@ export interface AppDeps {
   streamMaxMs?: number;
   /** Tests: the Teams bots against a fake Bot Framework, with their state in memory. */
   msteams?: { fetchImpl?: typeof fetch; verifier?: InboundVerifier; apiKey?: string };
+  /** Tests: Ambient's chat against a fake Anthropic. */
+  ambient?: { fetchImpl?: typeof fetch; apiKey?: string };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
   microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
@@ -107,7 +114,10 @@ export function createApp(deps: AppDeps) {
     origin: config.origin,
     runner: runner && { version: runner.version, sha256: runner.sha256, signature: runner.signature },
     notifier,
+    bots: config.bots,
   });
+  // Bots talk to people through channels; the app is the first (docs/bots.md).
+  const bots = new BotService({ routines, channels: [new AppChannel(notifier)] });
   const userName = async (uid: string) => (await directory.user(uid))?.name;
   const readers: ReaderSource = {
     personal: (uid) => personal.reader(uid),
@@ -176,9 +186,23 @@ export function createApp(deps: AppDeps) {
   // Settings an AI app can change for its user, the same service as the app's routes.
   const settings = new SettingsService({ directory, teams, control });
   const voices = new Voices({ control, personal, directory });
-  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, settings, voices, version: VERSION, userName }));
+  // Ambient, the master bot: Claude with the person's own MCP server, every scope, as /mcp gives it.
+  const ambient = new AmbientChat({
+    control,
+    keys: routines.keys,
+    mcp: async (uid) => {
+      const principal = { uid, scopes: new Set(MCP_SCOPES), via: "pat" as const, clientId: "ambient-chat", personal: true, teams: await directory.teamsOf(uid) };
+      const personal = await personalInstructions(principal, readers, { name: await userName(uid).catch(() => undefined) });
+      return buildMcpServer({ principal, readers, routines, bots, settings, voices, version: VERSION, personal });
+    },
+    apiKey: deps.ambient?.apiKey ?? process.env.ANTHROPIC_API_KEY,
+    model: config.ambientModel ?? "claude-sonnet-5-5",
+    fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
+  });
+  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
+  app.use(botRunRouter({ bots }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
   app.use(
     appApiRouter({
@@ -195,6 +219,8 @@ export function createApp(deps: AppDeps) {
       repos,
       sessions,
       routines,
+      bots,
+      ambient,
       appleRevoke: deps.appleRevoke ?? appleRevoker(config.appleRevoke, deps.fetchImpl),
       microsoftClientId: microsoft ? config.microsoftClientIds?.[0] : undefined,
       googleClientId: google ? config.googleClientIds?.[0] : undefined,
@@ -232,5 +258,5 @@ export function createApp(deps: AppDeps) {
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });
 
-  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
+  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
 }

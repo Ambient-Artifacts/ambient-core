@@ -4,7 +4,10 @@
 //   sudo node ambient-runner.mjs setup <code>   connect this computer (code from the Ambient app)
 //   ambient-runner sync                          every minute (ambient-runner.timer): one systemd
 //                                                timer per routine, "Run now" requests started
-//   ambient-runner run <routine-id>              what each routine's timer starts: claude -p
+//   ambient-runner run <routine-id>              what each routine's timer starts: claude -p (a bot
+//                                                with isolation "container": in its own Podman container)
+//   ambient-runner bot-mcp                       the ask_owner tool a bot's run gets (MCP over stdio)
+//   ambient-runner image                         build the bots' container image now
 //   ambient-runner status | uninstall
 //
 // One file, no dependencies, Node 18 or newer. The gateway serves it at /runner/ambient-runner.mjs
@@ -17,7 +20,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.5.1";
+const VERSION = "0.6.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -380,8 +383,16 @@ function runEnv(cfg, extra = {}, secrets = {}) {
   return env;
 }
 
-function systemPrompt(routine, trigger) {
+function systemPrompt(routine, trigger, bot) {
   const how = trigger === "manual" ? 'started with "Run now" in the Ambient app' : "started by its schedule";
+  if (bot) {
+    return [
+      `You're "${routine.name}", one of your owner's bots in Ambient, running on ${hostname()}, ${how}.`,
+      "Nobody is watching this run. When you need a decision only your owner can make (which of two real options, a missing detail, a go-ahead for something that can't be undone), ask with the ask_owner tool: one short question, with choices when there are a few clear options. Don't ask about what you can sensibly decide yourself.",
+      "If ask_owner comes back without an answer, finish the run: say in a sentence or two where you are and what you're waiting for. You'll be started again with the answer, in this same conversation.",
+      "Your VERY LAST message becomes what your owner reads in your thread in the Ambient app: a short, useful summary of what you did and anything they need to look at. Nothing after it.",
+    ].join(" ");
+  }
   return [
     `You're running the Ambient routine "${routine.name}" on ${hostname()}, ${how}.`,
     "Nobody is watching this run and nobody can answer questions: make reasonable choices and say what you assumed.",
@@ -389,18 +400,180 @@ function systemPrompt(routine, trigger) {
   ].join(" ");
 }
 
-/** One line per step for the journal (journalctl -u ambient-routine-<id>). */
-function journalLine(event) {
-  if (event.type === "assistant") {
-    for (const c of event.message?.content ?? []) {
-      if (c.type === "text" && c.text.trim()) log(`› ${c.text.trim().replace(/\s+/g, " ").slice(0, 300)}`);
-      if (c.type === "tool_use") {
-        const input = c.input ?? {};
-        const what = input.command ?? input.file_path ?? input.url ?? input.pattern ?? input.description ?? "";
-        log(`· ${c.name}${what ? `: ${String(what).replace(/\s+/g, " ").slice(0, 200)}` : ""}`);
+// ---- runtimes ----
+//
+// A bot names its runtime; each has an adapter that knows how to start it and turns its output into
+// Ambient's run events (RunEvent in spec/src/bots.ts): status, tool, text, asked, result. Nothing
+// past the adapter reads a runtime's own format, so another runtime is another adapter.
+
+const ADAPTERS = {
+  "claude-code": {
+    /** The command line after the binary, and what goes to stdin. */
+    start(cfg, routine, runInfo, bot, resume, mcpConfig) {
+      const args = ["-p", "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", systemPrompt(routine, runInfo.trigger, bot)];
+      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--allowedTools", "mcp__ambient-bot__ask_owner");
+      if (resume?.sessionId) args.push("--resume", resume.sessionId);
+      const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
+      return { args, stdin };
+    },
+    /** One stream-json line as run events. */
+    events(line) {
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        return [{ type: "status", text: line }];
       }
+      if (event.type === "result") {
+        return [
+          {
+            type: "result",
+            ok: !event.is_error,
+            text: typeof event.result === "string" ? event.result : "",
+            subtype: event.subtype,
+            costUsd: typeof event.total_cost_usd === "number" ? event.total_cost_usd : undefined,
+            turns: typeof event.num_turns === "number" ? event.num_turns : undefined,
+            session: typeof event.session_id === "string" ? event.session_id : undefined,
+          },
+        ];
+      }
+      if (event.type !== "assistant") return [];
+      const out = [];
+      for (const c of event.message?.content ?? []) {
+        if (c.type === "text" && c.text.trim()) out.push({ type: "text", text: c.text.trim() });
+        if (c.type === "tool_use") {
+          const input = c.input ?? {};
+          const what = input.command ?? input.file_path ?? input.url ?? input.pattern ?? input.description ?? input.question ?? "";
+          out.push({ type: "tool", name: c.name, detail: what ? String(what).replace(/\s+/g, " ").slice(0, 200) : undefined });
+        }
+      }
+      return out;
+    },
+  },
+};
+
+/** One line per event for the journal (journalctl -u ambient-routine-<id>). */
+function journalLine(e) {
+  if (e.type === "text") log(`› ${e.text.replace(/\s+/g, " ").slice(0, 300)}`);
+  else if (e.type === "tool") log(`· ${e.name}${e.detail ? `: ${e.detail}` : ""}`);
+  else if (e.type === "status") log(e.text);
+}
+
+// ---- containers ----
+//
+// A bot with isolation "container" runs in its own Podman container: its volume is its workspace
+// and HOME (repos it cloned, Claude Code's sessions to resume), it gets only its granted secrets,
+// and it can't use more than its share of the machine. The image is built here from this file's
+// Containerfile, once per image version.
+
+const IMAGE_VERSION = "1";
+const IMAGE = `localhost/ambient-bot:${IMAGE_VERSION}`;
+const CONTAINERFILE = `FROM docker.io/library/node:24-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gh jq ripgrep python3 openssh-client less procps \\
+ && rm -rf /var/lib/apt/lists/*
+RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
+# The image is the version; a run never updates Claude Code in place (it'd be lost with the container).
+ENV DISABLE_AUTOUPDATER=1 HOME=/home/bot
+WORKDIR /home/bot
+USER node
+`;
+/** What every bot's container gets at most. */
+const LIMITS = ["--memory", process.env.AMBIENT_BOT_MEMORY || "4g", "--cpus", process.env.AMBIENT_BOT_CPUS || "2", "--pids-limit", "1024"];
+
+function podman() {
+  const p = sys("podman");
+  return existsSync(p) ? p : null;
+}
+
+/** Build the bots' image unless it's there. */
+function ensureImage(p) {
+  if (spawnSync(p, ["image", "exists", IMAGE]).status === 0) return null;
+  log(`Building the bots' image ${IMAGE} (once, a few minutes)…`);
+  const dir = join(STATE_DIR, "image");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "Containerfile"), CONTAINERFILE);
+  const r = spawnSync(p, ["build", "-t", IMAGE, "-f", join(dir, "Containerfile"), dir], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) return `Couldn't build the bots' image: ${(r.stderr || r.stdout || "").trim().split("\n").slice(-6).join("\n")}`;
+  return null;
+}
+
+/** Variables a bot's Claude Code signs in with: the computer's own (extra.env), never a secret's. */
+const AUTH_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL"];
+
+// ---- ask_owner: a small MCP server for a bot's run ----
+//
+// `ambient-runner bot-mcp` speaks MCP over stdio (one JSON message per line) with one tool,
+// ask_owner. Claude Code starts it from the run's MCP config, inside the bot's container when it
+// has one. It holds the run's token, which only asks while this run goes.
+
+const ASK_TOOL = {
+  name: "ask_owner",
+  description:
+    "Ask your owner (the person this bot works for) a question and wait a few minutes for the answer in the Ambient app. Use it for decisions only they can make. Give choices when there are a few clear options.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      question: { type: "string", description: "One short question." },
+      choices: { type: "array", items: { type: "string" }, maxItems: 6, description: "Answers to pick from, if there are a few clear options." },
+    },
+    required: ["question"],
+  },
+};
+
+async function botMcp() {
+  const server = (process.env.AMBIENT_SERVER || DEFAULT_SERVER).replace(/\/+$/, "");
+  const token = process.env.AMBIENT_RUN_TOKEN || "";
+  const waitMs = Math.min(Number(process.env.AMBIENT_ASK_WAIT_S || 180), 600) * 1000;
+  const send = (m) => process.stdout.write(`${JSON.stringify(m)}\n`);
+  const api = async (method, path, body) => {
+    const res = await fetch(`${server}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(30_000),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
+    return json;
+  };
+  const ask = async ({ question, choices }) => {
+    if (typeof question !== "string" || !question.trim()) return { text: "Pass a question.", error: true };
+    const { id } = await api("POST", "/v1/bot/ask", { question, ...(Array.isArray(choices) && choices.length ? { choices: choices.map(String).slice(0, 6) } : {}) });
+    const until = Date.now() + waitMs;
+    while (Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 5000));
+      const a = await api("GET", `/v1/bot/questions/${id}`).catch(() => ({ answer: null }));
+      if (typeof a.answer === "string") return { text: `${a.author ?? "Your owner"} answered: ${a.answer}` };
     }
-  }
+    return {
+      text: "No answer yet; they'll see the question in the Ambient app. Finish this run now: say in a sentence or two where you are and what you're waiting for. You'll be started again with the answer, in this same conversation.",
+    };
+  };
+  createInterface({ input: process.stdin }).on("line", async (line) => {
+    let m;
+    try {
+      m = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (m.id === undefined) return; // a notification
+    try {
+      if (m.method === "initialize") {
+        send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: m.params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "ambient-bot", version: VERSION } } });
+      } else if (m.method === "tools/list") {
+        send({ jsonrpc: "2.0", id: m.id, result: { tools: [ASK_TOOL] } });
+      } else if (m.method === "tools/call" && m.params?.name === "ask_owner") {
+        const out = await ask(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't ask: ${err.message}. Decide yourself if you can, and say so in your summary.`, error: true }));
+        send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
+      } else if (m.method === "ping") {
+        send({ jsonrpc: "2.0", id: m.id, result: {} });
+      } else {
+        send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Unknown method ${m.method}` } });
+      }
+    } catch (err) {
+      send({ jsonrpc: "2.0", id: m.id, error: { code: -32603, message: err.message } });
+    }
+  });
 }
 
 async function run(id) {
@@ -416,11 +589,14 @@ async function run(id) {
     }
     die(`Couldn't start the run: ${err.message}`);
   }
-  // `env`: the owner's secrets (a GitHub token, say). They go to Claude Code's environment only.
-  const { run: runInfo, routine, env: secrets = {} } = start;
+  // `env`: the owner's secrets (a bot: only those granted to it). They go to the run only.
+  const { run: runInfo, routine, env: secrets = {}, bot = null, resume = null, runToken = null } = start;
   const user = cfg.user;
-  const folder = routine.folder ? expand(routine.folder, user) : cfg.folder || home(user);
-  log(`Run ${runInfo.id} of "${routine.name}" (${runInfo.trigger}) in ${folder}`);
+  const runtime = bot?.runtime ?? "claude-code";
+  const adapter = ADAPTERS[runtime];
+  const contained = bot?.isolation === "container";
+  const folder = contained ? "/home/bot" : routine.folder ? expand(routine.folder, user) : cfg.folder || home(user);
+  log(`Run ${runInfo.id} of "${routine.name}" (${runInfo.trigger}${resume ? ", continuing" : ""}) ${contained ? "in its container" : `in ${folder}`}`);
 
   const finish = async (result) => {
     try {
@@ -429,36 +605,89 @@ async function run(id) {
       console.error(`Couldn't report the run: ${err.message}`);
     }
   };
-
-  if (!existsSync(folder) || !statSync(folder).isDirectory()) {
-    await finish({ status: "failed", summary: `The folder ${folder} doesn't exist on ${hostname()}.` });
+  const fail = async (summary) => {
+    await finish({ status: "failed", summary });
     process.exit(1);
-  }
+  };
 
-  const args = ["-p", "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", systemPrompt(routine, runInfo.trigger)];
-  // As root (the runner's own units), Claude Code runs as the routine's user, with that user's
-  // groups: the token stays in this process, which that user can't read.
+  if (!adapter) await fail(`This runner (${VERSION}) can't run "${runtime}" yet. Update the runner, or switch the bot to Claude Code.`);
+  if (!contained && (!existsSync(folder) || !statSync(folder).isDirectory())) await fail(`The folder ${folder} doesn't exist on ${hostname()}.`);
+
+  // A bot's run gets the ask_owner tool: its MCP config, readable by the run (and only it).
   const drop = process.getuid?.() === 0 && user !== "root";
   const as = drop ? account(user) : null;
-  if (drop && (!Number.isInteger(as.uid) || !Number.isInteger(as.gid) || spawnSync(sys("setpriv"), ["--version"]).status !== 0)) {
-    await finish({ status: "failed", summary: `Can't run as ${user} on ${hostname()}: the account or setpriv (util-linux) is missing.` });
-    process.exit(1);
+  if (!contained && drop && (!Number.isInteger(as.uid) || !Number.isInteger(as.gid) || spawnSync(sys("setpriv"), ["--version"]).status !== 0)) {
+    await fail(`Can't run as ${user} on ${hostname()}: the account or setpriv (util-linux) is missing.`);
   }
-  const child = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
-    cwd: folder,
-    env: runEnv(
-      cfg,
-      {
-        AMBIENT_ROUTINE_ID: routine.id,
-        AMBIENT_ROUTINE_NAME: routine.name,
-        AMBIENT_RUN_ID: runInfo.id,
-        ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}),
-      },
-      secrets,
-    ),
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  child.stdin.end(routine.prompt);
+  const runDir = join(STATE_DIR, "runs", runInfo.id);
+  let mcpFile = null;
+  if (bot && runToken) {
+    // The routine's user passes through runs/ (no listing) into its own run's folder.
+    mkdirSync(join(STATE_DIR, "runs"), { recursive: true, mode: 0o711 });
+    chmodSync(join(STATE_DIR, "runs"), 0o711);
+    mkdirSync(runDir, { mode: 0o700 });
+    mcpFile = join(runDir, "mcp.json");
+    const runnerPath = contained ? "/opt/ambient/ambient-runner.mjs" : fileURLToPath(import.meta.url);
+    const node = contained ? "node" : cfg.node;
+    writeFileSync(
+      mcpFile,
+      JSON.stringify({ mcpServers: { "ambient-bot": { command: node, args: [runnerPath, "bot-mcp"], env: { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } } } }),
+      { mode: 0o600 },
+    );
+    // The container's user (node, uid 1000) or the routine's user reads it.
+    const owner = contained ? { uid: 1000, gid: 1000 } : as;
+    if (owner && process.getuid?.() === 0) {
+      chownSync(runDir, owner.uid, owner.gid);
+      chownSync(mcpFile, owner.uid, owner.gid);
+    }
+  }
+  const cleanup = () => rmSync(runDir, { recursive: true, force: true });
+
+  const { args, stdin } = adapter.start(cfg, routine, runInfo, bot, resume, mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile));
+  let child;
+  let containerName = null;
+  if (contained) {
+    const p = podman();
+    if (!p) {
+      cleanup();
+      await fail(`Podman isn't installed on ${hostname()}, and this bot runs in its own container. Install it (apt-get install -y podman), or switch the bot to run on the computer itself.`);
+    }
+    const built = ensureImage(p);
+    if (built) {
+      cleanup();
+      await fail(built);
+    }
+    containerName = `ambient-run-${runInfo.id}`.slice(0, 60);
+    // Values reach podman through its environment (never its command line); `-e NAME` passes one on.
+    const pass = { ...pick(process.env, new RegExp(`^(${AUTH_ENV.join("|")})$`)), ...Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k))) };
+    const podArgs = [
+      "run", "--rm", "-i", "--name", containerName, "--user", "node", "--security-opt", "no-new-privileges", "--cap-drop", "all", ...LIMITS,
+      "-v", `ambient-bot-${routine.id}:/home/bot:U`,
+      "-v", `${fileURLToPath(import.meta.url)}:/opt/ambient/ambient-runner.mjs:ro`,
+      ...(mcpFile ? ["-v", `${mcpFile}:/opt/ambient/mcp.json:ro`] : []),
+      "-w", "/home/bot",
+      "-e", `AMBIENT_ROUTINE_ID=${routine.id}`, "-e", `AMBIENT_ROUTINE_NAME=${routine.name.replace(/[\r\n]/g, " ")}`, "-e", `AMBIENT_RUN_ID=${runInfo.id}`,
+      ...Object.keys(pass).flatMap((k) => ["-e", k]),
+      IMAGE, "claude", ...args,
+    ];
+    child = spawn(p, podArgs, { env: { PATH: SYSTEM_PATH.join(":"), HOME: "/root", ...pass }, stdio: ["pipe", "pipe", "pipe"] });
+  } else {
+    child = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
+      cwd: folder,
+      env: runEnv(
+        cfg,
+        {
+          AMBIENT_ROUTINE_ID: routine.id,
+          AMBIENT_ROUTINE_NAME: routine.name,
+          AMBIENT_RUN_ID: runInfo.id,
+          ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}),
+        },
+        secrets,
+      ),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  }
+  child.stdin.end(stdin);
 
   let result = null;
   let stderr = "";
@@ -466,14 +695,12 @@ async function run(id) {
   // Progress: tool uses and status lines the app shows while the run is going.
   const progressLines = [];
   let progressDirty = false;
-  let bestText = "";  // longest text block seen — fallback if the result text is generic
+  let bestText = ""; // longest text block seen — fallback if the result text is generic
   const reportProgress = async () => {
     if (!progressDirty) return;
     progressDirty = false;
     try {
-      await call(cfg, "PATCH", `/v1/host/runs/${runInfo.id}`, {
-        summary: progressLines.join("\n").slice(0, SUMMARY_MAX),
-      }, { retries: 0 });
+      await call(cfg, "PATCH", `/v1/host/runs/${runInfo.id}`, { summary: progressLines.join("\n").slice(0, SUMMARY_MAX) }, { retries: 0 });
     } catch {
       // Best effort; the final result always goes through.
     }
@@ -482,31 +709,21 @@ async function run(id) {
   progressTimer.unref();
 
   createInterface({ input: child.stdout }).on("line", (line) => {
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      return log(line);
-    }
-    if (event.type === "result") result = event;
-    else {
-      journalLine(event);
-      if (event.type === "assistant") {
-        for (const c of event.message?.content ?? []) {
-          if (c.type === "tool_use") {
-            const input = c.input ?? {};
-            const what = input.command ?? input.file_path ?? input.description ?? "";
-            progressLines.push(`· ${c.name}${what ? `: ${String(what).replace(/\s+/g, " ").slice(0, 120)}` : ""}`);
-            progressDirty = true;
-          } else if (c.type === "text" && c.text.trim()) {
-            const trimmed = c.text.trim();
-            if (trimmed.length > bestText.length) bestText = trimmed;
-            // The latest text replaces the previous one (it's the current status, not a log).
-            if (progressLines.length && progressLines[progressLines.length - 1].startsWith("› ")) progressLines.pop();
-            progressLines.push(`› ${trimmed.replace(/\s+/g, " ").slice(0, 200)}`);
-            progressDirty = true;
-          }
-        }
+    for (const e of adapter.events(line)) {
+      if (e.type === "result") {
+        result = e;
+        continue;
+      }
+      journalLine(e);
+      if (e.type === "tool") {
+        progressLines.push(`· ${e.name}${e.detail ? `: ${e.detail.slice(0, 120)}` : ""}`);
+        progressDirty = true;
+      } else if (e.type === "text") {
+        if (e.text.length > bestText.length) bestText = e.text;
+        // The latest text replaces the previous one (it's the current status, not a log).
+        if (progressLines.length && progressLines[progressLines.length - 1].startsWith("› ")) progressLines.pop();
+        progressLines.push(`› ${e.text.replace(/\s+/g, " ").slice(0, 200)}`);
+        progressDirty = true;
       }
     }
   });
@@ -516,6 +733,7 @@ async function run(id) {
   });
   const stop = () => {
     stopped = true;
+    if (containerName) spawnSync(podman() ?? "podman", ["stop", "-t", "20", containerName]);
     child.kill("SIGTERM");
     setTimeout(() => child.kill("SIGKILL"), 20_000).unref();
   };
@@ -530,16 +748,19 @@ async function run(id) {
     child.on("close", (c) => resolve(c ?? 1));
   });
   clearInterval(progressTimer);
+  cleanup();
 
-  const ok = code === 0 && result && !result.is_error && !stopped;
-  let summary = typeof result?.result === "string" ? result.result : "";
+  const ok = code === 0 && result && result.ok && !stopped;
+  let summary = result?.text ?? "";
   // If the model's last message was a generic wrap-up, use the longest text it wrote instead.
   if (ok && summary.length < 80 && bestText.length > summary.length) summary = bestText;
   if (!ok) {
     const why = stopped
       ? `Stopped: the run reached its ${RUN_LIMIT} limit or was stopped on ${hostname()}.`
       : code === 127
-        ? `Claude Code wasn't found at ${cfg.claude}.`
+        ? contained
+          ? "Podman couldn't start the bot's container."
+          : `Claude Code wasn't found at ${cfg.claude}.`
         : `Claude Code ended with exit code ${code}${result?.subtype ? ` (${result.subtype})` : ""}.`;
     const tail = stderr.trim().split("\n").slice(-6).join("\n");
     summary = [why, summary, tail].filter(Boolean).join("\n\n");
@@ -548,11 +769,11 @@ async function run(id) {
     status: ok ? "succeeded" : "failed",
     exitCode: code,
     summary: summary.slice(0, SUMMARY_MAX * 2) || undefined,
-    costUsd: typeof result?.total_cost_usd === "number" ? result.total_cost_usd : undefined,
-    turns: typeof result?.num_turns === "number" ? result.num_turns : undefined,
-    sessionId: typeof result?.session_id === "string" ? result.session_id : undefined,
+    costUsd: result?.costUsd,
+    turns: result?.turns,
+    sessionId: result?.session,
   });
-  log(`Run ${ok ? "succeeded" : "failed"} (exit ${code}${result?.total_cost_usd !== undefined ? `, $${Number(result.total_cost_usd).toFixed(2)}` : ""})`);
+  log(`Run ${ok ? "succeeded" : "failed"} (exit ${code}${result?.costUsd !== undefined ? `, $${Number(result.costUsd).toFixed(2)}` : ""})`);
   process.exit(ok ? 0 : 1);
 }
 
@@ -719,6 +940,17 @@ switch (cmd) {
   case "run":
     await run(rest[0]);
     break;
+  case "bot-mcp":
+    await botMcp();
+    break;
+  case "image": {
+    const p = podman();
+    if (!p) die("Podman isn't installed. Install it first (apt-get install -y podman).");
+    const err = ensureImage(p);
+    if (err) die(err);
+    log(`The bots' image ${IMAGE} is ready.`);
+    break;
+  }
   case "status":
     status();
     break;
@@ -730,5 +962,5 @@ switch (cmd) {
     log(VERSION);
     break;
   default:
-    die("usage: ambient-runner setup <code> | sync | run <routine-id> | status | uninstall", 2);
+    die("usage: ambient-runner setup <code> | sync | run <routine-id> | image | status | uninstall", 2);
 }

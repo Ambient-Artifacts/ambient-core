@@ -16,6 +16,17 @@ export const routineSchedule = v.object({
   timezone: v.string(),
 });
 
+/** See BotSettings in @brain/spec (the gateway validates before writing). */
+export const botSettings = v.object({
+  face: v.string(),
+  runtime: v.string(),
+  isolation: v.union(v.literal("container"), v.literal("host")),
+  /** Absent: every secret of its owner's (a loop from before bots). */
+  secrets: v.optional(v.array(v.string())),
+  report: v.union(v.literal("news"), v.literal("every_run")),
+});
+export const botMessageKind = v.union(v.literal("result"), v.literal("failure"), v.literal("question"), v.literal("answer"), v.literal("message"));
+
 export default defineSchema({
   users: defineTable({
     appleSub: v.optional(v.string()),
@@ -396,6 +407,16 @@ export default defineSchema({
     lastRun: v.optional(v.object({ status: runStatus, startedAt: v.number(), finishedAt: v.optional(v.number()) })),
     /** When its owner was last sent a push about a failed run (finishRun keeps it to news). */
     failureNoticeAt: v.optional(v.number()),
+    /** A bot: a loop with a face, a thread and a runtime (docs/bots.md). Absent on plain loops. */
+    bot: v.optional(botSettings),
+    /** The bot's question nobody has answered yet. */
+    openQuestionId: v.optional(v.id("botMessages")),
+    /** An answer or message the next run starts with (the run resumes `lastSessionId`). */
+    pendingMessageId: v.optional(v.id("botMessages")),
+    /** The runtime's session of the last run, to continue a conversation. */
+    lastSessionId: v.optional(v.string()),
+    /** Hash of the last result that reached the thread (report "news" skips a repeat). */
+    lastResultHash: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -420,7 +441,41 @@ export default defineSchema({
     costUsd: v.optional(v.number()),
     turns: v.optional(v.number()),
     sessionId: v.optional(v.string()),
-  }).index("by_routine", ["routineId", "startedAt"]),
+    /** A bot's run: the hash of its run token (asks the owner while the run is going). */
+    runTokenHash: v.optional(v.string()),
+  })
+    .index("by_routine", ["routineId", "startedAt"])
+    .index("by_run_token", ["runTokenHash"]),
+
+  /**
+   * A bot's thread: its results, questions and failures, and what people wrote to it. The text
+   * (with a question's choices) is sealed with the owner's data key, like the routine's prompt.
+   */
+  botMessages: defineTable({
+    routineId: v.id("routines"),
+    teamId: v.optional(v.id("teams")),
+    role: v.union(v.literal("bot"), v.literal("user")),
+    kind: botMessageKind,
+    iv: v.string(),
+    ct: v.string(),
+    runId: v.optional(v.id("routineRuns")),
+    /** Who wrote it (user messages). */
+    authorId: v.optional(v.id("users")),
+    authorName: v.optional(v.string()),
+    /** Questions: when they were answered, and by which message. */
+    answeredAt: v.optional(v.number()),
+    answerId: v.optional(v.id("botMessages")),
+    createdAt: v.number(),
+  }).index("by_routine", ["routineId", "createdAt"]),
+
+  /** A person's chat with Ambient (the master bot), sealed with their own data key. */
+  ambientChat: defineTable({
+    userId: v.id("users"),
+    role: v.union(v.literal("user"), v.literal("ambient")),
+    iv: v.string(),
+    ct: v.string(),
+    createdAt: v.number(),
+  }).index("by_user", ["userId", "createdAt"]),
 
   /**
    * Values a routine's runs get as environment variables (a GitHub token, say), per user or per
