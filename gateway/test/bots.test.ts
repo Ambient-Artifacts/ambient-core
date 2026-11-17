@@ -86,6 +86,20 @@ describe("the gate", () => {
   });
 });
 
+describe("the gate by team", () => {
+  it("gives a team's people bots of their own too", async () => {
+    const owner = await signIn(s, "apple-tina", "Tina Roth");
+    const made = await appCall(s, owner.access_token, "POST", "/v1/app/teams", { name: "Bots Lab" });
+    const slug = (made.json.team as { slug: string }).slug;
+    expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: false });
+    s.config.bots!.teams.push(slug);
+    expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true });
+    const own = await appCall(s, owner.access_token, "POST", "/v1/app/routines", { name: "Mine", prompt: "y", schedule: daily, bot: {} });
+    expect(own.status, JSON.stringify(own.json)).toBe(200);
+    expect((own.json.routine as R).bot).not.toBeNull();
+  });
+});
+
 describe("a bot", () => {
   let id: string;
   let runToken: string;

@@ -322,9 +322,17 @@ export class RoutineService {
     return "uid" in owner ? b.users.includes("*") || b.users.includes(owner.uid) : b.teams.includes("*") || b.teams.includes(owner.slug);
   }
 
+  /**
+   * Personal bots: the account is listed, or it's in a team that has bots (the team's people try
+   * bots on their own loops too, without listing every account id).
+   */
+  private personalBots(actor: Actor): boolean {
+    return this.botsOn({ uid: actor.uid }) || this.readable(actor).some((t) => this.botsOn({ slug: t.slug }));
+  }
+
   /** Whether the app shows bots to this user: their own, or one of their teams has them. */
   botsEnabled(actor: Actor): boolean {
-    return (actor.personal && this.botsOn({ uid: actor.uid })) || this.readable(actor).some((t) => this.botsOn({ slug: t.slug }));
+    return (actor.personal && this.personalBots(actor)) || this.readable(actor).some((t) => this.botsOn({ slug: t.slug }));
   }
 
   /** Bots for the owner of `r` (its team, or whoever made a personal one). */
@@ -333,7 +341,7 @@ export class RoutineService {
       const team = this.teamOf(actor, r.teamId);
       return !!team && this.botsOn({ slug: team.slug });
     }
-    return this.botsOn({ uid: r.createdBy });
+    return r.createdBy === actor.uid ? this.personalBots(actor) : this.botsOn({ uid: r.createdBy });
   }
 
   get keys(): RoutineKeys {
@@ -523,7 +531,7 @@ export class RoutineService {
       hostId = await this.resolveComputer(actor, input.computer);
     }
     const owner: Owner = team ? { kind: "team", teamId: team.id } : { kind: "user", uid: actor.uid };
-    if (input.bot && !this.botsOn(team ? { slug: team.slug } : { uid: actor.uid })) throw refused("bots_not_enabled");
+    if (input.bot && !(team ? this.botsOn({ slug: team.slug }) : this.personalBots(actor))) throw refused("bots_not_enabled");
     const sealed = await this.d.keys.seal(owner, "routine:prompt", input.prompt);
     const out = await this.d.control.m(api.routines.create, {
       uid: actor.uid as never,

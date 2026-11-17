@@ -5,7 +5,7 @@ Bots are loops with a face, a thread and a chat with Ambient on top. A bot is a 
 it as a small character whose face says how it's doing. Ambient, the master bot, is a chat in the
 app that answers from the brain and looks after the bots.
 
-The first version is switched on per account and per team (`BRAIN_BOTS`); everyone else keeps
+The first version is switched on per account and per team (`BRAIN_BOTS`; a team's people get bots of their own too); everyone else keeps
 today's loops exactly as they are. Claude Code is the only runtime, behind the seams that let
 others in later: a `runtime` field, the bot spec in `spec/src/bots.ts`, the runner's adapter, run
 events in Ambient's own shape, and a channel interface with the app as its first channel.
