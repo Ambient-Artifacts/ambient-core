@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { Directory } from "../directory.ts";
 import { RoutineError, type Actor, type RoutineService } from "../routines/service.ts";
 import { limiter } from "../limiter.ts";
-import type { AmbientChat } from "./ambient.ts";
+import { ChatAttachment, type AmbientChat } from "./ambient.ts";
 import type { BotService } from "./service.ts";
 import type { AmbientComputers } from "./computer.ts";
 import type { Host } from "../routines/service.ts";
@@ -65,17 +65,18 @@ export function botAppRoutes(
     res.json(await d.ambient.list(a.uid));
   });
 
-  r.post("/v1/app/ambient/chat", d.auth, d.json, async (req, res) => {
+  // Files come along base64 (10 MB of files is about 14 MB of JSON).
+  r.post("/v1/app/ambient/chat", d.auth, express.json({ limit: "16mb" }), async (req, res) => {
     const a = await actor(res);
     if (!d.routines.botsEnabled(a)) return notEnabled(res);
-    const body = Text.safeParse(req.body);
+    const body = z.object({ text: z.string().max(8_000).default(""), attachments: z.array(ChatAttachment).max(4).default([]) }).safeParse(req.body);
     if (!body.success) {
-      res.status(400).json({ error: "bad_request", message: "Write something first (up to 8,000 characters)." });
+      res.status(400).json({ error: "bad_request", message: "Write something (up to 8,000 characters), with up to 4 files." });
       return;
     }
     try {
       const name = (await d.directory.user(a.uid))?.name ?? "them";
-      const { message, pending } = await d.ambient.send(a.uid, name, body.data.text);
+      const { message, pending } = await d.ambient.send(a.uid, name, body.data.text, body.data.attachments);
       res.json({ message, pending });
     } catch (err) {
       fail(res, err);

@@ -22,7 +22,8 @@ export async function toolLoop(o: {
   /** Tool names the model may call; the rest stay hidden. */
   allowed: Set<string>;
   history: Turn[];
-  question: string;
+  /** The new message: text, or content blocks (text, images, documents). */
+  question: string | unknown[];
   maxSteps?: number;
   maxTokens?: number;
   clientName?: string;

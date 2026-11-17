@@ -232,6 +232,15 @@ describe("Ambient's chat", () => {
     expect(JSON.stringify(await s.t.run(async (ctx) => ctx.db.query("ambientChat").collect()))).not.toContain("How are my bots");
     expect((await appCall(s, lena.access_token, "DELETE", "/v1/app/ambient/chat")).status).toBe(204);
     expect(((await appCall(s, lena.access_token, "GET", "/v1/app/ambient/chat")).json as typeof chat).messages).toEqual([]);
+
+    // A photo goes to Claude as an image block, with the text after it.
+    anthropicCalls.length = 0;
+    const jpg = Buffer.from("ffd8ffe0", "hex").toString("base64");
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "What's this?", attachments: [{ name: "p.jpg", type: "image/jpeg", data: jpg }] });
+    for (let i = 0; i < 50 && anthropicCalls.length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+    const first = anthropicCalls[0]!.messages.at(-1) as { content: { type: string; source?: { media_type: string } }[] };
+    expect(first.content.map((b) => b.type)).toEqual(["image", "text"]);
+    expect(first.content[0]!.source?.media_type).toBe("image/jpeg");
   });
 });
 
@@ -372,6 +381,8 @@ describe("signing in", () => {
     writeFileSync(
       join(bin, "claude"),
       `#!/bin/sh
+# --version (sync asks) runs in the runner's own folder: write nothing there.
+if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 env > env.txt
 cat > /dev/null
 echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'
@@ -451,6 +462,8 @@ describe("whose Claude a computer uses", () => {
     writeFileSync(
       join(bin, "claude"),
       `#!/bin/sh
+# --version (sync asks) runs in the runner's own folder: write nothing there.
+if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 env > env.txt
 cat > /dev/null
 echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'

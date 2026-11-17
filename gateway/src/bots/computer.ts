@@ -23,6 +23,8 @@ export interface ComputerJob {
   /** The chat was cleared (or is new): start a new session; `history` is what it starts from. */
   fresh: boolean;
   history: Turn[];
+  /** Files sent with the message (base64); the computer saves them in the person's folder. */
+  attachments?: { name: string; type: string; data: string }[];
   /** The person's token for Ambient's MCP (the same until it's renewed). */
   token: string;
 }
