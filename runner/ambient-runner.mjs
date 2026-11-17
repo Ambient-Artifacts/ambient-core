@@ -556,7 +556,9 @@ function runEnv(cfg, extra = {}, secrets = {}) {
   const allowed = Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k)));
   const env = { ...process.env, ...allowed, ...extra };
   delete env.AMBIENT_HOST_TOKEN;
-  for (const k of Object.keys(env)) if (k.startsWith("CLAUDE_CODE_") || k === "CLAUDECODE") delete env[k];
+  // A Claude Code session's own variables stay out (when the runner itself is started from one); the
+  // computer's sign-in (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`, in extra.env) stays in.
+  for (const k of Object.keys(env)) if ((k.startsWith("CLAUDE_CODE_") && k !== "CLAUDE_CODE_OAUTH_TOKEN") || k === "CLAUDECODE") delete env[k];
   return env;
 }
 
