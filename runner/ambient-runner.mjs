@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.7.0";
+const VERSION = "0.7.1";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -653,10 +653,10 @@ function journalLine(e) {
 // and it can't use more than its share of the machine. The image is built here from this file's
 // Containerfile, once per image version.
 
-const IMAGE_VERSION = "1";
+const IMAGE_VERSION = "2";
 const IMAGE = `localhost/ambient-bot:${IMAGE_VERSION}`;
 const CONTAINERFILE = `FROM docker.io/library/node:24-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gh jq ripgrep python3 openssh-client less procps \\
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gh jq ripgrep python3 python3-pil webp openssh-client less procps \\
  && rm -rf /var/lib/apt/lists/*
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 # The image is the version; a run never updates Claude Code in place (it'd be lost with the container).
@@ -664,6 +664,21 @@ ENV DISABLE_AUTOUPDATER=1 HOME=/home/bot
 WORKDIR /home/bot
 USER node
 `;
+/**
+ * A team's server keeps the team's wiki here (owned by its brain user, readable by its group): a
+ * team's bots read it, read-only, at the same path as on the server.
+ */
+const TEAM_WIKI = process.env.AMBIENT_TEAM_WIKI || "/srv/brain/wiki";
+
+function teamWikiMount() {
+  try {
+    const st = statSync(TEAM_WIKI);
+    return st.isDirectory() ? ["-v", `${TEAM_WIKI}:${TEAM_WIKI}:ro`, "--group-add", String(st.gid)] : [];
+  } catch {
+    return [];
+  }
+}
+
 /** What every bot's container gets at most. */
 const LIMITS = ["--memory", process.env.AMBIENT_BOT_MEMORY || "4g", "--cpus", process.env.AMBIENT_BOT_CPUS || "2", "--pids-limit", "1024"];
 
@@ -852,6 +867,8 @@ async function run(id) {
       "-v", `ambient-bot-${routine.id}:/home/bot:U`,
       "-v", `${fileURLToPath(import.meta.url)}:/opt/ambient/ambient-runner.mjs:ro`,
       ...(mcpFile ? ["-v", `${mcpFile}:/opt/ambient/mcp.json:ro`] : []),
+      // A team's bot reads the team's wiki (the brain), never writes it.
+      ...teamWikiMount(),
       "-w", "/home/bot",
       "-e", `AMBIENT_ROUTINE_ID=${routine.id}`, "-e", `AMBIENT_ROUTINE_NAME=${routine.name.replace(/[\r\n]/g, " ")}`, "-e", `AMBIENT_RUN_ID=${runInfo.id}`,
       ...Object.keys(pass).flatMap((k) => ["-e", k]),
