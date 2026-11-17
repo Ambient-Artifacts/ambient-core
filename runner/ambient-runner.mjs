@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.7.1";
+const VERSION = "0.7.2";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -567,7 +567,7 @@ function runEnv(cfg, extra = {}, secrets = {}) {
   // A Claude Code session's own variables stay out (when the runner itself is started from one); the
   // computer's sign-in (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`, in extra.env) stays in.
   for (const k of Object.keys(env)) if ((k.startsWith("CLAUDE_CODE_") && k !== "CLAUDE_CODE_OAUTH_TOKEN") || k === "CLAUDECODE") delete env[k];
-  return env;
+  return signInEnv(env);
 }
 
 function systemPrompt(routine, trigger, bot) {
@@ -701,6 +701,17 @@ function ensureImage(p) {
 
 /** Variables a bot's Claude Code signs in with: the computer's own (extra.env), never a secret's. */
 const AUTH_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL"];
+
+/**
+ * One way to sign in: a Claude plan's token (CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`)
+ * wins over an API key when a computer has both. Claude Code itself would take the key, so a team
+ * server whose owner added their plan would keep spending the key (or fail when it ran dry).
+ */
+function signInEnv(env) {
+  if (!env.CLAUDE_CODE_OAUTH_TOKEN) return env;
+  const { ANTHROPIC_API_KEY: _key, ...rest } = env;
+  return rest;
+}
 
 // ---- ask_owner: a small MCP server for a bot's run ----
 //
@@ -861,7 +872,7 @@ async function run(id) {
     }
     containerName = `ambient-run-${runInfo.id}`.slice(0, 60);
     // Values reach podman through its environment (never its command line); `-e NAME` passes one on.
-    const pass = { ...pick(process.env, new RegExp(`^(${AUTH_ENV.join("|")})$`)), ...Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k))) };
+    const pass = { ...signInEnv(pick(process.env, new RegExp(`^(${AUTH_ENV.join("|")})$`))), ...Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k))) };
     const podArgs = [
       "run", "--rm", "-i", "--name", containerName, "--user", "node", "--security-opt", "no-new-privileges", "--cap-drop", "all", ...LIMITS,
       "-v", `ambient-bot-${routine.id}:/home/bot:U`,
@@ -965,7 +976,8 @@ async function run(id) {
         ? contained
           ? "Podman couldn't start the bot's container."
           : `Claude Code wasn't found at ${cfg.claude}.`
-        : `Claude Code ended with exit code ${code}${result?.subtype ? ` (${result.subtype})` : ""}.`;
+        : // "success" is Claude Code's word for a run that ended normally, also with an error.
+          `Claude Code ended with exit code ${code}${result?.subtype && result.subtype !== "success" ? ` (${result.subtype})` : ""}.`;
     const tail = stderr.trim().split("\n").slice(-6).join("\n");
     summary = [why, summary, tail].filter(Boolean).join("\n\n");
   }

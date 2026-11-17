@@ -156,5 +156,7 @@ chat says no computer is connected.
   machine. `set_routine_secret` is left out; secrets go in through the app.
 - Its Claude sign-in is the machine's (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in
   `/etc/ambient-runner/extra.env`), or a plan of its own: `CLAUDE_CODE_OAUTH_TOKEN` from
-  `claude setup-token` in `/etc/ambient-runner/ambient.env`, which then wins over the API key (the
-  team's bots keep the key).
+  `claude setup-token` in `/etc/ambient-runner/ambient.env`, which then wins over the API key.
+- Every run (a bot's, a loop's, Ambient's) uses a Claude plan's `CLAUDE_CODE_OAUTH_TOKEN` over
+  `ANTHROPIC_API_KEY` when the computer has both (runner 0.7.2); in `extra.env` it signs in the
+  team's bots and Ambient alike.

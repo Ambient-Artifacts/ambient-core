@@ -362,3 +362,51 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     p.kill();
   }, 30_000);
 });
+
+describe("signing in", () => {
+  it("uses a Claude plan's token over an API key when a computer has both", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ambient-signin-"));
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    mkdirSync(join(dir, "work"));
+    writeFileSync(
+      join(bin, "claude"),
+      `#!/bin/sh
+env > env.txt
+cat > /dev/null
+echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'
+exit 1
+`,
+    );
+    chmodSync(join(bin, "claude"), 0o755);
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Signed in", prompt: "x", schedule: daily, folder: join(dir, "work"), bot: { isolation: "host" } });
+    const id = (made.json.routine as R).id;
+    const out = await new Promise<{ code: number | null; out: string }>((resolve) => {
+      const p = spawn(process.execPath, [RUNNER, "run", id], {
+        env: {
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
+          HOME: dir,
+          AMBIENT_SERVER: s.origin,
+          AMBIENT_HOST_TOKEN: host,
+          AMBIENT_CLAUDE: join(bin, "claude"),
+          AMBIENT_STATE_DIR: join(dir, "state"),
+          ANTHROPIC_API_KEY: "sk-ant-api-test",
+          CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test",
+        },
+      });
+      let text = "";
+      p.stdout.on("data", (d) => (text += d));
+      p.stderr.on("data", (d) => (text += d));
+      p.on("close", (code) => resolve({ code, out: text }));
+    });
+    expect(out.code).toBe(1);
+    const env = readFileSync(join(dir, "work", "env.txt"), "utf8");
+    expect(env).toContain("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test");
+    expect(env).not.toContain("ANTHROPIC_API_KEY");
+    // Claude Code's "success" subtype isn't shown for a run that failed.
+    const failure = (await thread(id)).messages.at(-1)!.text;
+    expect(failure).toContain("Claude Code ended with exit code 1.");
+    expect(failure).not.toContain("(success)");
+  });
+});
