@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.7.6";
+const VERSION = "0.7.7";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -298,6 +298,8 @@ async function sync() {
 // ambient.env (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`), which then wins over a key.
 
 const AMBIENT_UNIT = "ambient-runner-ambient.service";
+/** How long one of Ambient's own turns (a bot's question, the heartbeat) may take. */
+const INTERNAL_LIMIT_MS = 5 * 60_000;
 const AMBIENT_ENV = join(CONFIG_DIR, "ambient.env");
 
 function ambientUnit(cfg, wanted) {
@@ -372,28 +374,46 @@ async function ambientService() {
   const people = new Map();
   const sessions = readState().ambientSessions ?? {};
 
-  const start = (uid, p, instructions) => {
-    const dir = join(base, uid.replace(/[^A-Za-z0-9_-]/g, "_"));
+  const safe = (uid) => uid.replace(/[^A-Za-z0-9_-]/g, "_");
+  /** The person's folder here (their files, Claude Code's working directory). */
+  const folderOf = (uid) => {
+    const dir = join(base, safe(uid));
     mkdirSync(dir, { recursive: true });
     own(base);
     own(dir);
-    const mcpFile = join(confDir, `${uid.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
-    writeFileSync(mcpFile, JSON.stringify({ mcpServers: { ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${p.token}` } } } }), { mode: 0o600 });
-    own(mcpFile);
-    const args = [
-      "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", ...withModel(cfg.claudeArgs, readState().model),
-      "--mcp-config", mcpFile, "--allowedTools", "mcp__ambient",
-      // Secrets go in through the app, never through a chat.
-      "--disallowedTools", "mcp__ambient__set_routine_secret",
-      "--append-system-prompt", instructions,
-      ...(p.session ? ["--resume", p.session] : []),
-    ];
-    const env = runEnv(cfg, { ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}) });
-    const proc = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
-      cwd: dir,
-      env,
+    return dir;
+  };
+  /** Ambient's tools for the person: an MCP config with their token, readable by the session only. */
+  const mcpConfig = (name, token) => {
+    const file = join(confDir, `${name}.json`);
+    writeFileSync(file, JSON.stringify({ mcpServers: { ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${token}` } } } }), { mode: 0o600 });
+    own(file);
+    return file;
+  };
+  /** What every Ambient session gets: the computer's model, Ambient's tools, and its instructions. */
+  const sessionArgs = (mcpFile, instructions) => [
+    ...withModel(cfg.claudeArgs, readState().model),
+    "--mcp-config", mcpFile, "--allowedTools", "mcp__ambient",
+    // Secrets go in through the app, never through a chat.
+    "--disallowedTools", "mcp__ambient__set_routine_secret",
+    "--append-system-prompt", instructions,
+  ];
+  /** Claude Code as the person's user (the routine user), in their folder. */
+  const claudeProc = (args, cwd) =>
+    spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
+      cwd,
+      env: runEnv(cfg, { ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}) }),
       stdio: ["pipe", "pipe", "pipe"],
     });
+
+  const start = (uid, p, instructions) => {
+    const dir = folderOf(uid);
+    const args = [
+      "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+      ...sessionArgs(mcpConfig(safe(uid), p.token), instructions),
+      ...(p.session ? ["--resume", p.session] : []),
+    ];
+    const proc = claudeProc(args, dir);
     let stderr = "";
     proc.stderr.on("data", (d) => (stderr = (stderr + d).slice(-2000)));
     createInterface({ input: proc.stdout }).on("line", (line) => {
@@ -465,7 +485,40 @@ async function ambientService() {
     }
   };
 
-  /** Each person's turns in order (a promise chain per uid). */
+  /**
+   * A turn that isn't the person's (a bot's question to look at, the heartbeat): a short session of
+   * its own, never the chat's. It doesn't wait behind the chat (or the chat behind it), and its
+   * prompts stay out of the conversation the person has with Ambient. What Ambient then writes to
+   * them reaches the chat's session with their next message (the gateway adds it).
+   */
+  const internal = async (job) => {
+    const dir = folderOf(job.uid);
+    const args = ["-p", "--output-format", "stream-json", "--verbose", ...sessionArgs(mcpConfig(`${safe(job.uid)}-internal`, job.token), job.instructions)];
+    const proc = claudeProc(args, dir);
+    let result = null;
+    let stderr = "";
+    proc.stderr.on("data", (d) => (stderr = (stderr + d).slice(-2000)));
+    createInterface({ input: proc.stdout }).on("line", (line) => {
+      for (const e of ADAPTERS["claude-code"].events(line)) if (e.type === "result") result = e;
+    });
+    const timer = setTimeout(() => proc.kill("SIGKILL"), INTERNAL_LIMIT_MS);
+    timer.unref();
+    proc.stdin.on("error", () => {});
+    proc.stdin.end(job.text);
+    const code = await new Promise((resolve) => {
+      proc.on("error", (err) => {
+        stderr += `\n${err.message}`;
+        resolve(127);
+      });
+      proc.on("close", (c) => resolve(c ?? 1));
+    });
+    clearTimeout(timer);
+    const body = result?.ok ? { text: result.text } : { error: (result?.text || `Claude Code stopped (exit ${code}). ${stderr.trim().split("\n").slice(-2).join(" ")}`).slice(0, 1900) };
+    await call(cfg, "POST", `/v1/host/ambient/${job.id}`, body).catch(() => {});
+    log(`Looked at something for ${job.uid} in its own session (${result?.turns ?? "?"} turns${result?.costUsd !== undefined ? `, $${result.costUsd.toFixed(2)}` : ""})`);
+  };
+
+  /** Each person's turns in order (a promise chain per uid): one chain for the chat, one for the rest. */
   const queues = new Map();
 
   log(`Ambient on this computer: waiting for messages from ${cfg.server}`);
@@ -482,11 +535,12 @@ async function ambientService() {
     if (job?.kind === "exec") void execJob(cfg, job);
     else if (job?.kind === "start") startJob(job);
     else if (job?.uid && job.token) {
-      // One person's turns one after another: their message, a bot's question Ambient looks at,
-      // the heartbeat all go to the same session, which answers one at a time.
-      const prev = queues.get(job.uid) ?? Promise.resolve();
-      const next = prev.then(() => handle(job));
-      queues.set(job.uid, next.catch(() => {}));
+      // One person's messages one after another in their session; Ambient's own turns (a bot's
+      // question, the heartbeat) one after another in short sessions of their own, beside it.
+      const key = job.mode === "internal" ? `${job.uid}:internal` : job.uid;
+      const prev = queues.get(key) ?? Promise.resolve();
+      const next = prev.then(() => (job.mode === "internal" ? internal(job) : handle(job)));
+      queues.set(key, next.catch(() => {}));
     }
   }
 }
