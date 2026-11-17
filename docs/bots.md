@@ -458,6 +458,7 @@ bots/
   .mirrored          generated: the files Ambient wrote (only those are ever removed)
   blog-draft/
     AGENTS.md
+    GOAL.md          when it owns an outcome
     memory.md
     bot.json         generated: name, face, runtime, isolation, schedule, enabled, report,
                      the granted secrets' names (never values; "all" for a loop from before
