@@ -577,7 +577,7 @@ function registerFolderTools(
     {
       title: "A bot's files and last runs",
       description:
-        "A bot's folder: AGENTS.md (what it does: its prompt), memory.md (what it learned; it updates it itself), skills/<name>/SKILL.md (know-how), with who changed each last; and its last three handoffs (what each run did and left open).",
+        "A bot's folder: AGENTS.md (what it does: its prompt), GOAL.md (the outcome it owns, with its metric), memory.md (what it learned; it updates it itself), skills/<name>/SKILL.md (know-how), with who changed each last; and its last three handoffs (what each run did and left open).",
       inputSchema: { id: z.string().max(64) },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -585,7 +585,7 @@ function registerFolderTools(
       guard(async () => {
         const { files, handoffs } = await folders.files.list(actor, id);
         const lines = files.map((f) => `- ${f.path} (${f.size} bytes, version ${f.version}${f.by ? `, last by ${f.by.kind === "bot" ? "the bot" : f.by.kind === "amb" ? (f.by.name ?? "an AI app") : (f.by.name ?? "a person")}` : ""})`);
-        const h = handoffs.map((x) => `### ${new Date(x.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC · ${x.status}\n${x.text}`);
+        const h = handoffs.map((x) => `### ${new Date(x.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC · ${x.status}${x.metric ? ` · metric ${x.metric}` : ""}\n${x.text}`);
         return result(`Files:\n${lines.join("\n")}\n\nLast runs:\n${h.join("\n\n") || "(no handoffs yet)"}`, { files, handoffs });
       }),
   );
@@ -597,7 +597,7 @@ function registerFolderTools(
       description: "One of a bot's files as it is now, or an earlier version; history: true lists its versions (who, why, when) instead.",
       inputSchema: {
         id: z.string().max(64),
-        path: z.string().max(200).describe("AGENTS.md, memory.md, or skills/<name>/<file>."),
+        path: z.string().max(200).describe("AGENTS.md, GOAL.md, memory.md, or skills/<name>/<file>."),
         version: z.number().int().min(1).optional(),
         history: z.boolean().optional(),
       },
@@ -619,7 +619,7 @@ function registerFolderTools(
     {
       title: "Change a bot's file",
       description:
-        "Change one of a bot's files: a new version of memory.md (what it should remember), a skill (skills/<name>/SKILL.md: when to use it, then how), or AGENTS.md (its instructions; only when the user asked, or it's plainly broken). Send the whole file. delete: true removes a skill file; restore_version brings an earlier version back. Every change is a version the user can undo in the app, and changes to AGENTS.md or skills are posted in the bot's thread with your why. Never secrets.",
+        "Change one of a bot's files: a new version of memory.md (what it should remember), a skill (skills/<name>/SKILL.md: when to use it, then how), GOAL.md (the outcome it owns: only what the user agreed to), or AGENTS.md (its instructions; only when the user asked, or it's plainly broken). Send the whole file. delete: true removes a skill file; restore_version brings an earlier version back. Every change is a version the user can undo in the app, and changes to AGENTS.md or skills are posted in the bot's thread with your why. Never secrets.",
       inputSchema: {
         id: z.string().max(64),
         path: z.string().max(200),

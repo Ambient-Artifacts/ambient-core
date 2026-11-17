@@ -342,6 +342,7 @@ never stops a bot.
 | File | What | Who writes it |
 |---|---|---|
 | `AGENTS.md` | What the bot does and how: its instructions (a loop's prompt, up to 20,000 characters) | the owner; Amb |
+| `GOAL.md` | The outcome it owns, if any: metric, target, by when, limits (see "Outcomes, not tasks") | the owner; Amb |
 | `skills/<name>/SKILL.md` (and other text files in `skills/<name>/`) | Know-how it uses when it fits, as Claude Code skills | the owner; Amb |
 | `memory.md` | What it has learned: the owner's preferences, corrections, lessons (up to 16 KB) | the bot, during its runs; the owner; Amb |
 
@@ -370,6 +371,20 @@ Code decides, every run:
 So a bot knows what it did yesterday and what's next, without dragging weeks of transcript
 around: a wrong turn is fixed by correcting its memory or handoff, not by wiping it.
 
+### Outcomes, not tasks
+
+A bot can own an outcome instead of running a task list: `GOAL.md` in its folder says the result
+in one sentence, the metric and how to measure it, the target, by when, and its limits (budget,
+what needs a yes). Up to 8 KB; it can be emptied, not deleted; the owner and Amb write it, never
+the bot itself.
+
+- A run of a bot with a goal starts with the goal and the metric over its last ten runs (from
+  their handoffs), and is told to measure first and then do what moves the metric most.
+- Its handoff then has a second line, `Metric: <value>` (short, with its unit). Handoffs carry
+  it as `metric` (null when there's none), so the app can draw the curve and Amb can tell
+  whether it's working.
+- It says when the target holds, and asks its owner when the goal looks wrong or out of reach.
+
 ### The app's API
 
 Paths go in the query (`?path=skills/release/SKILL.md`), since they hold slashes. Who may read and
@@ -377,8 +392,8 @@ write is who may read and change the bot.
 
 - `GET /v1/app/routines/:id/files` →
   `{ "files": [{ "path": "AGENTS.md", "size": 1834, "version": 4, "updatedAt": 1763380000000, "by": { "kind": "amb", "name": "Amb" } }] }`
-  (`by.kind`: `user`, `bot`, `amb`; `AGENTS.md` and `memory.md` are always listed, version 0 when
-  never written).
+  (`by.kind`: `user`, `bot`, `amb`; `AGENTS.md`, `GOAL.md` and `memory.md` are always listed,
+  version 0 when never written).
 - `GET /v1/app/routines/:id/files/content?path=…[&version=n]` →
   `{ "path", "content", "version", "by", "why", "updatedAt" }`.
 - `PUT /v1/app/routines/:id/files/content?path=…` with `{ "content": "…", "why"?: "…" }` → the
@@ -391,7 +406,7 @@ write is who may read and change the bot.
 - `POST /v1/app/routines/:id/files/revert` with `{ "path": "…", "version": 3 }` → the file: a new
   version with version 3's content.
 - `GET /v1/app/routines/:id/handoffs?limit=10` →
-  `{ "handoffs": [{ "runId": "…", "status": "done" | "continue", "text": "…", "createdAt": 1763380000000 }] }`
+  `{ "handoffs": [{ "runId": "…", "status": "done" | "continue", "metric": "180 visitors" | null, "text": "…", "createdAt": 1763380000000 }] }`
   (newest first).
 
 When Amb changes a bot's `AGENTS.md` or a skill, the bot's thread says so in an `ambient` message
