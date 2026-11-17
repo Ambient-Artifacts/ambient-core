@@ -23,6 +23,7 @@ import type { Notifier, PushMessage } from "../push.ts";
 import type { Owner, RoutineKeys } from "./keys.ts";
 import type { CodeHasher } from "../auth/codes.ts";
 import type { Author, BotFolder } from "../bots/folder.ts";
+import type { AutomationEvent } from "../bots/automations.ts";
 
 export const HOST_TOKEN_PREFIX = "ambient_host_";
 export const RUN_TOKEN_PREFIX = "ambient_run_";
@@ -361,6 +362,9 @@ export function loadRunner(dir: string, origin: string): { version: string; sha2
 const isManager = (t: Team) => t.role === "owner" || t.role === "admin";
 
 export class RoutineService {
+  /** A bot's run failed: automations may listen (docs/bots.md, "Automations"). Set once they're up. */
+  onBotEvent?: (e: AutomationEvent) => void;
+
   constructor(
     private d: {
       control: Control;
@@ -658,6 +662,7 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    if (input.bot) this.d.folder?.touched(this.ownerOf(out.routine as unknown as RoutineRow), { routineId: String(out.routine.id), path: "", by: source === "app" ? { kind: "user", name: null } : { kind: "amb", name: source }, why: "created" });
     return this.get(actor, String(out.routine.id));
   }
 
@@ -685,6 +690,10 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    // A bot's name or settings changed (or it became a loop again): its mirror in git follows.
+    if (this.d.folder && (r.bot || patch.bot) && (patch.name !== undefined || patch.schedule !== undefined || patch.enabled !== undefined || patch.bot !== undefined)) {
+      this.d.folder.touched(this.ownerOf(r), { routineId: id, path: "", by: meta.by ?? (source === "app" ? { kind: "user", name: null } : { kind: "amb", name: source }), why: meta.why ?? "settings" });
+    }
     // A bot's prompt is its AGENTS.md: every change is a version of it (undo, who and why).
     if (this.d.folder && patch.prompt !== undefined && (r.bot || patch.bot)) {
       const owner = this.ownerOf(r);
@@ -1086,6 +1095,10 @@ export class RoutineService {
     if (who.bot && this.d.folder) {
       const w = who as unknown as { routineId: string; startedAt: number; name: string };
       await this.d.folder.afterRun(owner, { routineId: String(w.routineId), name: w.name, runId, startedAt: w.startedAt }, { memory: result.memory, handoff: result.handoff, summary: clipped, failed: result.status === "failed" });
+    }
+    if (who.bot && result.status === "failed") {
+      const w = who as unknown as { routineId: string; name: string };
+      this.onBotEvent?.({ kind: "bot_failed", uid: String(who.uid), routineId: String(w.routineId), bot: w.name, text: clipped ?? "", runId });
     }
     // Not awaited: the computer's report doesn't wait for Apple.
     if (out.notice) void this.d.notifier?.notify(String(out.notice.uid), routineFailedPush({ ...out.notice, routineId: String(out.notice.routineId), runId: String(out.notice.runId) }));

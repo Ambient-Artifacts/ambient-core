@@ -52,6 +52,8 @@ export async function startStack(
     bots?: { users: string[]; teams: string[] };
     /** Ambient's chat against a fake Anthropic (no heartbeat timer in tests). */
     ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number };
+    /** How long after a change bots are mirrored into git (tests: short; `idle()` waits). */
+    mirrorDelayMs?: number;
   } = {},
 ) {
   const serviceSecret = randomBytes(24).toString("hex");
@@ -167,6 +169,7 @@ export async function startStack(
     google: googleVerifier([GOOGLE_CLIENT], { keys: [googleJwk] }),
     microsoftConnect: opts.microsoftConnect ? { ...opts.microsoftConnect, fetchImpl: opts.microsoftFetch } : undefined,
     ambient: { ...opts.ambient, noHeartbeat: true },
+    mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
   });
   gatewayServer.on("request", stack.app);
 
@@ -178,6 +181,7 @@ export async function startStack(
     config,
     teamId: String(teamId),
     teamServer,
+    teamWiki: wiki,
     dataDir,
     poolDir,
     appleToken,
@@ -198,6 +202,7 @@ export async function startStack(
     decisions: stack.decisions,
     heartbeat: stack.heartbeat,
     folders: stack.folders,
+    automations: stack.automations,
     graphTokens,
     deliverer,
     close: async () => {

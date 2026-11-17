@@ -413,6 +413,7 @@ never stops a bot.
 | File | What | Who writes it |
 |---|---|---|
 | `AGENTS.md` | What the bot does and how: its instructions (a loop's prompt, up to 20,000 characters) | the owner; Amb |
+| `GOAL.md` | The outcome it owns, if any: metric, target, by when, limits (see "Outcomes, not tasks") | the owner; Amb |
 | `skills/<name>/SKILL.md` (and other text files in `skills/<name>/`) | Know-how it uses when it fits, as Claude Code skills | the owner; Amb |
 | `memory.md` | What it has learned: the owner's preferences, corrections, lessons (up to 16 KB) | the bot, during its runs; the owner; Amb |
 
@@ -441,6 +442,20 @@ Code decides, every run:
 So a bot knows what it did yesterday and what's next, without dragging weeks of transcript
 around: a wrong turn is fixed by correcting its memory or handoff, not by wiping it.
 
+### Outcomes, not tasks
+
+A bot can own an outcome instead of running a task list: `GOAL.md` in its folder says the result
+in one sentence, the metric and how to measure it, the target, by when, and its limits (budget,
+what needs a yes). Up to 8 KB; it can be emptied, not deleted; the owner and Amb write it, never
+the bot itself.
+
+- A run of a bot with a goal starts with the goal and the metric over its last ten runs (from
+  their handoffs), and is told to measure first and then do what moves the metric most.
+- Its handoff then has a second line, `Metric: <value>` (short, with its unit). Handoffs carry
+  it as `metric` (null when there's none), so the app can draw the curve and Amb can tell
+  whether it's working.
+- It says when the target holds, and asks its owner when the goal looks wrong or out of reach.
+
 ### The app's API
 
 Paths go in the query (`?path=skills/release/SKILL.md`), since they hold slashes. Who may read and
@@ -448,8 +463,8 @@ write is who may read and change the bot.
 
 - `GET /v1/app/routines/:id/files` →
   `{ "files": [{ "path": "AGENTS.md", "size": 1834, "version": 4, "updatedAt": 1763380000000, "by": { "kind": "amb", "name": "Amb" } }] }`
-  (`by.kind`: `user`, `bot`, `amb`; `AGENTS.md` and `memory.md` are always listed, version 0 when
-  never written).
+  (`by.kind`: `user`, `bot`, `amb`; `AGENTS.md`, `GOAL.md` and `memory.md` are always listed,
+  version 0 when never written).
 - `GET /v1/app/routines/:id/files/content?path=…[&version=n]` →
   `{ "path", "content", "version", "by", "why", "updatedAt" }`.
 - `PUT /v1/app/routines/:id/files/content?path=…` with `{ "content": "…", "why"?: "…" }` → the
@@ -462,7 +477,7 @@ write is who may read and change the bot.
 - `POST /v1/app/routines/:id/files/revert` with `{ "path": "…", "version": 3 }` → the file: a new
   version with version 3's content.
 - `GET /v1/app/routines/:id/handoffs?limit=10` →
-  `{ "handoffs": [{ "runId": "…", "status": "done" | "continue", "text": "…", "createdAt": 1763380000000 }] }`
+  `{ "handoffs": [{ "runId": "…", "status": "done" | "continue", "metric": "180 visitors" | null, "text": "…", "createdAt": 1763380000000 }] }`
   (newest first).
 
 When Amb changes a bot's `AGENTS.md` or a skill, the bot's thread says so in an `ambient` message
@@ -501,6 +516,70 @@ over its own thread and handoffs (`at` in milliseconds, newest first; `from`/`to
 `YYYY-MM-DD`, meaning the whole day, or an ISO moment; every word of `q` must appear, case and
 accents don't matter). The run token works while the run is going.
 
+### A bot's folder in git
+
+Every bot's folder is also mirrored into git, so its owner has it in a repo of their own, with the
+history git gives. Ambient's store stays the source: a broken repo or token never stops a bot, and
+the mirror is **one way**: an edit made in git is overwritten the next time the bot changes.
+Bringing edits back from git is a later step.
+
+```
+bots/
+  README.md          generated: what this is, and to change bots in Ambient
+  .mirrored          generated: the files Ambient wrote (only those are ever removed)
+  blog-draft/
+    AGENTS.md
+    GOAL.md          when it owns an outcome
+    memory.md
+    bot.json         generated: name, face, runtime, isolation, schedule, enabled, report,
+                     the granted secrets' names (never values; "all" for a loop from before
+                     grants), model, delegate
+    skills/tone/SKILL.md
+```
+
+A bot's folder name is its name in lowercase letters, digits and dashes (`Blög Draft` →
+`blog-draft`); when two bots would share one, the newer gets the end of its id. Handoffs aren't
+mirrored: they're run logs. A `bots/` folder the repo had of its own keeps its files.
+
+- **A person's bots** go into their own connected repo (the one their personal wiki syncs with),
+  in its sync: every 15 minutes, and within half a minute of a change. Without a connected repo
+  they aren't mirrored.
+- **A team's bots** go into the team's wiki repo on its server, in one commit with who changed
+  what and why (`bots: Release notes skills/changelog/SKILL.md (Lena Vogel: readers asked)`, by
+  that person when it was one person's change), pushed to the team's own repo when one is
+  connected. When another tool keeps the team's repo and Ambient writes one folder of it, they go
+  inside that folder (`ambient/bots/`); when it's read-only, nowhere. The brain leaves `bots/` out:
+  no pages, no search, no indexes, and the nightly upkeep doesn't touch it.
+- **When:** after any change to a bot (a file, its prompt, its name or settings, its memory after a
+  run, deleting it), once things have been quiet for 30 seconds, so a run's memory makes one commit.
+  A renamed bot's old folder goes; a deleted bot's folder goes.
+
+`GET /v1/app/routines/:id/files` also returns where the bot is mirrored:
+
+```json
+"mirror": {
+  "state": "mirrored",
+  "repo": "https://github.com/acme/brain.git",
+  "path": "bots/blog-draft/",
+  "lastMirroredAt": 1763380000000,
+  "lastError": null
+}
+```
+
+`state`: `mirrored`; `pending` (a change waits, or it hasn't run yet); `not_connected` (a person
+without a connected repo: the app can offer to connect one); `read_only` (another tool keeps the
+team's repo); `error` (`lastError` says why; the bot itself is fine). `repo` is null for a team
+without a repo of its own: then the folder is in the brain's git on the team's server. `null`
+instead of the object: the gateway doesn't mirror at all.
+
+`POST /v1/app/routines/:id/files/mirror` mirrors the owner's bots now (who may change the bot) and
+answers `{ "mirror": … }` as above. `bot_files` tells Amb the same in a line.
+
+The team server takes the folder as `PUT /v1/bots` (purpose `bots` in the gateway's token):
+`{ "bots": [{ "slug", "files": [{ "path", "content" }] }], "readme", "message", "author"? }`, every
+bot of the team at once; it answers `{ "commit", "folder", "files", "repo": { "url", "mode",
+"status", "lastError", "lastPushAt" } | null }`, or 409 `read_only`.
+
 ## History: nothing is forgotten
 
 Amb's chat and every bot's thread are kept in full (sealed), no longer cut at the newest 200 or 300
@@ -533,3 +612,103 @@ or `history: true`), `write_bot_file` (content, `delete`, or `restore_version`, 
 `why`). A change through them is by `amb` (`by.name` "Ambient" from Amb's chat, otherwise the AI
 app). A version that deleted a file has empty content and `deleted: true`; restoring the one before
 it brings the file back.
+
+## Automations
+
+Things Amb does for a person without being asked each time. One automation is **when** (a time,
+or an event) + **what** (instructions) + **where** (delivery), and Amb stays silent (`NOTHING`)
+when there's nothing worth saying. Code decides when; Amb decides what to say, in an internal
+turn of its own (a short session beside the chat). Personal (per person) in this version; stored
+as sealed records, so new templates need no Convex deploy.
+
+### Templates
+
+| id | Name | When | Delivery |
+|---|---|---|---|
+| `morning_brief` | Morning brief | weekdays 08:00 | `chat` |
+| `waiting_on_me` | Waiting on me (decisions, bots asking, action items, approvals) | weekdays 12:30 | `chat` |
+| `after_meeting` | After every meeting | event `meeting_note` | `chat` |
+| `watch_bots` | Watch my bots (the heartbeat) | trigger `heartbeat` | `chat` |
+| `weekly_review` | Weekly review | Fridays 16:00 | `chat` |
+| `improve_bots` | Improve my bots (the reviewer) | events `bot_failed`, `bot_corrected`, `bot_asked_twice` | `chat_silent` |
+| `new_in_brain` | New in the brain | daily 18:00 | `chat_silent` |
+
+Times are in Europe/Vienna until changed. `watch_bots` is always there and on until switched off:
+it is the heartbeat (every half hour 08–21, at most six messages a day); switching it off stops the
+heartbeat's beats. It can't be deleted or given another trigger.
+
+### An automation
+
+```json
+{
+  "id": "a3f9c1d2e4b5a",
+  "template": "morning_brief",
+  "name": "Morning brief",
+  "enabled": true,
+  "trigger": { "kind": "time", "schedule": { "every": "weekday", "time": "08:00", "timezone": "Europe/Vienna" } },
+  "instructions": "…",
+  "delivery": "chat",
+  "when": "Weekdays at 08:00 (Europe/Vienna)",
+  "nextRunAt": 1763449200000,
+  "lastRun": { "at": 1763362800000, "by": "schedule", "event": null, "result": "sent", "text": "…" },
+  "createdAt": 1763300000000,
+  "updatedAt": 1763300000000
+}
+```
+
+- `trigger`: `{ "kind": "time", "schedule": <a loop's schedule> }`, `{ "kind": "event", "events": [..], "hours"?: n, "bot"?: id | null }`
+  or `{ "kind": "heartbeat" }` (only `watch_bots`). Events: `bot_failed` (a bot's run failed),
+  `bot_corrected` (the person wrote to a bot, not answering its question), `bot_asked_twice` (a
+  bot asked much the same question it asked before), `decision_waiting` (a decision waited `hours`,
+  default 4), `meeting_note` (a recorded meeting or call landed in their brain or a team's brain
+  they recorded for). `bot` limits bot events to one bot.
+- `delivery`: `chat` (a message in Amb's chat and a push, collapse id `automation-<id>`; no push
+  22:00–07:00), `chat_silent` (the message, no push), `thread` (bot events: a note in the bot's
+  thread).
+- `lastRun.by`: `schedule`, `event`, `manual`; `result`: `sent`, `silent` (Amb said NOTHING),
+  `failed` (`text` says why).
+
+A time automation runs once per due time: the due time is recorded before it runs, so a restart
+never runs it twice; one missed while the gateway was down runs late only within two hours, and
+only the latest missed time. An event runs an automation once (its key is remembered), at most 20
+event runs per automation a day. A person's automations run one at a time.
+
+### The app's API
+
+- `GET /v1/app/automations` → `{ "templates": [{ "id", "name", "description", "trigger", "instructions", "delivery" }], "automations": [Automation] }`
+- `POST /v1/app/automations` with `{ "template": "morning_brief" }` (and any of `name`, `enabled`,
+  `trigger`, `instructions`, `delivery` to change it), or from scratch `{ "name", "trigger", "instructions", "delivery"? }`
+  → `{ "automation": Automation }`. Up to 30.
+- `PATCH /v1/app/automations/:id` with any of `name`, `enabled`, `trigger`, `instructions`,
+  `delivery` → `{ "automation": Automation }`. A new time, or switching one on again, starts from
+  now (nothing missed meanwhile runs).
+- `DELETE /v1/app/automations/:id` → 204 (`watch_bots`: 400, switch it off instead).
+- `POST /v1/app/automations/:id/run` → 202 `{ "status": "started" }`: runs now in the background;
+  the result shows in `lastRun` and the runs.
+- `GET /v1/app/automations/:id/runs` → `{ "runs": [AutomationRun] }` (newest first, the last 20).
+
+MCP tools for Amb: `list_automations` (with an `id`: its instructions and runs), `create_automation`,
+`update_automation`, `delete_automation`, `run_automation` (waits for the result),
+`propose_bot_change`. Amb creates or changes automations only when the person asks.
+
+### Improve my bots: what Amb changes, and what it proposes
+
+The reviewer reads the bot's thread, handoffs and files. Code decides what it may do:
+
+- **Applied at once** (a version each, undo in Files, a note in the bot's thread): `memory.md`
+  and `skills/**`.
+- **Only proposed:** the bot's `AGENTS.md`, and its settings (schedule, on/off, isolation,
+  secrets, report, delegate, model, runtime). While the reviewer works on a bot, `write_bot_file`
+  for its `AGENTS.md` is refused (`propose_instead`). `propose_bot_change` makes a decision in the
+  chat with the options `Apply` / `Not now`, the proposed file or settings, and why.
+
+A proposal is a decision like a bot's question, with `change` set:
+
+```json
+"change": { "routineId": "…", "bot": "Blog", "path": "AGENTS.md", "content": "…the new file…" }
+```
+
+(or `"settings": { … }` instead of `path`/`content`; `change` is null for questions). Answering
+`Apply` (or "yes", "ja", "ok", "do it", in the app or in words) makes the change as the person and
+the answer records what came of it (`"Apply → AGENTS.md changed (version 4)."`); anything else
+leaves the bot as it is.

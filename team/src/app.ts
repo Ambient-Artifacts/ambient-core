@@ -12,6 +12,7 @@ import { GraphError, graphFor as defaultGraphFor, GraphTokens, type DriveFolder,
 import { destinationFiles, IngestError, ingestNote } from "./ingest.ts";
 import type { TeamSettingsStore } from "./settings.ts";
 import { ReadOnlyWiki, type TeamWiki } from "./wiki.ts";
+import { BotsMirror, MAX_MIRROR_BYTES, MirrorError, mirrorBots } from "./bots.ts";
 
 export interface TeamAppConfig {
   teamId: string;
@@ -37,7 +38,7 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
   app.disable("x-powered-by");
 
   /** The gateway's token for this team and `purpose`, or null. */
-  const verified = async (req: Request, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health") => {
+  const verified = async (req: Request, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health" | "bots") => {
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ")) return null;
     try {
@@ -76,7 +77,7 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     });
   });
 
-  const auth = (purpose: "query" | "inbox" | "repo" | "settings" | "graph") => async (req: Request, res: Response, next: NextFunction) => {
+  const auth = (purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "bots") => async (req: Request, res: Response, next: NextFunction) => {
     if (!req.headers.authorization?.startsWith("Bearer ")) {
       res.status(401).json({ error: "missing token" });
       return;
@@ -98,6 +99,34 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     }
     await wiki.refresh();
     res.json({ result: await dispatchQuery(new TeamReader(wiki.store, cfg.rawDir), parsed.data) });
+  });
+
+  // Bots' folders mirrored from Ambient into the wiki's repo (docs/bots.md, "A bot's folder in
+  // git"): every bot of the team at once, replacing what was mirrored before, in one commit.
+  app.put("/v1/bots", express.json({ limit: MAX_MIRROR_BYTES * 2 }), auth("bots"), async (req, res) => {
+    const parsed = BotsMirror.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "bad_request", issues: parsed.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
+      return;
+    }
+    const repo = () => {
+      const st = wiki.remote?.connected ? wiki.remote.status() : null;
+      return st ? { url: st.url, mode: wiki.remote!.mode, status: st.status, lastError: st.lastError, lastPushAt: st.lastPushAt } : null;
+    };
+    if (wiki.remote?.readOnly) {
+      res.status(409).json({ error: "read_only", message: "Another tool keeps this team's brain and Ambient only reads it, so bots aren't mirrored there.", repo: repo() });
+      return;
+    }
+    try {
+      const out = await mirrorBots(wiki, parsed.data);
+      res.json({ ...out, repo: repo() });
+    } catch (err) {
+      if (err instanceof MirrorError || err instanceof ReadOnlyWiki) {
+        res.status(err instanceof MirrorError ? 400 : 409).json({ error: err instanceof MirrorError ? "bad_request" : "read_only", message: err.message, repo: repo() });
+        return;
+      }
+      throw err;
+    }
   });
 
   // The team's own git repo (set by an admin through the gateway).
