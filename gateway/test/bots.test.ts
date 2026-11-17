@@ -381,6 +381,8 @@ describe("signing in", () => {
     writeFileSync(
       join(bin, "claude"),
       `#!/bin/sh
+# --version (sync asks) runs in the runner's own folder: write nothing there.
+if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 env > env.txt
 cat > /dev/null
 echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'
@@ -460,6 +462,8 @@ describe("whose Claude a computer uses", () => {
     writeFileSync(
       join(bin, "claude"),
       `#!/bin/sh
+# --version (sync asks) runs in the runner's own folder: write nothing there.
+if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 env > env.txt
 cat > /dev/null
 echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'
