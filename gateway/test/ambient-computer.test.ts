@@ -3,7 +3,7 @@
 // runner's `ambient` service with a stand-in claude that keeps one session open.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -96,6 +96,28 @@ describe("Ambient on the person's computer", () => {
   });
 });
 
+describe("files in the chat", () => {
+  it("reach the computer's job, and the history keeps only their names", async () => {
+    const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+    const waiting = hostCall(host, "GET", "/v1/host/ambient/next");
+    await new Promise((r) => setTimeout(r, 100));
+    const sent = await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "What's in this?", attachments: [{ name: "shot.png", type: "image/png", data: png }] });
+    expect(sent.status, JSON.stringify(sent.json)).toBe(200);
+    const job = (await waiting).json as { id: string; attachments: { name: string; type: string; data: string }[] };
+    expect(job.attachments).toEqual([{ name: "shot.png", type: "image/png", data: png }]);
+    await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { text: "A tiny PNG." });
+    const c = await settled();
+    expect(c.messages.at(-2)?.text).toBe("What's in this?\n\n📎 shot.png");
+  });
+
+  it("refuses what can't go with a message", async () => {
+    const bad = await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "x", attachments: [{ name: "a.exe", type: "application/x-msdownload", data: "AAAA" }] });
+    expect(bad.json).toMatchObject({ error: "bad_attachment" });
+    const five = Array.from({ length: 5 }, (_, i) => ({ name: `${i}.txt`, type: "text/plain", data: "aGk=" }));
+    expect((await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "x", attachments: five })).status).toBe(400);
+  });
+});
+
 describe("Ambient on the team's server", () => {
   it("answers a member of a team with bots when they have no computer of their own connected", async () => {
     const ben = await signIn(s, "apple-ben", "Ben Weiss");
@@ -171,6 +193,13 @@ done
       const c = await settled();
       expect(c.messages.at(-1)?.text, out).toBe(want);
     }
+    // A file comes along: saved in the person's folder, named in the message.
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Read this", attachments: [{ name: "notes.md", type: "text/markdown", data: Buffer.from("# Hi").toString("base64") }] });
+    await settled();
+    const saved = readdirSync(join(dir, "ambient", lena.user.uid, "attachments"));
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatch(/notes\.md$/);
+    expect(readFileSync(join(dir, "ambient", lena.user.uid, "attachments", saved[0]!), "utf8")).toBe("# Hi");
     const args = readFileSync(join(dir, "ambient", lena.user.uid, "args.txt"), "utf8");
     expect(args).toContain("--input-format stream-json");
     expect(args).toContain("--mcp-config");

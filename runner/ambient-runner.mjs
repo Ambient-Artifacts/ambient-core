@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.7.3";
+const VERSION = "0.7.4";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -433,8 +433,23 @@ async function ambientService() {
     }
     if (!p.child) start(uid, p, job.instructions);
     const history = job.fresh && job.history?.length ? `Earlier in this chat:\n${job.history.map((t) => `${t.role === "user" ? job.name : "You"}: ${t.text}`).join("\n")}\n\n` : "";
+    // Files that came with the message go in the person's folder here; Claude Code reads them.
+    const saved = [];
+    if (job.attachments?.length) {
+      const into = join(base, uid.replace(/[^A-Za-z0-9_-]/g, "_"), "attachments");
+      mkdirSync(into, { recursive: true });
+      own(into);
+      for (const f of job.attachments) {
+        const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(f.name).replace(/[^A-Za-z0-9._-]/g, "_").slice(-120)}`;
+        const path = join(into, name);
+        writeFileSync(path, Buffer.from(String(f.data), "base64"), { mode: 0o600 });
+        own(path);
+        saved.push(path);
+      }
+    }
+    const files = saved.length ? `\n\nFiles that came with this message (open them with the Read tool):\n${saved.map((x) => `- ${x}`).join("\n")}` : "";
     const result = new Promise((resolve, reject) => (p.waiting = { resolve, reject }));
-    p.child.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: `${history}${job.text}` }] } })}\n`);
+    p.child.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: `${history}${job.text || "(See the attached files.)"}${files}` }] } })}\n`);
     try {
       const r = await result;
       await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text } : { error: r.text || "Claude Code couldn't answer" });

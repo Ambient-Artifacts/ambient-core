@@ -6,6 +6,7 @@
 // The answer takes a while (tools, then Claude): send() stores the message and answers at once;
 // the reply lands in the history, and `pending` says one is on its way.
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { api, type Control } from "../control.ts";
 import { toolLoop, type Turn } from "../ai/loop.ts";
 import type { RoutineKeys } from "../routines/keys.ts";
@@ -52,6 +53,46 @@ export const AMBIENT_TOOLS = new Set([
 ]);
 
 const HISTORY = 20;
+const MAX_FILES = 4;
+const MAX_BYTES = 10 * 1024 * 1024;
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const TEXT_TYPES = new Set(["application/json", "text/csv", "text/markdown", "text/plain"]);
+
+/** A file someone sends with a chat message (docs/bots.md, "Files in Ambient's chat"). */
+export const ChatAttachment = z.object({
+  name: z.string().trim().min(1).max(200),
+  type: z.string().trim().min(1).max(100),
+  data: z.string().min(1).max(15_000_000),
+});
+export type ChatAttachment = z.infer<typeof ChatAttachment>;
+
+/** The files as sent, checked: at most 4, 10 MB together, images, PDFs and text. */
+export function checkAttachments(files: ChatAttachment[]): ChatAttachment[] {
+  if (files.length > MAX_FILES) throw new RoutineError("bad_attachment", "Up to 4 files at a time.", 400);
+  let bytes = 0;
+  return files.map((f) => {
+    const type = f.type.toLowerCase().split(";")[0]!.trim();
+    if (!IMAGE_TYPES.has(type) && type !== "application/pdf" && !TEXT_TYPES.has(type) && !type.startsWith("text/")) {
+      throw new RoutineError("bad_attachment", `${f.name}: only images, PDFs and text files can go with a message.`, 400);
+    }
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(f.data)) throw new RoutineError("bad_attachment", `${f.name} didn't arrive in one piece. Try again.`, 400);
+    bytes += Math.floor((f.data.length * 3) / 4);
+    if (bytes > MAX_BYTES) throw new RoutineError("bad_attachment", "Up to 10 MB together.", 400);
+    return { name: f.name.replace(/[\/\\\0\r\n]/g, "_"), type, data: f.data };
+  });
+}
+
+/** Files as Claude's content blocks: images and PDFs as they are, text files as text. */
+function contentBlocks(text: string, files: ChatAttachment[]): unknown[] {
+  const blocks: unknown[] = [];
+  for (const f of files) {
+    if (IMAGE_TYPES.has(f.type)) blocks.push({ type: "image", source: { type: "base64", media_type: f.type, data: f.data } });
+    else if (f.type === "application/pdf") blocks.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: f.data }, title: f.name });
+    else blocks.push({ type: "text", text: `${f.name}:\n${Buffer.from(f.data, "base64").toString("utf8").slice(0, 200_000)}` });
+  }
+  blocks.push({ type: "text", text: text || "(See the attached files.)" });
+  return blocks;
+}
 // On the person's computer Ambient may work a while (it can run things there).
 const PENDING_MAX_MS = 15 * 60_000;
 const TEXT_MAX = 8_000;
@@ -127,14 +168,17 @@ export class AmbientChat {
    * Someone writes to Ambient. Stored at once; Claude's reply follows in the history. `done`
    * (tests) resolves when the reply is stored.
    */
-  async send(uid: string, name: string, text: string): Promise<{ message: ChatMessage; pending: boolean; done: Promise<void> }> {
+  async send(uid: string, name: string, text: string, attachments: ChatAttachment[] = []): Promise<{ message: ChatMessage; pending: boolean; done: Promise<void> }> {
     const body = text.trim().slice(0, TEXT_MAX);
-    if (!body) throw new RoutineError("bad_request", "Write something first.", 400);
+    const files = checkAttachments(attachments);
+    if (!body && !files.length) throw new RoutineError("bad_request", "Write something first.", 400);
     if (this.isPending(uid)) throw new RoutineError("busy", "Ambient is still answering your last message.", 409);
     const history = (await this.list(uid, HISTORY)).messages.map((m): Turn => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
-    const message = await this.add(uid, "user", body);
+    // The history keeps which files came, not the files: on a computer they're in its folder.
+    const stored = [body, files.map((f) => `📎 ${f.name}`).join("\n")].filter(Boolean).join("\n\n");
+    const message = await this.add(uid, "user", stored);
     this.pending.set(uid, this.now());
-    const done = this.reply(uid, name, history, body).finally(() => this.pending.delete(uid));
+    const done = this.reply(uid, name, history, body, files).finally(() => this.pending.delete(uid));
     return { message, pending: true, done };
   }
 
@@ -144,7 +188,7 @@ export class AmbientChat {
     return (await this.d.computersOf(uid).catch(() => [])).find((c) => this.d.computers!.connected(c.id));
   }
 
-  private async reply(uid: string, name: string, history: Turn[], question: string): Promise<void> {
+  private async reply(uid: string, name: string, history: Turn[], question: string, files: ChatAttachment[] = []): Promise<void> {
     let text: string;
     const computer = await this.computer(uid);
     if (computer) {
@@ -156,6 +200,7 @@ export class AmbientChat {
             instructions: computerInstructions(name, computer.team ? `${computer.team}'s server` : computer.name, computer.team === null),
             fresh: history.length === 0,
             history: trimHistory(history),
+            attachments: files,
           })) || "I don't have an answer to that.";
       } catch (err) {
         console.warn(`[ambient] ${computer.name} couldn't answer: ${(err as Error).message}`);
@@ -176,7 +221,7 @@ export class AmbientChat {
             instructions: ambientInstructions(name),
             allowed: AMBIENT_TOOLS,
             history: trimHistory(history),
-            question,
+            question: files.length ? contentBlocks(question, files) : question,
             maxSteps: 10,
             maxTokens: 2000,
             clientName: "ambient-chat",

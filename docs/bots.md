@@ -205,3 +205,12 @@ computer ("Use my Claude plan").
 
 `ambient://computer/<id>/claude` opens the Bots tab on that computer with its Claude sheet open.
 Ambient's chat replies use it as a Markdown link ("[Add your Claude plan](ambient://computer/…/claude)").
+
+## Files in Ambient's chat
+
+`POST /v1/app/ambient/chat` also takes `attachments`: up to 4 files, 10 MB together, each
+`{ "name": "plan.pdf", "type": "application/pdf", "data": "<base64>" }`. Images (JPEG, PNG, GIF,
+WebP), PDFs and text files (text/*, JSON, CSV, Markdown). The message in the history says which
+files came with it ("📎 plan.pdf"); the files themselves aren't kept in Ambient: on a computer they
+are saved in the person's Ambient folder there and Claude Code reads them; on the server they go
+to Claude with the message. Refused: 400 `bad_attachment` with the reason.
