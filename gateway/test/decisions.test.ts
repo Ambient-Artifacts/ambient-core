@@ -1,0 +1,148 @@
+// Decisions (docs/bots.md): a bot's question goes to Ambient first; Ambient answers in the thread
+// when the brain makes it clear, or brings it to the person as a decision in its chat; answering
+// anywhere settles it; and the heartbeat speaks up only about what's new.
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { appCall, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
+
+const daily = { every: "day", time: "09:00", timezone: "Europe/Vienna" };
+const info = { hostname: "srv", os: "Linux 6.8", runner: "0.7.6", claude: "2.1.326 (Claude Code)" };
+
+// Fake Anthropic: answers by what the turn is (a bot's question to look at, the heartbeat, a chat).
+let triageReply = '{"action":"ask","suggest":"","why":""}';
+let beatReply = "NOTHING";
+const prompts: string[] = [];
+const fakeAnthropic: typeof fetch = async (input, init) => {
+  if (!String(input).startsWith("https://api.anthropic.com/")) return fetch(input, init);
+  const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: unknown }[] };
+  const last = body.messages[body.messages.length - 1]!;
+  const said = typeof last.content === "string" ? last.content : JSON.stringify(last.content);
+  prompts.push(said);
+  const reply = said.includes("[Not from") ? triageReply : said.includes("[Heartbeat") ? beatReply : "Sure.";
+  return new Response(JSON.stringify({ content: [{ type: "text", text: reply }], stop_reason: "end_turn" }), { status: 200, headers: { "content-type": "application/json" } });
+};
+
+let s: Stack;
+let lena: AppSession;
+let host: string;
+
+const hostCall = async (token: string, method: string, path: string, body?: unknown) => {
+  const res = await fetch(`${s.origin}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const t = await res.text();
+  return { status: res.status, json: t ? (JSON.parse(t) as Record<string, unknown>) : {} };
+};
+type Msg = { role: string; kind: string; text: string; author: string | null };
+type Decision = { id: string; status: string; question: string; options: string[]; recommendation: { option: string; why: string } | null; answer: { text: string; via: string } | null; from: { kind: string; name?: string } };
+const thread = async (id: string) => ((await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/thread`)).json.messages as Msg[]);
+const until = async <T>(get: () => Promise<T>, ok: (v: T) => boolean): Promise<T> => {
+  let v = await get();
+  for (let i = 0; i < 60 && !ok(v); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    v = await get();
+  }
+  return v;
+};
+
+/** A bot that's running and asks `question`; returns its id and run token. */
+async function botAsks(name: string, question: string, choices: string[], delegate?: string) {
+  const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name, prompt: "x", schedule: daily, bot: { isolation: "host", ...(delegate ? { delegate } : {}) } });
+  const id = (made.json.routine as { id: string }).id;
+  const start = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+  const token = String(start.json.runToken);
+  const asked = await hostCall(token, "POST", "/v1/bot/ask", { question, choices });
+  return { id, token, questionId: String(asked.json.id) };
+}
+
+beforeAll(async () => {
+  s = await startStack({ bots: { users: [], teams: [] }, ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic, triageMs: 5000 } });
+  lena = await signIn(s, "apple-lena", "Lena Vogel");
+  s.config.bots!.users.push(lena.user.uid);
+  const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "Build server" })).json.code);
+  host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
+});
+afterAll(() => s.close());
+
+describe("a bot's question goes to Ambient first", () => {
+  it("is answered by Ambient in the thread when the brain makes it clear", async () => {
+    triageReply = '{"action":"answer","answer":"AI is multiplayer","why":"You wanted more variety (decision 2026-10-16)."}';
+    const b = await botAsks("Blog draft", "Which topic for Monday?", ["Wiki in git", "AI is multiplayer"]);
+    const t = await until(() => thread(b.id), (m) => m.some((x) => x.role === "ambient"));
+    expect(t.at(-1)).toMatchObject({ role: "ambient", kind: "answer", author: "Ambient, for Lena Vogel", text: "AI is multiplayer (You wanted more variety (decision 2026-10-16).)" });
+    // The run that asked takes it.
+    expect((await hostCall(b.token, "GET", `/v1/bot/questions/${b.questionId}`)).json).toMatchObject({ answer: "AI is multiplayer (You wanted more variety (decision 2026-10-16).)", author: "Ambient, for Lena Vogel" });
+    expect(prompts.find((p) => p.includes("[Not from"))).toContain("Answer it yourself only when Lena Vogel's brain makes the answer clear");
+  });
+
+  it("comes to the person as a decision in the chat, with Ambient's suggestion, and an answer there reaches the bot", async () => {
+    triageReply = '{"action":"ask","suggest":"Publish on Monday","why":"It is ready and nothing else is planned."}';
+    const b = await botAsks("Release bot", "Publish the release notes now or on Monday?", ["Now", "Publish on Monday"]);
+    const open = await until(async () => (await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as Decision[], (d) => d.length > 0);
+    expect(open[0]).toMatchObject({ status: "open", question: "Publish the release notes now or on Monday?", options: ["Now", "Publish on Monday"], recommendation: { option: "Publish on Monday" }, from: { kind: "bot", name: "Release bot" } });
+    const chat = (await appCall(s, lena.access_token, "GET", "/v1/app/ambient/chat")).json.messages as { role: string; text: string; decision: Decision | null }[];
+    expect(chat.at(-1)).toMatchObject({ role: "ambient", decision: { id: open[0]!.id, status: "open" } });
+    expect(chat.at(-1)!.text).toContain("Release bot asks: Publish the release notes now or on Monday?");
+    expect(chat.at(-1)!.text).toContain("I'd go with “Publish on Monday”");
+
+    const answered = await appCall(s, lena.access_token, "POST", `/v1/app/decisions/${open[0]!.id}`, { option: "Now" });
+    expect(answered.status, JSON.stringify(answered.json)).toBe(200);
+    expect(answered.json.decision).toMatchObject({ status: "answered", answer: { text: "Now", via: "thread" } });
+    expect((await hostCall(b.token, "GET", `/v1/bot/questions/${b.questionId}`)).json).toMatchObject({ answer: "Now", author: "Lena Vogel" });
+    expect((await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions).toEqual([]);
+  });
+
+  it("with delegate never, goes straight to the person; an answer in the thread settles the decision", async () => {
+    const before = prompts.length;
+    const b = await botAsks("Careful bot", "Delete the old drafts?", ["Yes", "No"], "never");
+    const open = await until(async () => (await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as Decision[], (d) => d.length > 0);
+    expect(prompts.slice(before).some((p) => p.includes("[Not from"))).toBe(false);
+    expect(open[0]!.recommendation).toBeNull();
+    await appCall(s, lena.access_token, "POST", `/v1/app/routines/${b.id}/thread`, { text: "No" });
+    const chat = (await appCall(s, lena.access_token, "GET", "/v1/app/ambient/chat")).json.messages as { decision: Decision | null }[];
+    expect(chat.at(-1)!.decision).toMatchObject({ status: "answered", answer: { text: "No", via: "thread" } });
+  });
+
+  it("can be answered in words through Ambient's tools", async () => {
+    triageReply = '{"action":"ask","suggest":"","why":""}';
+    await botAsks("Word bot", "Which day?", ["Monday", "Tuesday"]);
+    const open = await until(async () => (await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as Decision[], (d) => d.length > 0);
+    const pat = String((await appCall(s, lena.access_token, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
+    const client = await mcpClient(`${s.origin}/mcp`, pat);
+    expect(text(await client.callTool({ name: "open_decisions", arguments: {} }))).toContain("Word bot asks");
+    const filed = await client.callTool({ name: "answer_decision", arguments: { id: open[0]!.id, answer: "Tuesday" } });
+    expect(text(filed)).toContain("Word bot carries on with it");
+    await client.close();
+  });
+});
+
+describe("the heartbeat", () => {
+  it("speaks up about something new once, and stays quiet otherwise", async () => {
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Flaky bot", prompt: "x", schedule: daily, bot: { isolation: "host" } });
+    const id = (made.json.routine as { id: string }).id;
+    const run = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    await hostCall(host, "POST", `/v1/host/runs/${(run.json.run as { id: string }).id}`, { status: "failed", summary: "npm ci failed." });
+
+    beatReply = "Flaky bot failed its run: npm ci broke. Want me to look at its thread?";
+    expect(await s.heartbeat.beat(lena.user.uid, { force: true })).toBe("sent");
+    const chat = (await appCall(s, lena.access_token, "GET", "/v1/app/ambient/chat")).json.messages as { role: string; text: string }[];
+    expect(chat.at(-1)).toMatchObject({ role: "ambient", text: "Flaky bot failed its run: npm ci broke. Want me to look at its thread?" });
+    expect(prompts.at(-1)).toContain('The bot "Flaky bot" failed its last run');
+    // Already told: nothing new, no model call.
+    const calls = prompts.length;
+    expect(await s.heartbeat.beat(lena.user.uid, { force: true })).toBe("quiet");
+    expect(prompts.length).toBe(calls);
+  });
+
+  it("says nothing when Ambient finds nothing worth saying", async () => {
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Other bot", prompt: "x", schedule: daily, bot: { isolation: "host" } });
+    const id = (made.json.routine as { id: string }).id;
+    const run = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    await hostCall(host, "POST", `/v1/host/runs/${(run.json.run as { id: string }).id}`, { status: "failed", summary: "flake" });
+    beatReply = "NOTHING";
+    const before = ((await appCall(s, lena.access_token, "GET", "/v1/app/ambient/chat")).json.messages as unknown[]).length;
+    expect(await s.heartbeat.beat(lena.user.uid, { force: true })).toBe("quiet");
+    expect(((await appCall(s, lena.access_token, "GET", "/v1/app/ambient/chat")).json.messages as unknown[]).length).toBe(before);
+  });
+});

@@ -269,3 +269,55 @@ A new approval sends a push: title "Ambient wants to run a command", body "<comp
 `url: ambient://approval/<id>`, collapse id `approval-<id>`. The app shows pending approvals as
 cards in Ambient's chat, above the message bar: the computer, the command in monospace, the
 reason, and buttons **Allow once**, **Allow for this session**, **Always allow**, **Deny**.
+
+## Decisions: bots report to Ambient, Ambient reports to you
+
+Conversation first: Ambient is the one who talks to you, in the app's chat today and in iMessage,
+Slack or Teams later (each a channel). What needs you comes as a **decision** inside that
+conversation, and an answer anywhere settles it everywhere.
+
+### The chain
+
+1. A bot asks (`ask_owner`). The question lands in its thread as before.
+2. Ambient looks at it first, by the bot's `delegate` setting:
+   - `never`: it goes straight to you (a decision with Ambient's suggestion when it has one).
+   - `brain` (default): Ambient answers itself when the answer is clear from your brain (wiki,
+     decisions, earlier answers); otherwise it goes to you with its suggestion.
+   - `most`: Ambient answers everything except spending money, publishing, deleting or anything
+     that can't be undone; those go to you.
+3. Ambient's own answer shows in the bot's thread as a message from Ambient ("Answered for
+   Nikolai: …", role `ambient`), and you can overrule it there or in the chat.
+4. What goes to you: a decision message in Ambient's chat, plus a push "<bot> needs you".
+
+### The decision
+
+```json
+{ "id": "…", "status": "open" | "answered" | "expired",
+  "from": { "kind": "bot", "id": "<routine id>", "name": "Blog draft", "face": "tall" } | { "kind": "ambient" },
+  "question": "Which topic for Monday?",
+  "options": ["Wiki in git", "AI is multiplayer"],
+  "recommendation": { "option": "AI is multiplayer", "why": "You wanted more variety (2026-10-16)." } | null,
+  "answer": { "text": "AI is multiplayer", "by": "Nikolai", "via": "app" | "ambient" | "thread", "at": 1763380000000 } | null,
+  "urgent": true, "createdAt": 1763380000000 }
+```
+
+- `GET /v1/app/decisions` → `{ "decisions": [Decision] }`: open ones, oldest first (the stack).
+- `POST /v1/app/decisions/:id` with `{ "option": "…" }` or `{ "text": "…" }` → `{ "decision": Decision }`.
+  The bot gets it as your answer (its run carries on, or its next run resumes with it).
+- Ambient's chat messages can carry one: `GET /v1/app/ambient/chat` messages have `decision`
+  (the Decision, current status) or null. The app shows it as a card inside Ambient's message:
+  the question, the options as buttons with the recommended one marked ("Suggested"), Ambient's
+  why in small text, and once answered, the answer with who and where instead of the buttons.
+- Answering in words in the chat ("take the second one") works too: Ambient files it with its
+  `answer_decision` tool.
+
+### Bot setting
+
+`bot.delegate`: `never`, `brain` (default) or `most`, in the routine's `bot` and in create/update.
+
+### The heartbeat
+
+Every 30 minutes between 08:00 and 21:00 (Europe/Vienna for now), code gathers what happened for
+each person with bots: runs that failed, decisions waiting longer than two hours, approvals waiting.
+Only when that isn't empty does Ambient get a turn; it writes a short message into the chat (with a
+push) or stays silent. Nothing twice, at most 6 such messages a day, none at night.

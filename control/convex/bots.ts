@@ -79,8 +79,8 @@ export const latest = query({
  * still going and waiting for this answer, which then picks it up itself (questionAnswer).
  */
 export const post = mutation({
-  args: { ...secretArg, ...access, id: v.string(), iv: v.string(), ct: v.string(), now: v.number() },
-  handler: async (ctx, { secret, uid, teamIds, id, iv, ct, now }) => {
+  args: { ...secretArg, ...access, id: v.string(), iv: v.string(), ct: v.string(), now: v.number(), asAmbient: v.optional(v.boolean()) },
+  handler: async (ctx, { secret, uid, teamIds, id, iv, ct, now, asAmbient }) => {
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r?.bot) return { ok: false as const, error: "no_such_bot" };
@@ -96,12 +96,13 @@ export const post = mutation({
     const messageId = await ctx.db.insert("botMessages", {
       routineId: r._id,
       teamId: r.teamId,
-      role: "user",
+      // Ambient answering for the person: its own role in the thread, on their behalf.
+      role: asAmbient ? "ambient" : "user",
       kind,
       iv,
       ct,
       authorId: uid,
-      authorName: user?.name,
+      authorName: asAmbient ? `Ambient, for ${user?.name ?? "you"}` : user?.name,
       createdAt: now,
     });
     if (question && kind === "answer") await ctx.db.patch(question._id, { answeredAt: now, answerId: messageId });
@@ -112,6 +113,11 @@ export const post = mutation({
       runRequestedBy: user?.name,
       updatedAt: now,
     });
+    // The decision this question was, answered here (in the thread, or by Ambient).
+    if (question && kind === "answer") {
+      const d = await ctx.db.query("decisions").withIndex("by_question", (q) => q.eq("questionId", question._id)).first();
+      if (d && d.status === "open") await ctx.db.patch(d._id, { status: "answered", answerIv: iv, answerCt: ct, answeredBy: asAmbient ? "Ambient" : user?.name, via: asAmbient ? "ambient" : "thread", answeredAt: now });
+    }
     await prune(ctx, r._id);
     const m = (await ctx.db.get(messageId))!;
     return { ok: true as const, message: messageShape(m) };
@@ -131,7 +137,9 @@ export const runOwner = query({
   handler: async (ctx, { secret, runTokenHash }) => {
     assertService(secret);
     const found = await runByToken(ctx, runTokenHash);
-    return found ? { routineId: found.r._id, name: found.r.name, face: found.r.bot?.face ?? "classic", createdBy: found.r.userId, teamId: found.r.teamId ?? null } : null;
+    return found
+      ? { routineId: found.r._id, name: found.r.name, face: found.r.bot?.face ?? "classic", createdBy: found.r.userId, teamId: found.r.teamId ?? null, delegate: found.r.bot?.delegate ?? "brain" }
+      : null;
   },
 });
 
@@ -183,15 +191,21 @@ export const chat = query({
       .withIndex("by_user", (q) => q.eq("userId", uid))
       .order("desc")
       .take(Math.min(Math.max(limit, 1), KEEP_CHAT));
-    return rows.reverse().map((m) => ({ id: m._id, role: m.role, iv: m.iv, ct: m.ct, createdAt: m.createdAt }));
+    const out = [];
+    for (const m of rows.reverse()) {
+      const d = m.decisionId ? await ctx.db.get(m.decisionId) : null;
+      out.push({ id: m._id, role: m.role, iv: m.iv, ct: m.ct, createdAt: m.createdAt, decision: d ? decisionShape(d) : null });
+    }
+    return out;
   },
 });
 
 export const addChat = mutation({
-  args: { ...secretArg, uid: v.id("users"), role: v.union(v.literal("user"), v.literal("ambient")), iv: v.string(), ct: v.string(), now: v.number() },
-  handler: async (ctx, { secret, uid, role, iv, ct, now }) => {
+  args: { ...secretArg, uid: v.id("users"), role: v.union(v.literal("user"), v.literal("ambient")), iv: v.string(), ct: v.string(), decisionId: v.optional(v.string()), now: v.number() },
+  handler: async (ctx, { secret, uid, role, iv, ct, decisionId, now }) => {
     assertService(secret);
-    const id = await ctx.db.insert("ambientChat", { userId: uid, role, iv, ct, createdAt: now });
+    const did = decisionId ? ctx.db.normalizeId("decisions", decisionId) : null;
+    const id = await ctx.db.insert("ambientChat", { userId: uid, role, iv, ct, ...(did ? { decisionId: did } : {}), createdAt: now });
     const old = await ctx.db
       .query("ambientChat")
       .withIndex("by_user", (q) => q.eq("userId", uid))
@@ -212,5 +226,145 @@ export const clearChat = mutation({
       .take(KEEP_CHAT * 2);
     for (const m of rows) await ctx.db.delete(m._id);
     return { removed: rows.length };
+  },
+});
+
+// ---- decisions (docs/bots.md, "Decisions") ----
+
+function decisionShape(d: Doc<"decisions">) {
+  return {
+    id: d._id,
+    routineId: d.routineId ?? null,
+    questionId: d.questionId ?? null,
+    iv: d.iv,
+    ct: d.ct,
+    status: d.status,
+    answerIv: d.answerIv ?? null,
+    answerCt: d.answerCt ?? null,
+    answeredBy: d.answeredBy ?? null,
+    via: d.via ?? null,
+    answeredAt: d.answeredAt ?? null,
+    urgent: d.urgent,
+    createdAt: d.createdAt,
+  };
+}
+
+export const createDecision = mutation({
+  args: { ...secretArg, uid: v.id("users"), routineId: v.optional(v.string()), questionId: v.optional(v.string()), iv: v.string(), ct: v.string(), urgent: v.boolean(), now: v.number() },
+  handler: async (ctx, { secret, uid, routineId, questionId, iv, ct, urgent, now }) => {
+    assertService(secret);
+    const rid = routineId ? ctx.db.normalizeId("routines", routineId) : null;
+    const qid = questionId ? ctx.db.normalizeId("botMessages", questionId) : null;
+    const id = await ctx.db.insert("decisions", { userId: uid, ...(rid ? { routineId: rid } : {}), ...(qid ? { questionId: qid } : {}), iv, ct, status: "open", urgent, createdAt: now });
+    return decisionShape((await ctx.db.get(id))!);
+  },
+});
+
+/** The person's open decisions, oldest first (the stack). */
+export const openDecisions = query({
+  args: { ...secretArg, uid: v.id("users") },
+  handler: async (ctx, { secret, uid }) => {
+    assertService(secret);
+    const rows = await ctx.db
+      .query("decisions")
+      .withIndex("by_user", (q) => q.eq("userId", uid).eq("status", "open"))
+      .order("asc")
+      .take(50);
+    return rows.map(decisionShape);
+  },
+});
+
+export const decision = query({
+  args: { ...secretArg, uid: v.id("users"), id: v.string() },
+  handler: async (ctx, { secret, uid, id }) => {
+    assertService(secret);
+    const did = ctx.db.normalizeId("decisions", id);
+    const d = did ? await ctx.db.get(did) : null;
+    return d && d.userId === uid ? decisionShape(d) : null;
+  },
+});
+
+/** An answer that didn't go through a bot's thread (Ambient's own question, or a record). */
+export const resolveDecision = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), answerIv: v.string(), answerCt: v.string(), by: v.string(), via: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, id, answerIv, answerCt, by, via, now }) => {
+    assertService(secret);
+    const did = ctx.db.normalizeId("decisions", id);
+    const d = did ? await ctx.db.get(did) : null;
+    if (!d || d.userId !== uid) return { ok: false as const, error: "no_such_decision" };
+    if (d.status !== "open") return { ok: false as const, error: "already_answered" };
+    await ctx.db.patch(d._id, { status: "answered", answerIv, answerCt, answeredBy: by, via, answeredAt: now });
+    return { ok: true as const, decision: decisionShape((await ctx.db.get(d._id))!) };
+  },
+});
+
+// ---- Ambient's heartbeat ----
+
+/** The people with bots: listed accounts and the members of teams that have them. */
+export const heartbeatPeople = query({
+  args: { ...secretArg, users: v.array(v.string()), teams: v.array(v.string()) },
+  handler: async (ctx, { secret, users, teams }) => {
+    assertService(secret);
+    const out = new Set<string>();
+    for (const u of users) {
+      const uid = ctx.db.normalizeId("users", u);
+      if (uid && (await ctx.db.get(uid))) out.add(uid);
+    }
+    for (const slug of teams) {
+      const t = await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+      if (!t) continue;
+      for (const m of await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", t._id)).take(200)) out.add(m.userId);
+    }
+    return [...out];
+  },
+});
+
+/**
+ * What happened for a person since their last heartbeat, as keys and facts (no sealed text): their
+ * bots' failed runs, decisions waiting over two hours, root commands waiting for approval.
+ */
+export const heartbeatEvents = query({
+  args: { ...secretArg, uid: v.id("users"), since: v.number(), now: v.number() },
+  handler: async (ctx, { secret, uid, since, now }) => {
+    assertService(secret);
+    const events: { key: string; kind: "failed" | "waiting" | "approval"; routineId?: string; name?: string; at: number }[] = [];
+    for (const r of await ctx.db.query("routines").withIndex("by_user", (q) => q.eq("userId", uid)).take(200)) {
+      if (!r.bot || r.lastRun?.status !== "failed" || (r.lastRun.finishedAt ?? 0) < since) continue;
+      events.push({ key: `failed:${r._id}:${r.lastRun.startedAt}`, kind: "failed", routineId: r._id, name: r.name, at: r.lastRun.finishedAt ?? now });
+    }
+    for (const d of await ctx.db.query("decisions").withIndex("by_user", (q) => q.eq("userId", uid).eq("status", "open")).take(50)) {
+      if (now - d.createdAt < 2 * 3600_000) continue;
+      const r = d.routineId ? await ctx.db.get(d.routineId) : null;
+      events.push({ key: `waiting:${d._id}:${Math.floor((now - d.createdAt) / (24 * 3600_000))}`, kind: "waiting", routineId: d.routineId, name: r?.name, at: d.createdAt });
+    }
+    for (const a of await ctx.db.query("approvals").withIndex("by_user", (q) => q.eq("uid", uid)).order("desc").take(20)) {
+      if (a.status !== "pending" || a.expiresAt < now) continue;
+      events.push({ key: `approval:${a._id}`, kind: "approval", at: a.createdAt });
+    }
+    const state = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    return { events, state: state ? { lastBeatAt: state.lastBeatAt, day: state.day, sentToday: state.sentToday, seen: state.seen } : null };
+  },
+});
+
+export const recordBeat = mutation({
+  args: { ...secretArg, uid: v.id("users"), at: v.number(), day: v.string(), sent: v.boolean(), seen: v.array(v.string()) },
+  handler: async (ctx, { secret, uid, at, day, sent, seen }) => {
+    assertService(secret);
+    const state = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    const sentToday = (state && state.day === day ? state.sentToday : 0) + (sent ? 1 : 0);
+    const keep = [...new Set([...(state?.seen ?? []), ...seen])].slice(-300);
+    if (state) await ctx.db.patch(state._id, { lastBeatAt: at, day, sentToday, seen: keep });
+    else await ctx.db.insert("ambientState", { userId: uid, lastBeatAt: at, day, sentToday, seen: keep });
+  },
+});
+
+/** Whose key a bot's thread is sealed with (a decision answered there). */
+export const routineOwner = query({
+  args: { ...secretArg, id: v.string() },
+  handler: async (ctx, { secret, id }) => {
+    assertService(secret);
+    const rid = ctx.db.normalizeId("routines", id);
+    const r = rid ? await ctx.db.get(rid) : null;
+    return r ? { teamId: r.teamId ?? null, createdBy: r.userId } : null;
   },
 });

@@ -7,6 +7,7 @@ import { RoutineError, type Actor, type RoutineService } from "../routines/servi
 import { limiter } from "../limiter.ts";
 import { ChatAttachment, type AmbientChat } from "./ambient.ts";
 import type { AdminService } from "./admin.ts";
+import type { DecisionService } from "./decisions.ts";
 import { ModelChoice } from "@brain/spec";
 import type { BotService } from "./service.ts";
 import type { AmbientComputers } from "./computer.ts";
@@ -24,7 +25,7 @@ const Text = z.object({ text: z.string().trim().min(1).max(8_000) });
 
 export function botAppRoutes(
   r: Router,
-  d: { routines: RoutineService; bots: BotService; ambient: AmbientChat; admin?: AdminService; directory: Directory; auth: RequestHandler; json: RequestHandler },
+  d: { routines: RoutineService; bots: BotService; ambient: AmbientChat; admin?: AdminService; decisions?: DecisionService; directory: Directory; auth: RequestHandler; json: RequestHandler },
 ) {
   const actor = async (res: Response): Promise<Actor> => {
     const uid = res.locals.uid as string;
@@ -69,6 +70,27 @@ export function botAppRoutes(
     }
     try {
       res.json({ computer: await d.routines.removeAllowed(await actor(res), id(req), body.data.command) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // Decisions waiting for the person (docs/bots.md, "Decisions"): the stack, and answering one.
+  r.get("/v1/app/decisions", d.auth, async (_req, res) => {
+    const a = await actor(res);
+    if (!d.decisions || !d.routines.botsEnabled(a)) return res.json({ decisions: [] });
+    res.json({ decisions: await d.decisions.list(a.uid) });
+  });
+
+  r.post("/v1/app/decisions/:id", d.auth, d.json, async (req, res) => {
+    const body = z.object({ option: z.string().min(1).max(4000).optional(), text: z.string().min(1).max(4000).optional() }).safeParse(req.body);
+    const answer = body.success ? (body.data.option ?? body.data.text) : undefined;
+    if (!answer || !d.decisions) {
+      res.status(400).json({ error: "bad_request", message: "Pick an option or write an answer." });
+      return;
+    }
+    try {
+      res.json({ decision: await d.decisions.answer(await actor(res), id(req), answer, "app") });
     } catch (err) {
       fail(res, err);
     }

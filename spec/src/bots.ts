@@ -51,6 +51,8 @@ export const BotSettings = z.object({
   report: z.enum(BOT_REPORTS),
   /** Absent: the computer's default model. */
   model: z.object({ model: z.string(), effort: z.string().optional(), fallback: z.string().optional() }).optional(),
+  /** What Ambient may answer for the bot's owner (docs/bots.md, "Decisions"); absent: brain. */
+  delegate: z.enum(["never", "brain", "most"]).optional(),
 });
 export type BotSettings = z.infer<typeof BotSettings>;
 
@@ -64,6 +66,7 @@ export const BotInput = z.object({
   report: z.enum(BOT_REPORTS).optional(),
   /** null: the computer's default model. */
   model: ModelChoice.nullable().optional(),
+  delegate: z.enum(["never", "brain", "most"]).optional(),
 });
 export type BotInput = z.infer<typeof BotInput>;
 
@@ -81,6 +84,7 @@ export function botSettings(input: BotInput, current?: BotSettings): BotSettings
     ...(secrets ? { secrets: [...new Set(secrets)].sort() } : {}),
     report: input.report ?? base.report,
     ...(model ? { model } : {}),
+    ...((input.delegate ?? base.delegate) ? { delegate: input.delegate ?? base.delegate } : {}),
   };
 }
 

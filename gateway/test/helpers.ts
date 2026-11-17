@@ -50,8 +50,8 @@ export async function startStack(
     microsoftFetch?: typeof fetch;
     /** Who has bots (BRAIN_BOTS); tests add account ids to it once they're signed in. */
     bots?: { users: string[]; teams: string[] };
-    /** Ambient's chat against a fake Anthropic. */
-    ambient?: { fetchImpl?: typeof fetch; apiKey?: string };
+    /** Ambient's chat against a fake Anthropic (no heartbeat timer in tests). */
+    ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number };
   } = {},
 ) {
   const serviceSecret = randomBytes(24).toString("hex");
@@ -166,7 +166,7 @@ export async function startStack(
     microsoft: microsoftVerifier([MICROSOFT_CLIENT], { keys: [microsoftJwk] }),
     google: googleVerifier([GOOGLE_CLIENT], { keys: [googleJwk] }),
     microsoftConnect: opts.microsoftConnect ? { ...opts.microsoftConnect, fetchImpl: opts.microsoftFetch } : undefined,
-    ambient: opts.ambient,
+    ambient: { ...opts.ambient, noHeartbeat: true },
   });
   gatewayServer.on("request", stack.app);
 
@@ -195,6 +195,8 @@ export async function startStack(
     microsoftConnect: stack.microsoftConnect,
     bots: stack.bots,
     ambient: stack.ambient,
+    decisions: stack.decisions,
+    heartbeat: stack.heartbeat,
     graphTokens,
     deliverer,
     close: async () => {
