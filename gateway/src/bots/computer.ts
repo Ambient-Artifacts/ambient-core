@@ -15,7 +15,11 @@ import type { PatService } from "../auth/pats.ts";
 import type { Turn } from "../ai/loop.ts";
 
 /** Work for the computer that isn't a chat message: a root command, or a bot run to start now. */
-export type ControlJob = { id: string; kind: "exec"; command: string; timeoutS: number } | { id: string; kind: "start"; routineId: string };
+export type ControlJob =
+  | { id: string; kind: "exec"; command: string; timeoutS: number }
+  | { id: string; kind: "start"; routineId: string }
+  /** Sign Codex in on the computer with a ChatGPT plan (device code): the runner sends back the link and code. */
+  | { id: string; kind: "codex-login" };
 
 export interface ComputerJob {
   id: string;
@@ -135,6 +139,29 @@ export class AmbientComputers {
         return { code: -1, output: text };
       }
     });
+  }
+
+  /**
+   * Start Codex's ChatGPT sign-in on the computer (docs/bots.md, "Codex next to Claude Code"): the
+   * runner starts `codex login --device-auth` as the routine user and sends back the link and the
+   * one-time code; the person finishes it in their browser, and the computer's next sync says it's
+   * signed in.
+   */
+  async codexLogin(hostId: string, waitMs = 90_000): Promise<{ url: string; code: string; expiresAt: number }> {
+    if (!this.connected(hostId)) throw new Error("not_connected");
+    const job: ControlJob = { id: randomUUID(), kind: "codex-login" };
+    const text = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(job.id);
+        reject(new Error("the computer didn't answer"));
+      }, waitMs);
+      timer.unref();
+      this.pending.set(job.id, { hostId, resolve, reject, timer });
+      this.hand(hostId, job);
+    });
+    const out = JSON.parse(text) as { url?: unknown; code?: unknown; expiresAt?: unknown };
+    if (typeof out.url !== "string" || !/^https:\/\//.test(out.url) || typeof out.code !== "string") throw new Error("the computer sent no sign-in code");
+    return { url: out.url, code: out.code, expiresAt: typeof out.expiresAt === "number" ? out.expiresAt : this.now() + 15 * 60_000 };
   }
 
   /** Start a bot's run on the computer now (a message to it), instead of at its next check. */

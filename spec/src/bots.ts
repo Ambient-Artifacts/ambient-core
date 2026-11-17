@@ -8,8 +8,8 @@ import { z } from "zod";
 export const BOT_FACES = ["classic", "round", "tall", "wide"] as const;
 export type BotFace = (typeof BOT_FACES)[number];
 
-/** What runs a bot. One for now; the runner has one adapter per runtime. */
-export const BOT_RUNTIMES = ["claude-code"] as const;
+/** What runs a bot; the runner has one adapter per runtime (docs/bots.md, "Codex next to Claude Code"). */
+export const BOT_RUNTIMES = ["claude-code", "codex"] as const;
 export type BotRuntime = (typeof BOT_RUNTIMES)[number];
 
 /**
@@ -26,10 +26,22 @@ export type BotReport = (typeof BOT_REPORTS)[number];
 export const BOT_STATES = ["asleep", "working", "needs_you", "stuck", "done"] as const;
 export type BotState = (typeof BOT_STATES)[number];
 
-/** A model, its effort and what to fall back to (docs/bots.md); the runner passes them to Claude Code. */
+/** A model, its effort and what to fall back to (docs/bots.md); the runner passes them to Claude Code or Codex. */
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+/** Claude's model ids. */
+export const CLAUDE_MODEL = /^claude-[a-z0-9.-]{2,60}$/;
+/** OpenAI's model ids as Codex takes them (gpt-…, o3…, codex-…). */
+export const OPENAI_MODEL = /^(gpt-[a-z0-9.-]{1,60}|o[1-9][a-z0-9.-]{0,40}|codex-[a-z0-9.-]{1,60})$/;
+/** Which runtime a model id belongs to. */
+export function modelRuntime(model: string): BotRuntime | null {
+  return CLAUDE_MODEL.test(model) ? "claude-code" : OPENAI_MODEL.test(model) ? "codex" : null;
+}
+/** Codex's reasoning effort for ours (it has no "max"). */
+export function codexEffort(effort: string | undefined): string | undefined {
+  return effort === "max" ? "xhigh" : effort;
+}
 export const ModelChoice = z.object({
-  model: z.string().regex(/^claude-[a-z0-9.-]{2,60}$/),
+  model: z.string().refine((m) => modelRuntime(m) !== null, "a Claude model (claude-…) or an OpenAI one (gpt-…, o3…, codex-…)"),
   effort: z.enum(EFFORTS).nullable().optional(),
   fallback: z.string().regex(/^claude-[a-z0-9.-]{2,60}$/).nullable().optional(),
 });
@@ -76,10 +88,13 @@ export const BOT_DEFAULTS: BotSettings = { face: "classic", runtime: "claude-cod
 export function botSettings(input: BotInput, current?: BotSettings): BotSettings {
   const base = current ?? BOT_DEFAULTS;
   const secrets = input.secrets === null ? undefined : (input.secrets ?? base.secrets);
-  const model = input.model === null ? undefined : input.model ? storedModel(input.model) : base.model;
+  // A new runtime drops a model of the other one's (a Claude model can't run in Codex).
+  const runtime = input.runtime ?? base.runtime;
+  const kept = base.model && modelRuntime(base.model.model) === runtime ? base.model : undefined;
+  const model = input.model === null ? undefined : input.model ? storedModel(input.model) : kept;
   return {
     face: input.face ?? base.face,
-    runtime: input.runtime ?? base.runtime,
+    runtime,
     isolation: input.isolation ?? base.isolation,
     ...(secrets ? { secrets: [...new Set(secrets)].sort() } : {}),
     report: input.report ?? base.report,

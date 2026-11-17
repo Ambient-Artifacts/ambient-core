@@ -379,7 +379,17 @@ export default defineSchema({
     codeExpiresAt: v.optional(v.number()),
     /** The computer's own token, once set up. */
     tokenHash: v.optional(v.string()),
-    info: v.optional(v.object({ hostname: v.string(), os: v.string(), runner: v.string(), claude: v.string() })),
+    info: v.optional(
+      v.object({
+        hostname: v.string(),
+        os: v.string(),
+        runner: v.string(),
+        claude: v.string(),
+        /** Codex's version on the computer, and how it's signed in there (runner 0.9.0 on). */
+        codex: v.optional(v.string()),
+        codexLogin: v.optional(v.union(v.literal("chatgpt"), v.literal("api_key"), v.literal("none"))),
+      }),
+    ),
     lastSeenAt: v.optional(v.number()),
     /**
      * How its runs and Ambient sign in to Claude (docs/bots.md): a stored plan token or API key,
@@ -392,6 +402,12 @@ export default defineSchema({
         key: v.optional(claudeCredential),
       }),
     ),
+    /**
+     * How its Codex bots sign in to OpenAI (docs/bots.md, "Codex next to Claude Code"): "plan" is
+     * the computer's own Codex sign-in (a ChatGPT plan, signed in there with a device code); "key"
+     * a stored OpenAI API key, sealed with the owner's data key. Absent: "plan".
+     */
+    openai: v.optional(v.object({ use: v.union(v.literal("plan"), v.literal("key")), key: v.optional(claudeCredential) })),
     /** The default model for its runs and Ambient there; absent: Claude Code's own. */
     model: v.optional(modelChoice),
     /** What Ambient may do there: standard (its tools), admin (root after an approval), full (root). */

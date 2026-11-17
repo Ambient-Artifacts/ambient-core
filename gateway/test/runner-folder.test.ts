@@ -171,6 +171,8 @@ describe("a bot's folder on the computer", () => {
 });
 
 describe("a bot's folder in its container", () => {
+  /** The shell the runner gave the container (the first test), run again in the second. */
+  let shell = "";
   it("mounts the out folder and the skills, and puts the skills in place before Claude Code", async () => {
     start = {
       run: { id: "run00000003", trigger: "manual" },
@@ -198,10 +200,11 @@ describe("a bot's folder in its container", () => {
     expect(mounts).toContainEqual(expect.stringMatching(/\/runs\/run00000003\/out:\/opt\/ambient\/out$/));
     expect(mounts).toContainEqual(expect.stringMatching(/\/runs\/run00000003\/skills:\/opt\/ambient\/skills:ro$/));
     // The image runs a small shell first, which then becomes Claude Code with the same arguments.
-    const image = args.indexOf("localhost/ambient-bot:2");
+    const image = args.indexOf("localhost/ambient-bot:3");
     expect(args.slice(image + 1, image + 3)).toEqual(["sh", "-c"]);
     const script = args.slice(image + 3).join("\n").split("\nsh\n")[0]!;
     expect(script).toContain('exec claude "$@"');
+    shell = script;
     expect(after(args, "--append-system-prompt")).toBe("Your memory: /opt/ambient/out/memory.md. Your handoff: /opt/ambient/out/handoff.md.");
     // Nothing written in the container: memory as it was, an empty handoff.
     expect(finished).toMatchObject({ status: "succeeded", memory: "remember this", handoff: "" });
@@ -209,8 +212,8 @@ describe("a bot's folder in its container", () => {
 
   it("swaps the skills it put there last time, and leaves the bot's own", () => {
     // The shell from the runner, run here with a stand-in claude and folders of our own.
-    const source = readFileSync(RUNNER, "utf8");
-    const script = /const SKILLS_SCRIPT = `([\s\S]*?)`;/.exec(source)![1]!.replaceAll("\\$", "$").replaceAll("${CONTAINER_SKILLS}", join(dir, "skills-in"));
+    expect(shell).toContain("/opt/ambient/skills");
+    const script = shell.replaceAll("/opt/ambient/skills", join(dir, "skills-in"));
     const home = join(dir, "bot-home");
     const skills = join(home, ".claude", "skills");
     mkdirSync(join(skills, "old"), { recursive: true });

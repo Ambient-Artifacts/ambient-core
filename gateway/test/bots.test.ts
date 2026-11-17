@@ -112,7 +112,7 @@ describe("a bot", () => {
     const r = made.json.routine as R;
     id = r.id;
     expect(r.bot).toMatchObject({ face: "round", isolation: "container", secrets: ["GH_TOKEN"], report: "news", state: "asleep", openQuestion: null, lastMessage: null });
-    expect((await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: daily, bot: { runtime: "codex" } })).status).toBe(400);
+    expect((await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: daily, bot: { runtime: "copilot" } })).status).toBe(400);
   });
 
   it("gets only its granted secrets and a run token", async () => {

@@ -41,7 +41,15 @@ function claudeLine(c: Computer): string {
   const stored = [a.plan ? `a Claude plan (stored by ${a.plan.by ?? "someone"})` : null, a.key ? `an API key (stored by ${a.key.by ?? "someone"})` : null].filter(Boolean).join(" and ");
   const using = a.use === "plan" ? "its stored Claude plan" : a.use === "key" ? "its stored API key" : "its own sign-in (set on the computer)";
   const model = c.model ? `default model ${c.model.model}${c.model.effort ? ` (${c.model.effort})` : ""}${c.model.fallback ? `, fallback ${c.model.fallback}` : ""}` : "default model: Claude Code's own";
-  return `signs in with ${using}${stored ? `; stored: ${stored}` : ""}; ${model}; Ambient's access: ${c.access}`;
+  return `signs in with ${using}${stored ? `; stored: ${stored}` : ""}; ${model}; Ambient's access: ${c.access}; ${openaiLine(c)}`;
+}
+
+/** How the computer's Codex bots sign in to OpenAI. */
+function openaiLine(c: Computer): string {
+  const o = c.openaiAccount;
+  const codex = !c.codex ? "Codex: unknown (older runner)" : c.codex === "not found" ? "Codex: not installed" : `Codex ${c.codex}`;
+  const own = o.signedIn === "chatgpt" ? "signed in with a ChatGPT plan" : o.signedIn === "api_key" ? "signed in with an API key" : o.signedIn === "none" ? "not signed in" : "sign-in unknown";
+  return `${codex}, Codex bots use ${o.use === "key" ? `its stored OpenAI key (stored by ${o.key?.by ?? "someone"})` : `the computer's own Codex sign-in (${own})`}`;
 }
 
 function computerLine(c: Computer): string {
@@ -61,7 +69,7 @@ const STATE_WORDS: Record<string, string> = { working: "working", needs_you: "ne
 function botLine(r: Routine): string | null {
   if (!r.bot) return null;
   const b = r.bot;
-  const parts = [`Bot: ${STATE_WORDS[b.state] ?? b.state}`, `${b.face} face`, b.isolation === "container" ? "own container" : "runs on the computer itself", `secrets: ${b.secrets === null ? "all of its owner's" : b.secrets.join(", ") || "none"}`, `reports ${b.report === "news" ? "news only" : "every run"}`];
+  const parts = [`Bot: ${STATE_WORDS[b.state] ?? b.state}`, `${b.face} face`, b.runtime === "codex" ? "runs on Codex" : "runs on Claude Code", b.isolation === "container" ? "own container" : "runs on the computer itself", `secrets: ${b.secrets === null ? "all of its owner's" : b.secrets.join(", ") || "none"}`, `reports ${b.report === "news" ? "news only" : "every run"}`];
   const q = b.openQuestion ? `\n  Asked ${new Date(b.openQuestion.askedAt).toISOString().slice(0, 16).replace("T", " ")} UTC: ${b.openQuestion.text}${b.openQuestion.choices ? ` (choices: ${b.openQuestion.choices.join(" / ")})` : ""}` : "";
   return `  ${parts.join(" · ")}${q}`;
 }
@@ -124,7 +132,7 @@ function invalid(err: z.ZodError): string {
 const PAUSED = "It's paused until the user turns it on in the Ambient app (Routines, then the routine, then Resume); an AI app can't turn it on.";
 
 const ModelArg = z.object({
-  model: z.string().describe("A Claude model id: claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, claude-opus-4-6."),
+  model: z.string().describe("A Claude model id (claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, claude-opus-4-6) for Claude Code; an OpenAI one (gpt-…) for a Codex bot."),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).nullable().optional().describe("Thinking effort; null: the model's default."),
   fallback: z.string().nullable().optional().describe("A model to switch to when the first refuses or is overloaded, e.g. claude-opus-4-6; null: none."),
 });
@@ -132,6 +140,7 @@ const ModelArg = z.object({
 const BotArg = z
   .object({
     face: z.enum(BOT_FACES).optional().describe("The shape of its head; its colour is always its state."),
+    runtime: z.enum(["claude-code", "codex"]).optional().describe('What runs it: "claude-code" (default) or "codex" (OpenAI\'s Codex, signed in with the computer\'s ChatGPT plan or an OpenAI key). Switching drops a model of the other runtime.'),
     isolation: z.enum(BOT_ISOLATIONS).optional().describe('"container" (default): its own container and workspace with only its granted secrets; "host": on the computer itself, like a loop.'),
     secrets: z.array(z.string().max(64)).max(30).nullable().optional().describe("The names of the secrets its runs get (see list_routines); null: all of its owner's."),
     report: z.enum(BOT_REPORTS).optional().describe('"news" (default): its thread gets a result only when it failed or says something new; "every_run".'),
@@ -368,6 +377,51 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         }
       }),
   );
+
+  server.registerTool(
+    "use_openai_account",
+    {
+      title: "Switch how a computer's Codex bots sign in",
+      description:
+        'Switch how a computer\'s Codex bots sign in to OpenAI: "plan" (the computer\'s own Codex sign-in, e.g. a ChatGPT plan; sign_in_chatgpt signs it in) or "key" (its stored OpenAI API key). Only when the user asks. Keys are never set here: when none is stored, give the user the link from the result to add it in the Ambient app.',
+      inputSchema: {
+        computer: z.string().max(80).describe("The computer's id or name (see list_routines)."),
+        use: z.enum(["plan", "key"]),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ computer, use }) =>
+      guard(async () => {
+        try {
+          const c = await routines.useOpenAI(actor, computer, use);
+          return result(`${c.team ? `${c.team.name}'s server` : c.name}: ${openaiLine(c)}, from its next Codex run.`, { computer: c });
+        } catch (err) {
+          if (err instanceof RoutineError && err.code === "no_openai_key") {
+            const c = (await routines.list(actor)).computers.find((x) => x.id === computer || x.name.toLowerCase() === computer.toLowerCase());
+            return error(`${err.message}${c ? ` The link that opens it in the app: ambient://computer/${c.id}/openai` : ""}`);
+          }
+          throw err;
+        }
+      }),
+  );
+
+  if (admin) {
+    server.registerTool(
+      "sign_in_chatgpt",
+      {
+        title: "Sign Codex in with a ChatGPT plan on a computer",
+        description:
+          "Start Codex's sign-in with the user's ChatGPT plan on one of their computers (or a team's server they manage), so Codex bots there run on their plan. Returns a link and a one-time code: give both to the user, who opens the link, signs in to ChatGPT and enters the code within 15 minutes. Only when the user asks. The computer must be connected to Ambient.",
+        inputSchema: { computer: z.string().max(80).describe("The computer's id or name (see list_routines).") },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ computer }) =>
+        guard(async () => {
+          const out = await admin.codexLogin(actor, computer);
+          return result(`To sign Codex in on ${out.computer} with your ChatGPT plan: open ${out.url}, sign in, and enter the code ${out.code} (within 15 minutes). Only do this if you asked for it.`, out);
+        }),
+    );
+  }
 
   server.registerTool(
     "set_computer_model",
