@@ -310,6 +310,10 @@ export class RoutineService {
       notifier?: Notifier;
       /** Who has bots (BRAIN_BOTS); absent: nobody. */
       bots?: BotsAccess;
+      /** A user's teams (for whether their own computer runs Ambient). */
+      teamsOf?: (uid: string) => Promise<Team[]>;
+      /** A team by slug (for whether a team's server runs Ambient). */
+      teamBySlug?: (slug: string) => Promise<Team | undefined>;
     },
   ) {}
 
@@ -342,6 +346,38 @@ export class RoutineService {
       return !!team && this.botsOn({ slug: team.slug });
     }
     return r.createdBy === actor.uid ? this.personalBots(actor) : this.botsOn({ uid: r.createdBy });
+  }
+
+  /** Whether a user has bots (and so Ambient), from their account alone. */
+  async botsForUser(uid: string): Promise<boolean> {
+    if (this.botsOn({ uid })) return true;
+    const teams = (await this.d.teamsOf?.(uid).catch(() => [])) ?? [];
+    return teams.some((t) => t.status === "active" && this.botsOn({ slug: t.slug }));
+  }
+
+  /** The teams (by id) that have bots: only those in BRAIN_BOTS by slug. */
+  private async botTeamIds(): Promise<Set<string>> {
+    const slugs = (this.d.bots?.teams ?? []).filter((s) => s !== "*");
+    const teams = await Promise.all(slugs.map((s) => this.d.teamBySlug?.(s).catch(() => undefined)));
+    return new Set(teams.filter((t): t is Team => !!t && t.status === "active").map((t) => t.id));
+  }
+
+  /** Whether a computer runs Ambient: a person's own, when they have bots; a team's server, when the team has. */
+  async ambientOn(host: Host): Promise<boolean> {
+    if (host.teamId) return this.d.bots?.teams.includes("*") || (await this.botTeamIds()).has(host.teamId);
+    return host.uid !== null && (await this.botsForUser(host.uid));
+  }
+
+  /**
+   * Where Ambient can run for a user, in order: their own computers, then the servers of their teams
+   * that have bots (Ambient's own machine for the team, one session per person there).
+   */
+  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null }[]> {
+    const botTeams = await this.botTeamIds();
+    const teams = ((await this.d.teamsOf?.(uid).catch(() => [])) ?? []).filter((t) => t.status === "active" && (this.d.bots?.teams.includes("*") || botTeams.has(t.id)));
+    const out = (await this.d.control.q(api.routines.list, { uid: uid as never, teamIds: teams.map((t) => t.id) as never })) as unknown as { hosts: HostRow[] };
+    const ready = out.hosts.filter((h) => h.ready);
+    return [...ready.filter((h) => !h.teamId), ...ready.filter((h) => h.teamId)].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null }));
   }
 
   get keys(): RoutineKeys {
@@ -702,7 +738,10 @@ export class RoutineService {
     return { token, computer: { id: String(out.host.id), name: out.host.name, team: Boolean(out.host.teamId) } };
   }
 
-  async sync(host: Host, info?: HostInfo): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string } }> {
+  async sync(
+    host: Host,
+    info?: HostInfo,
+  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean }> {
     const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info, now: this.now() });
     if (!out) throw new RoutineError("unauthorized", "This computer was removed.", 401);
     return {
@@ -715,6 +754,8 @@ export class RoutineService {
         runRequested: r.runRequestedAt !== null,
       })),
       runner: this.d.runner,
+      // A person's own computer runs Ambient for them, a team's server for the team's people.
+      ambient: await this.ambientOn(host),
     };
   }
 

@@ -7,6 +7,8 @@ import { RoutineError, type Actor, type RoutineService } from "../routines/servi
 import { limiter } from "../limiter.ts";
 import type { AmbientChat } from "./ambient.ts";
 import type { BotService } from "./service.ts";
+import type { AmbientComputers } from "./computer.ts";
+import type { Host } from "../routines/service.ts";
 
 function fail(res: Response, err: unknown) {
   if (err instanceof RoutineError) {
@@ -121,6 +123,67 @@ export function botRunRouter(d: { bots: BotService }): Router {
     } catch (err) {
       fail(res, err);
     }
+  });
+
+  return r;
+}
+
+/**
+ * A person's computer that runs Ambient (ambient-runner ambient), with its computer token: it waits
+ * for the next chat message (a long poll of up to 25 seconds) and sends back the reply.
+ */
+export function ambientHostRouter(d: { routines: RoutineService; directory: Directory; computers: AmbientComputers }): Router {
+  const r = express.Router();
+  const json = express.json({ limit: "256kb" });
+  const host = async (req: Request, res: Response): Promise<Host | undefined> => {
+    const h = await d.routines.authenticate(req.headers.authorization);
+    // A person's computer stops with their account; a team's server with its team (checked in Convex).
+    if (!h || (h.uid && !(await d.directory.user(h.uid)))) {
+      res.status(401).json({ error: "invalid_token", message: "This computer isn't connected anymore. Set it up again from the Ambient app." });
+      return undefined;
+    }
+    if (!(await d.routines.ambientOn(h))) {
+      res.status(403).json({ error: "bots_not_enabled", message: "Ambient isn't switched on for this account." });
+      return undefined;
+    }
+    return h;
+  };
+
+  r.get("/v1/host/ambient/next", async (req, res) => {
+    const h = await host(req, res);
+    if (!h) return;
+    let closed = false;
+    res.on("close", () => {
+      closed = true;
+      d.computers.drop(h.id);
+    });
+    const job = await d.computers.next(h.id, 25_000);
+    if (closed) {
+      if (job) d.computers.requeue(h.id, job);
+      return;
+    }
+    if (!job) {
+      res.status(204).end();
+      return;
+    }
+    res.json(job);
+  });
+
+  r.post("/v1/host/ambient/:jobId", json, async (req, res) => {
+    const h = await host(req, res);
+    if (!h) return;
+    const body = z.object({ text: z.string().max(100_000).optional(), error: z.string().max(2_000).optional() }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Send the reply's text, or what went wrong." });
+      return;
+    }
+    const id = String(req.params.jobId);
+    const ok = body.data.error !== undefined ? d.computers.fail(h.id, id, body.data.error) : d.computers.reply(h.id, id, body.data.text ?? "");
+    if (!ok) {
+      res.status(404).json({ error: "no_such_message", message: "That message isn't waiting for a reply anymore." });
+      return;
+    }
+    res.status(204).end();
   });
 
   return r;

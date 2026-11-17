@@ -8,6 +8,8 @@
 //                                                with isolation "container": in its own Podman container)
 //   ambient-runner bot-mcp                       the ask_owner tool a bot's run gets (MCP over stdio)
 //   ambient-runner image                         build the bots' container image now
+//   ambient-runner ambient                       Ambient on this computer: one Claude Code session that
+//                                                stays open, answering the person's chat (a service)
 //   ambient-runner status | uninstall
 //
 // One file, no dependencies, Node 18 or newer. The gateway serves it at /runner/ambient-runner.mjs
@@ -20,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -271,8 +273,190 @@ async function sync() {
       log(`Started "${r.name}" (run now)`);
     }
   }
+  ambientUnit(cfg, out.ambient === true);
   writeState(state);
-  if (out.runner?.sha256) await selfUpdate(cfg, out.runner);
+  if (out.runner?.sha256 && (await selfUpdate(cfg, out.runner)) && out.ambient === true) systemctl("restart", AMBIENT_UNIT);
+}
+
+// ---- Ambient on this computer ----
+//
+// On a person's own computer, or a team's server, when Ambient is on there, sync installs a service
+// that keeps a Claude Code session open per person and asks the gateway for the next chat message
+// (a long poll): no start-up wait per message. It runs as the routine user, in ~/ambient/<person>,
+// with Ambient's tools (that person's token, renewed daily by the gateway, in an MCP config only
+// this user reads) and the machine's own, so Ambient can work there. Its Claude sign-in: the
+// machine's (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in extra.env), or a plan of its own in
+// ambient.env (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`), which then wins over a key.
+
+const AMBIENT_UNIT = "ambient-runner-ambient.service";
+const AMBIENT_ENV = join(CONFIG_DIR, "ambient.env");
+
+function ambientUnit(cfg, wanted) {
+  const path = join(UNIT_DIR, AMBIENT_UNIT);
+  if (!wanted) {
+    if (existsSync(path)) {
+      systemctl("disable", "--now", AMBIENT_UNIT);
+      rmSync(path, { force: true });
+      systemctl("daemon-reload");
+      log("Stopped Ambient on this computer");
+    }
+    return;
+  }
+  const unit = `# Written by ambient-runner; changes here are overwritten.
+[Unit]
+Description=Ambient on this computer: the chat's Claude Code sessions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${CONFIG}
+EnvironmentFile=-${EXTRA}
+EnvironmentFile=-${AMBIENT_ENV}
+ExecStart=${cfg.node} ${INSTALLED} ambient
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`;
+  if (writeIfChanged(path, unit)) {
+    systemctl("daemon-reload");
+    systemctl("enable", AMBIENT_UNIT);
+    systemctl("restart", AMBIENT_UNIT);
+    log("Started Ambient on this computer");
+  } else if (systemctl("is-active", AMBIENT_UNIT).stdout.trim() !== "active") {
+    systemctl("start", AMBIENT_UNIT);
+  }
+}
+
+/** The gateway's long poll: the next chat message, or null after ~25 s of nothing. */
+async function nextMessage(cfg) {
+  const res = await fetch(`${cfg.server}/v1/host/ambient/next`, {
+    headers: { authorization: `Bearer ${cfg.token}`, "user-agent": `ambient-runner/${VERSION}` },
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (res.status === 204) return null;
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(json.message || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return json;
+}
+
+async function ambientService() {
+  const cfg = config();
+  const user = cfg.user;
+  const drop = process.getuid?.() === 0 && user !== "root";
+  const as = drop ? account(user) : null;
+  const base = join(as?.home ?? (process.env.AMBIENT_AMBIENT_HOME || home(user)), "ambient");
+  const confDir = join(STATE_DIR, "ambient");
+  mkdirSync(confDir, { recursive: true, mode: 0o700 });
+  if (as) chownSync(confDir, as.uid, as.gid);
+  const own = (path) => {
+    if (as) chownSync(path, as.uid, as.gid);
+  };
+  // A plan of Ambient's own (ambient.env) wins over the machine's API key.
+  const signIn = process.env.CLAUDE_CODE_OAUTH_TOKEN ? { ANTHROPIC_API_KEY: "" } : {};
+
+  /** One open Claude Code session per person: uid → { child, session, token, waiting }. */
+  const people = new Map();
+  const sessions = readState().ambientSessions ?? {};
+
+  const start = (uid, p, instructions) => {
+    const dir = join(base, uid.replace(/[^A-Za-z0-9_-]/g, "_"));
+    mkdirSync(dir, { recursive: true });
+    own(base);
+    own(dir);
+    const mcpFile = join(confDir, `${uid.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+    writeFileSync(mcpFile, JSON.stringify({ mcpServers: { ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${p.token}` } } } }), { mode: 0o600 });
+    own(mcpFile);
+    const args = [
+      "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs,
+      "--mcp-config", mcpFile, "--allowedTools", "mcp__ambient",
+      // Secrets go in through the app, never through a chat.
+      "--disallowedTools", "mcp__ambient__set_routine_secret",
+      "--append-system-prompt", instructions,
+      ...(p.session ? ["--resume", p.session] : []),
+    ];
+    const env = runEnv(cfg, { ...signIn, ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}) });
+    if (signIn.ANTHROPIC_API_KEY === "") delete env.ANTHROPIC_API_KEY;
+    const proc = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
+      cwd: dir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stderr = "";
+    proc.stderr.on("data", (d) => (stderr = (stderr + d).slice(-2000)));
+    createInterface({ input: proc.stdout }).on("line", (line) => {
+      for (const e of ADAPTERS["claude-code"].events(line)) {
+        if (e.type === "result") {
+          if (e.session && e.session !== p.session) {
+            p.session = e.session;
+            const st = readState();
+            st.ambientSessions = { ...(st.ambientSessions ?? {}), [uid]: e.session };
+            writeState(st);
+          }
+          p.waiting?.resolve(e);
+          p.waiting = null;
+        } else journalLine(e);
+      }
+    });
+    proc.on("close", (code) => {
+      if (p.child === proc) p.child = null;
+      // A session that can't be resumed (gone, or another account's): the next message starts afresh.
+      if (code !== 0 && /No conversation found|session/i.test(stderr)) p.session = null;
+      p.waiting?.reject(new Error(`Claude Code stopped (exit ${code}). ${stderr.trim().split("\n").slice(-2).join(" ")}`.trim()));
+      p.waiting = null;
+    });
+    p.child = proc;
+    log(`Ambient's session for ${uid} ${p.session ? `resumed (${p.session.slice(0, 8)})` : "started"}`);
+  };
+
+  const handle = async (job) => {
+    const uid = job.uid;
+    const p = people.get(uid) ?? { child: null, session: sessions[uid] ?? null, token: null, waiting: null };
+    people.set(uid, p);
+    const stop = () => {
+      p.child?.kill("SIGTERM");
+      p.child = null;
+    };
+    if (job.fresh) {
+      stop();
+      p.session = null;
+    }
+    if (job.token !== p.token) {
+      p.token = job.token;
+      stop();
+    }
+    if (!p.child) start(uid, p, job.instructions);
+    const history = job.fresh && job.history?.length ? `Earlier in this chat:\n${job.history.map((t) => `${t.role === "user" ? job.name : "You"}: ${t.text}`).join("\n")}\n\n` : "";
+    const result = new Promise((resolve, reject) => (p.waiting = { resolve, reject }));
+    p.child.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: `${history}${job.text}` }] } })}\n`);
+    try {
+      const r = await result;
+      await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text } : { error: r.text || "Claude Code couldn't answer" });
+      log(`Answered ${uid} (${r.turns ?? "?"} turns${r.costUsd !== undefined ? `, $${r.costUsd.toFixed(2)}` : ""})`);
+    } catch (err) {
+      await call(cfg, "POST", `/v1/host/ambient/${job.id}`, { error: err.message.slice(0, 1900) }).catch(() => {});
+    }
+  };
+
+  log(`Ambient on this computer: waiting for messages from ${cfg.server}`);
+  for (;;) {
+    let job;
+    try {
+      job = await nextMessage(cfg);
+    } catch (err) {
+      if (err.status === 401 || err.status === 403) die(`Ambient stops here: ${err.message}`, 3);
+      await new Promise((r) => setTimeout(r, 5000));
+      continue;
+    }
+    // Each person's message is answered in their own session; the next long poll doesn't wait for it.
+    if (job?.uid && job.token) void handle(job);
+  }
 }
 
 /** The source as signed: the server line blanked, since each gateway writes its own address there. */
@@ -325,6 +509,7 @@ async function selfUpdate(cfg, latest) {
   }
   renameSync(tmp, INSTALLED);
   log(`Updated the runner to ${latest.version}`);
+  return true;
 }
 
 /** Is version `a` (1.2.3) after `b`? */
@@ -379,7 +564,9 @@ function runEnv(cfg, extra = {}, secrets = {}) {
   const allowed = Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k)));
   const env = { ...process.env, ...allowed, ...extra };
   delete env.AMBIENT_HOST_TOKEN;
-  for (const k of Object.keys(env)) if (k.startsWith("CLAUDE_CODE_") || k === "CLAUDECODE") delete env[k];
+  // A Claude Code session's own variables stay out (when the runner itself is started from one); the
+  // computer's sign-in (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`, in extra.env) stays in.
+  for (const k of Object.keys(env)) if ((k.startsWith("CLAUDE_CODE_") && k !== "CLAUDE_CODE_OAUTH_TOKEN") || k === "CLAUDECODE") delete env[k];
   return env;
 }
 
@@ -942,6 +1129,9 @@ switch (cmd) {
     break;
   case "bot-mcp":
     await botMcp();
+    break;
+  case "ambient":
+    await ambientService();
     break;
   case "image": {
     const p = podman();
