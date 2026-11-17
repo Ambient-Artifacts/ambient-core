@@ -6,7 +6,7 @@ Ambient turns what happens at work (meetings, work sessions with AI agents, note
 
 ```
  iPhone / Mac app ─┐                       ┌─▶ Convex: users, teams, members, tokens, OAuth rows,
- AI apps (MCP) ────┼─▶ gateway ────────────┤          encrypted personal pages, routines, sessions
+ AI apps (MCP) ────┼─▶ gateway ────────────┤          encrypted personal pages and voices, routines, sessions
  Claude Code ──────┘   (one per install)   │
  routine runners ──────▶                   └─▶ team server (one per team): the team wiki in git
 ```
@@ -44,9 +44,11 @@ A wiki is a folder of markdown files with YAML front matter: the same format for
 
 Every commit the team server makes for a person (their note, recording or saved work) has that person as its author and names them in the message (`ingest: Kickoff (a1b2c3) by Lena Vogel`); Ambient's own upkeep commits as Ambient Bot. The name comes from the person's account through the gateway, never from the device.
 
+**Voices.** The apps learn a person's voice on the device as a fingerprint: a speaker embedding (numbers, never audio). The app stores it with the gateway (`PUT /v1/app/me/voice`); the person's other devices fetch it, and so does every active member of each team they're in (`GET /v1/app/teams/<team>/voices`), so any member's app can name them in a recording. Speakers are matched on the device; the server only keeps fingerprints and hands them out. Someone who leaves or is removed drops out of the team's list at once; deleting the account, or `forget_my_voice`, deletes the fingerprint.
+
 ## How agents read it
 
-The MCP server is at `/mcp` (personal and team, for one person) and `/t/<team>/mcp` (that team only). Its tools are `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items` and `transcript`, plus `save_note`, `log_work`, `suggest_correction`, the routine tools and the settings tools (`get_settings`, `change_team_settings`, `change_preferences`). What the app can change, an AI app can change for its user: the app's routes and the tools call the same functions. Results carry stable ids (`personal:people/anna-mueller`, `team:acme:decisions/0001-…`) and `ambient://` links.
+The MCP server is at `/mcp` (personal and team, for one person) and `/t/<team>/mcp` (that team only). Its tools are `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items` and `transcript`, plus `save_note`, `log_work`, `suggest_correction`, the routine tools and the settings tools (`get_settings`, `change_team_settings`, `change_preferences`, `forget_my_voice`). What the app can change, an AI app can change for its user: the app's routes and the tools call the same functions. Results carry stable ids (`personal:people/anna-mueller`, `team:acme:decisions/0001-…`) and `ambient://` links.
 
 ## Identity and tokens
 
@@ -62,7 +64,7 @@ Scopes are `personal:read`, `personal:write`, `team:read`, `team:write` and `ses
 
 ## Encryption
 
-- Each user has a **data key**. Personal pages, transcripts, repo tokens, routine prompts, results and secrets are sealed with it (AES-256-GCM, bound to the user and the path) before they're stored in Convex.
+- Each user has a **data key**. Personal pages, transcripts, voice fingerprints, repo tokens, routine prompts, results and secrets are sealed with it (AES-256-GCM, bound to the user and the path) before they're stored in Convex.
 - Data keys are wrapped by the **master key** (`BRAIN_MASTER_KEY`), which only the gateway and its jobs hold. A team's routine key is wrapped the same way.
 - So Convex, its backups and anyone with only database access see ciphertext. The gateway decrypts in memory to serve MCP and sync.
 - Team wikis are plain git on the team's own server, readable by the team's tools by design. In Ambient Cloud, each team server is a separate VM that only the gateway can reach.

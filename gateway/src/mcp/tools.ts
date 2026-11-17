@@ -13,6 +13,7 @@ import type { RoutineService } from "../routines/service.ts";
 import type { BotService } from "../bots/service.ts";
 import { newNoteId, type NoteSpec } from "../sessions/service.ts";
 import type { SettingsService } from "../team-admin.ts";
+import type { Voices } from "../voices.ts";
 import { TeamServerError } from "../teams.ts";
 import { registerRoutineTools } from "./routine-tools.ts";
 import { registerSettingsTools } from "./settings-tools.ts";
@@ -67,6 +68,8 @@ export interface ToolDeps {
   bots?: BotService;
   /** Settings: the user's preferences and their teams' settings, as the app changes them. */
   settings?: SettingsService;
+  /** The user's voice fingerprint: whether one is stored and who gets it, and forgetting it. */
+  voices?: Voices;
   version: string;
   /** Who the user is and what their wikis hold (context.ts), sent when an app connects. */
   personal?: string | null;
@@ -232,7 +235,7 @@ function interleave<T>(lists: T[][], limit: number): T[] {
   return out;
 }
 
-export function buildMcpServer({ principal, readers, routines, bots, settings, version, personal }: ToolDeps): McpServer {
+export function buildMcpServer({ principal, readers, routines, bots, settings, voices, version, personal }: ToolDeps): McpServer {
   // Claude Code with the Ambient plugin sends whole sessions itself (sessions:write): no log_work there.
   const canLog = Boolean(readers.logWork) && !principal.scopes.has("sessions:write");
   const general = canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS;
@@ -936,7 +939,7 @@ export function buildMcpServer({ principal, readers, routines, bots, settings, v
   );
 
   if (routines && (principal.personal || principal.teams.length > 0)) registerRoutineTools(server, principal, routines, bots);
-  if (settings && (principal.personal || principal.teams.length > 0)) registerSettingsTools(server, principal, settings);
+  if (settings && (principal.personal || principal.teams.length > 0)) registerSettingsTools(server, principal, settings, voices);
 
   return server;
 }

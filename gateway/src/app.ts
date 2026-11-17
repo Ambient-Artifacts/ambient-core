@@ -21,6 +21,7 @@ import type { ReaderSource } from "./mcp/tools.ts";
 import { contextRouter } from "./context/route.ts";
 import { mcpRouter, protectedResourceRouter } from "./mcp/route.ts";
 import { SettingsService } from "./team-admin.ts";
+import { Voices } from "./voices.ts";
 import { interactionRouter } from "./oauth/interactions.ts";
 import { createProvider } from "./oauth/provider.ts";
 import { PersonalStore } from "./personal.ts";
@@ -184,6 +185,7 @@ export function createApp(deps: AppDeps) {
 
   // Settings an AI app can change for its user, the same service as the app's routes.
   const settings = new SettingsService({ directory, teams, control });
+  const voices = new Voices({ control, personal, directory });
   // Ambient, the master bot: Claude with the person's own MCP server, every scope, as /mcp gives it.
   const ambient = new AmbientChat({
     control,
@@ -191,13 +193,13 @@ export function createApp(deps: AppDeps) {
     mcp: async (uid) => {
       const principal = { uid, scopes: new Set(MCP_SCOPES), via: "pat" as const, clientId: "ambient-chat", personal: true, teams: await directory.teamsOf(uid) };
       const personal = await personalInstructions(principal, readers, { name: await userName(uid).catch(() => undefined) });
-      return buildMcpServer({ principal, readers, routines, bots, settings, version: VERSION, personal });
+      return buildMcpServer({ principal, readers, routines, bots, settings, voices, version: VERSION, personal });
     },
     apiKey: deps.ambient?.apiKey ?? process.env.ANTHROPIC_API_KEY,
     model: config.ambientModel ?? "claude-sonnet-5-5",
     fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
   });
-  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, settings, version: VERSION, userName }));
+  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
   app.use(botRunRouter({ bots }));
