@@ -46,7 +46,7 @@ afterAll(() => s.close());
 describe("a bot's files", () => {
   it("lists AGENTS.md (the prompt) and memory.md from the start", async () => {
     const list = (await call("GET", `/v1/app/routines/${bot}/files`)).json.files as { path: string; version: number; size: number }[];
-    expect(list.map((f) => f.path)).toEqual(["AGENTS.md", "memory.md"]);
+    expect(list.map((f) => f.path)).toEqual(["AGENTS.md", "GOAL.md", "memory.md"]);
     expect(list[0]).toMatchObject({ version: 0, size: "Write the weekly post.".length });
     const agents = (await call("GET", `/v1/app/routines/${bot}/files/content?path=AGENTS.md`)).json;
     expect(agents.content).toBe("Write the weekly post.");
@@ -86,7 +86,7 @@ describe("a bot's files", () => {
     await call("PUT", `/v1/app/routines/${bot}/files/content?path=${enc("skills/old/SKILL.md")}`, { content: "x" });
     expect((await call("DELETE", `/v1/app/routines/${bot}/files/content?path=${enc("skills/old/SKILL.md")}`)).status).toBe(204);
     const list = (await call("GET", `/v1/app/routines/${bot}/files`)).json.files as { path: string }[];
-    expect(list.map((f) => f.path)).toEqual(["AGENTS.md", "memory.md", "skills/tone/SKILL.md"]);
+    expect(list.map((f) => f.path)).toEqual(["AGENTS.md", "GOAL.md", "memory.md", "skills/tone/SKILL.md"]);
   });
 
   it("is only for who may see the bot, and written only by who may change it", async () => {
@@ -155,6 +155,38 @@ describe("how a bot wakes up", () => {
     await hostCall(host, "POST", `/v1/host/runs/${run.run.id}`, { status: "failed", summary: "Podman wasn't there." });
     const h = ((await call("GET", `/v1/app/routines/${bot}/handoffs?limit=1`)).json.handoffs as { status: string; text: string }[])[0]!;
     expect(h).toMatchObject({ status: "continue", text: "Podman wasn't there." });
+  });
+});
+
+describe("a bot that owns an outcome", () => {
+  it("wakes up with its goal and its metric over the last runs, and reports the metric in each handoff", async () => {
+    const { parseHandoff } = await import("../src/bots/folder.ts");
+    expect(parseHandoff("Status: continue\nMetric: 2 posts, 412 visitors\nWrote the second post.")).toEqual({ status: "continue", metric: "2 posts, 412 visitors", text: "Wrote the second post." });
+    expect(parseHandoff("Status: done\nPublished.")).toEqual({ status: "done", metric: null, text: "Published." });
+
+    const made = await call("POST", "/v1/app/routines", { name: "Growth", prompt: "Grow the blog.", schedule: daily, computer: computerId, bot: { isolation: "container" } });
+    const id = (made.json.routine as { id: string }).id;
+    const goal = "Outcome: 300 visitors a week from the blog.\nMetric: weekly visitors in Plausible.\nTarget: 300 by 2027-01-31.";
+    expect((await call("PUT", `/v1/app/routines/${id}/files/content?path=GOAL.md`, { content: goal })).json).toMatchObject({ version: 1 });
+    expect((await call("DELETE", `/v1/app/routines/${id}/files/content?path=GOAL.md`)).json.error).toBe("bad_path");
+
+    const first = (await hostCall(host, "POST", `/v1/host/routines/${id}/runs`)).json as unknown as Start;
+    expect(first.routine.prompt).toContain("Your goal (GOAL.md): you own this outcome.");
+    expect(first.routine.prompt).toContain("Target: 300 by 2027-01-31.");
+    expect(first.workspace!.system).toContain("`Metric: <the value you measured this run>`");
+    await hostCall(host, "POST", `/v1/host/runs/${first.run.id}`, { status: "succeeded", summary: "Measured.", handoff: "Status: done\nMetric: 120 visitors\nBaseline measured." });
+    const second = (await hostCall(host, "POST", `/v1/host/routines/${id}/runs`)).json as unknown as Start;
+    expect(second.routine.prompt).toContain("Your metric over your last runs:");
+    expect(second.routine.prompt).toContain(": 120 visitors");
+    await hostCall(host, "POST", `/v1/host/runs/${second.run.id}`, { status: "succeeded", summary: "Posted.", handoff: "Status: done\nMetric: 180 visitors\nOne post out." });
+    const handoffs = (await call("GET", `/v1/app/routines/${id}/handoffs`)).json.handoffs as { metric: string | null }[];
+    expect(handoffs.map((h) => h.metric)).toEqual(["180 visitors", "120 visitors"]);
+
+    // A bot without a goal gets no goal text and no metric line asked of it.
+    const plain = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as unknown as Start;
+    expect(plain.routine.prompt).not.toContain("Your goal (GOAL.md)");
+    expect(plain.workspace!.system).not.toContain("Metric:");
+    await hostCall(host, "POST", `/v1/host/runs/${plain.run.id}`, { status: "succeeded", summary: "ok", handoff: "Status: done\nok" });
   });
 });
 

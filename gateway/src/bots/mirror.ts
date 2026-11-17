@@ -1,5 +1,5 @@
 // Bots' folders in git (docs/bots.md, "A bot's folder in git"). Ambient's store stays the source;
-// the mirror writes each bot as bots/<slug>/ (AGENTS.md, memory.md, skills/, a generated bot.json)
+// the mirror writes each bot as bots/<slug>/ (AGENTS.md, GOAL.md, memory.md, skills/, a generated bot.json)
 // so its owner has it in their own repo, versioned there too:
 //
 //   a person's bots ──▶ their own connected repo, in its sync (PersonalRepos, the `bots` hook)
@@ -25,7 +25,7 @@ const DELAY_MS = 30_000;
 export const MIRROR_README = [
   "# Bots",
   "",
-  "These folders are mirrored from Ambient: each bot's instructions (AGENTS.md), what it has learned (memory.md), its skills, and its settings (bot.json).",
+  "These folders are mirrored from Ambient: each bot's instructions (AGENTS.md), the outcome it owns (GOAL.md, when it has one), what it has learned (memory.md), its skills, and its settings (bot.json).",
   "",
   "Change a bot in Ambient (the app, or by asking Ambient). Edits made here are overwritten the next time a bot changes.",
   "",
@@ -211,8 +211,9 @@ export class BotMirror {
     const slugs = slugsOf(out.bots);
     const bots: MirroredBot[] = [];
     for (const b of out.bots) {
-      const [agents, memory, skills] = await Promise.all([
+      const [agents, goal, memory, skills] = await Promise.all([
         this.d.keys.open(owner, "routine:prompt", b.promptIv, b.promptCt).catch(() => ""),
+        this.d.folder.goal(owner, b.id),
         this.d.folder.memory(owner, b.id),
         this.d.folder.skills(owner, b.id),
       ]);
@@ -236,6 +237,8 @@ export class BotMirror {
         slug: slugs.get(b.id)!,
         files: [
           { path: "AGENTS.md", content: agents.endsWith("\n") ? agents : `${agents}\n` },
+          // The outcome it owns, when it has one (docs/bots.md, "Outcomes, not tasks").
+          ...(goal.trim() ? [{ path: "GOAL.md", content: goal.endsWith("\n") ? goal : `${goal}\n` }] : []),
           { path: "memory.md", content: memory },
           { path: "bot.json", content: `${JSON.stringify(settings, null, 2)}\n` },
           ...skills.map((s) => ({ path: `skills/${s.path}`, content: s.content })),

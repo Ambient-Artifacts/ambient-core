@@ -48,6 +48,9 @@ export function heartbeatPrompt(name: string, events: Event[], now: number): str
 }
 
 export class Heartbeat {
+  /** Whether the person's "Watch my bots" automation is on (docs/bots.md, "Automations"). */
+  watching?: (uid: string) => Promise<boolean>;
+
   private timer: NodeJS.Timeout | undefined;
   private busy = false;
 
@@ -57,6 +60,7 @@ export class Heartbeat {
       ambient: AmbientChat;
       bots?: BotsAccess;
       notifier?: Notifier;
+
       now?: () => number;
     },
   ) {}
@@ -106,6 +110,7 @@ export class Heartbeat {
 
   /** One person's beat; `force` (tests) skips the half-hour wait and the daytime window. */
   async beat(uid: string, opts: { force?: boolean } = {}): Promise<"quiet" | "sent" | "skipped"> {
+    if (this.watching && !(await this.watching(uid).catch(() => true))) return "skipped";
     const now = this.now();
     const { hour, day } = localParts(now);
     const out = (await this.d.control.q(api.bots.heartbeatEvents, { uid: uid as never, since: 0, now })) as { events: Event[]; state: { lastBeatAt: number; day: string; sentToday: number; seen: string[] } | null };

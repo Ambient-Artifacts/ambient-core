@@ -15,6 +15,7 @@ import type { Host } from "../routines/service.ts";
 import { FolderError, type BotFolder } from "./folder.ts";
 import type { BotFiles } from "./files.ts";
 import type { HistorySearch } from "./history.ts";
+import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
 
 function fail(res: Response, err: unknown) {
   if (err instanceof RoutineError || err instanceof FolderError) {
@@ -36,6 +37,7 @@ export function botAppRoutes(
     decisions?: DecisionService;
     files?: BotFiles;
     folder?: BotFolder;
+    automations?: () => Automations | undefined;
     directory: Directory;
     auth: RequestHandler;
     json: RequestHandler;
@@ -191,6 +193,88 @@ export function botAppRoutes(
     if (req.query.forget === "1" || req.query.forget === "true") await d.ambient.forget(a.uid);
     else await d.ambient.clear(a.uid, (await d.directory.user(a.uid))?.name);
     res.status(204).end();
+  });
+
+  // ---- automations (docs/bots.md, "Automations") ----
+
+  const automations = async (res: Response): Promise<{ a: Actor; auto: Automations } | undefined> => {
+    const a = await actor(res);
+    const auto = d.automations?.();
+    if (!d.routines.botsEnabled(a) || !auto) {
+      notEnabled(res);
+      return undefined;
+    }
+    return { a, auto };
+  };
+
+  r.get("/v1/app/automations", d.auth, async (_req, res) => {
+    const x = await automations(res);
+    if (!x) return;
+    res.json({ templates: TEMPLATES, automations: await x.auto.list(x.a.uid) });
+  });
+
+  r.post("/v1/app/automations", d.auth, d.json, async (req, res) => {
+    const x = await automations(res);
+    if (!x) return;
+    const body = AutomationInput.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Start from a template, or give a name, a trigger and instructions.", issues: body.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
+      return;
+    }
+    try {
+      res.json({ automation: await x.auto.create(x.a.uid, body.data) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.patch("/v1/app/automations/:id", d.auth, d.json, async (req, res) => {
+    const x = await automations(res);
+    if (!x) return;
+    const body = AutomationInput.omit({ template: true }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "That isn't a change to an automation.", issues: body.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
+      return;
+    }
+    try {
+      res.json({ automation: await x.auto.update(x.a.uid, id(req), body.data) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/automations/:id", d.auth, async (req, res) => {
+    const x = await automations(res);
+    if (!x) return;
+    try {
+      await x.auto.remove(x.a.uid, id(req));
+      res.status(204).end();
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // Runs in the background (Amb may take a few minutes); the result shows in its runs.
+  r.post("/v1/app/automations/:id/run", d.auth, async (req, res) => {
+    const x = await automations(res);
+    if (!x) return;
+    try {
+      await x.auto.get(x.a.uid, id(req));
+      void x.auto.runNow(x.a.uid, id(req)).catch(() => undefined);
+      res.status(202).json({ status: "started" });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/automations/:id/runs", d.auth, async (req, res) => {
+    const x = await automations(res);
+    if (!x) return;
+    try {
+      res.json({ runs: await x.auto.runs(x.a.uid, id(req)) });
+    } catch (err) {
+      fail(res, err);
+    }
   });
 
   // ---- a bot's folder: files, versions, handoffs (docs/bots.md, "A bot's folder") ----
