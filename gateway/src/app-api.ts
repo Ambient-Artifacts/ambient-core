@@ -27,6 +27,7 @@ import { SettingsService } from "./team-admin.ts";
 import type { CodeHasher } from "./auth/codes.ts";
 import type { MicrosoftConnectFlow } from "./microsoft-connect.ts";
 import type { SignInNonces } from "./auth/signin-nonce.ts";
+import { VoiceBody, Voices } from "./voices.ts";
 
 export interface AppApiDeps {
   /** An AI app's name, by its client id (oidc-provider's registered clients). */
@@ -87,6 +88,7 @@ export const MAX_STREAMS = 8;
 export function appApiRouter(d: AppApiDeps): Router {
   const r = express.Router();
   const settings = new SettingsService(d);
+  const voices = new Voices(d);
   // Sync batches may carry transcripts; the app splits batches well below this. Routes put `auth`
   // before `json`, so nobody can make the gateway inflate and buffer a body without signing in,
   // and an account has a few bodies in the works at a time (its devices), not hundreds at 8 MB.
@@ -231,8 +233,9 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // Delete the account and everything of it: tokens stop working at once, owned teams pass to the
   // longest-standing admin or member (a team with nobody else is canceled), personal pages,
-  // keys, repos, sessions, routines, secrets and AI-app connections are deleted, and Apple's
-  // token is revoked when the app sent a fresh authorization code (App Store 5.1.1(v)).
+  // keys, the voice fingerprint, repos, sessions, routines, secrets and AI-app connections are
+  // deleted, and Apple's token is revoked when the app sent a fresh authorization code (App Store
+  // 5.1.1(v)).
   r.delete("/v1/app/me", auth, json, async (req, res) => {
     const body = DeleteAccount.safeParse(req.body ?? {});
     if (!body.success) {
@@ -325,6 +328,39 @@ export function appApiRouter(d: AppApiDeps): Router {
     }
     await d.control.m(api.users.rename, { uid: uidOf(res) as never, name });
     d.directory.invalidate(uidOf(res));
+    res.status(204).end();
+  });
+
+  // ---- your voice (voices.ts) ----
+
+  // The fingerprint a device learned from the user's own voice. It replaces the one stored, goes
+  // to the user's other devices, and to every active team they're in, so the members' apps can
+  // name them in recordings.
+  r.put("/v1/app/me/voice", auth, json, async (req, res) => {
+    const body = VoiceBody.safeParse(req.body ?? {});
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Send the fingerprint as 64 to 1024 numbers, with the model that made it." });
+      return;
+    }
+    if (!(await voices.put(uidOf(res), body.data))) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    res.status(204).end();
+  });
+
+  r.get("/v1/app/me/voice", auth, async (_req, res) => {
+    res.set("Cache-Control", "no-store");
+    const voice = await voices.get(uidOf(res));
+    if (!voice) {
+      res.status(404).json({ error: "no_voice" });
+      return;
+    }
+    res.json(voice);
+  });
+
+  r.delete("/v1/app/me/voice", auth, async (_req, res) => {
+    await voices.remove(uidOf(res));
     res.status(204).end();
   });
 
@@ -559,6 +595,18 @@ export function appApiRouter(d: AppApiDeps): Router {
       return;
     }
     res.json({ team: { slug: team.slug, name: team.name, status: team.status, role: team.role }, members });
+  });
+
+  // Every member's voice fingerprint (theirs included), for the app to name who speaks in a
+  // recording. Any member reads them; someone who left or was removed is gone from the list at once.
+  r.get("/v1/app/teams/:slug/voices", auth, async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const list = await voices.ofTeam(uidOf(res), String(req.params.slug));
+    if (!list) {
+      res.status(403).json({ error: "not_a_member" });
+      return;
+    }
+    res.json({ voices: list });
   });
 
   r.post("/v1/app/teams/:slug/invites", auth, json, async (req, res) => {

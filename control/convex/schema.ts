@@ -111,6 +111,21 @@ export default defineSchema({
     createdAt: v.number(),
   }).index("by_user", ["userId"]),
 
+  /**
+   * A user's voice fingerprint: the speaker embedding the apps compute on the device from their
+   * own recorded voice (numbers, never audio). Sealed with the user's data key (AAD = userId +
+   * "voice"). The gateway hands it to the user's devices and to the apps of everyone in their
+   * active teams, which match speakers on the device.
+   */
+  voices: defineTable({
+    userId: v.id("users"),
+    /** The model that made it (e.g. "fluidaudio-community-1"): only fingerprints of one model compare. */
+    model: v.string(),
+    iv: v.string(),
+    ciphertext: v.string(),
+    updatedAt: v.number(),
+  }).index("by_user", ["userId"]),
+
   /** Encrypted personal wiki pages (AES-256-GCM, AAD = userId + path). */
   personalPages: defineTable({
     userId: v.id("users"),

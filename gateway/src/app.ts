@@ -21,6 +21,7 @@ import type { ReaderSource } from "./mcp/tools.ts";
 import { contextRouter } from "./context/route.ts";
 import { mcpRouter, protectedResourceRouter } from "./mcp/route.ts";
 import { SettingsService } from "./team-admin.ts";
+import { Voices } from "./voices.ts";
 import { interactionRouter } from "./oauth/interactions.ts";
 import { createProvider } from "./oauth/provider.ts";
 import { PersonalStore } from "./personal.ts";
@@ -174,7 +175,8 @@ export function createApp(deps: AppDeps) {
 
   // Settings an AI app can change for its user, the same service as the app's routes.
   const settings = new SettingsService({ directory, teams, control });
-  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, settings, version: VERSION, userName }));
+  const voices = new Voices({ control, personal, directory });
+  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
