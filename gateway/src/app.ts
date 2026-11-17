@@ -32,6 +32,9 @@ import { hostRouter } from "./routines/route.ts";
 import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
 import { ambientHostRouter, botRunRouter } from "./bots/route.ts";
+import { BotFolder } from "./bots/folder.ts";
+import { BotFiles, type Folders } from "./bots/files.ts";
+import { HistorySearch } from "./bots/history.ts";
 import { AmbientComputers } from "./bots/computer.ts";
 import { AdminService } from "./bots/admin.ts";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -112,9 +115,13 @@ export function createApp(deps: AppDeps) {
   const sessions = new SessionService({ control, personal, directory, teams });
   const notifier = new Notifier({ control, send: deps.push ?? apnsSender(config.apns) });
   const runner = loadRunner(deps.runnerDir ?? fileURLToPath(new URL("../../runner/", import.meta.url)), config.origin);
+  const routineKeys = new RoutineKeys({ control, personal, master: config.masterKey });
+  // Bots' folders, memory and handoffs, and Amb's memory (docs/bots.md, "A bot's folder").
+  const folder = new BotFolder({ control, keys: routineKeys });
   const routines = new RoutineService({
     control,
-    keys: new RoutineKeys({ control, personal, master: config.masterKey }),
+    keys: routineKeys,
+    folder,
     codes: codeHasher,
     origin: config.origin,
     runner: runner && { version: runner.version, sha256: runner.sha256, signature: runner.signature },
@@ -123,6 +130,11 @@ export function createApp(deps: AppDeps) {
     teamsOf: (uid) => directory.teamsOf(uid),
     teamBySlug: (slug) => directory.teamBySlug(slug),
   });
+  const folders: Folders = {
+    folder,
+    files: new BotFiles({ routines, folder }),
+    history: new HistorySearch({ control, keys: routineKeys, routines, folder, nameOf: async (uid) => (await directory.user(uid))?.name ?? "them" }),
+  };
   // Bots talk to people through channels; the app is the first (docs/bots.md).
   let startNow: ((hostId: string, routineId: string) => boolean) | undefined;
   // A bot's question goes to Ambient first (DecisionService, set up below with Ambient).
@@ -213,7 +225,7 @@ export function createApp(deps: AppDeps) {
     mcp: async (uid): Promise<McpServer> => {
       const principal = { uid, scopes: new Set(MCP_SCOPES), via: "pat" as const, clientId: "ambient-chat", personal: true, teams: await directory.teamsOf(uid) };
       const personal = await personalInstructions(principal, readers, { name: await userName(uid).catch(() => undefined) });
-      return buildMcpServer({ principal, readers, routines, bots, admin, decisions, settings, voices, version: VERSION, personal });
+      return buildMcpServer({ principal, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, personal });
     },
     apiKey: deps.ambient?.apiKey ?? process.env.ANTHROPIC_API_KEY,
     model: config.ambientModel ?? "claude-sonnet-5-5",
@@ -221,6 +233,7 @@ export function createApp(deps: AppDeps) {
     computers,
     computersOf: (uid) => routines.computersOf(uid),
     nameOf: async (uid) => (await directory.user(uid))?.name,
+    folder,
   });
   // Bots report to Ambient, Ambient reports to the person (docs/bots.md, "Decisions").
   const actorFor = async (uid: string) => ({ uid, teams: await directory.teamsOf(uid), personal: true, canWritePersonal: true, canWriteTeams: true });
@@ -229,10 +242,10 @@ export function createApp(deps: AppDeps) {
   onQuestion = (q) => void decisions.onBotQuestion(q);
   const heartbeat = new Heartbeat({ control, ambient, bots: config.bots, notifier });
   if (!deps.ambient?.noHeartbeat) heartbeat.start();
-  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, settings, voices, version: VERSION, userName }));
+  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
-  app.use(botRunRouter({ bots }));
+  app.use(botRunRouter({ bots, history: folders.history }));
   app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
   app.use(
@@ -254,6 +267,7 @@ export function createApp(deps: AppDeps) {
       ambient,
       admin,
       decisions,
+      folders,
       appleRevoke: deps.appleRevoke ?? appleRevoker(config.appleRevoke, deps.fetchImpl),
       microsoftClientId: microsoft ? config.microsoftClientIds?.[0] : undefined,
       googleClientId: google ? config.googleClientIds?.[0] : undefined,
@@ -291,5 +305,5 @@ export function createApp(deps: AppDeps) {
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });
 
-  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
+  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, folders, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
 }

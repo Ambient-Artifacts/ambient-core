@@ -16,13 +16,13 @@
 // and `sync` replaces it when the gateway has a newer one.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { chmodSync, chownSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, release, type } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.7.7";
+const VERSION = "0.8.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -778,9 +778,11 @@ function systemPrompt(routine, trigger, bot) {
 const ADAPTERS = {
   "claude-code": {
     /** The command line after the binary, and what goes to stdin. */
-    start(cfg, routine, runInfo, bot, resume, mcpConfig) {
-      const args = ["-p", "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", systemPrompt(routine, runInfo.trigger, bot)];
-      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--allowedTools", "mcp__ambient-bot__ask_owner");
+    start(cfg, routine, runInfo, bot, resume, mcpConfig, system) {
+      // `system`: the bot's instructions for this run from the gateway (runner 0.8.0 on); older
+      // gateways send none, and the runner's own text stays.
+      const args = ["-p", "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
+      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history");
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
       return { args, stdin };
@@ -897,8 +899,8 @@ function signInEnv(env) {
 
 // ---- ask_owner: a small MCP server for a bot's run ----
 //
-// `ambient-runner bot-mcp` speaks MCP over stdio (one JSON message per line) with one tool,
-// ask_owner. Claude Code starts it from the run's MCP config, inside the bot's container when it
+// `ambient-runner bot-mcp` speaks MCP over stdio (one JSON message per line) with two tools,
+// ask_owner and search_history. Claude Code starts it from the run's MCP config, inside the bot's container when it
 // has one. It holds the run's token, which only asks while this run goes.
 
 const ASK_TOOL = {
@@ -914,6 +916,28 @@ const ASK_TOOL = {
     required: ["question"],
   },
 };
+
+const SEARCH_TOOL = {
+  name: "search_history",
+  description:
+    "Search what happened before: your thread with your owner (their messages, your results, questions and answers) and your earlier runs' handoffs. Newest first. Use it when you need something older than what this run started with.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Words to look for." },
+      from: { type: "string", description: "Only from this date on (ISO, e.g. 2026-11-01)." },
+      to: { type: "string", description: "Only up to this date (ISO)." },
+      limit: { type: "integer", minimum: 1, maximum: 50, description: "How many results; default 20." },
+    },
+    required: ["query"],
+  },
+};
+
+/** A result's time as "2026-11-17 09:30" (UTC). */
+function when(at) {
+  const d = typeof at === "number" || /^\d+$/.test(String(at ?? "")) ? new Date(Number(at)) : new Date(String(at));
+  return Number.isNaN(d.getTime()) ? String(at ?? "") : d.toISOString().slice(0, 16).replace("T", " ");
+}
 
 async function botMcp() {
   const server = (process.env.AMBIENT_SERVER || DEFAULT_SERVER).replace(/\/+$/, "");
@@ -944,6 +968,16 @@ async function botMcp() {
       text: "No answer yet; they'll see the question in the Ambient app. Finish this run now: say in a sentence or two where you are and what you're waiting for. You'll be started again with the answer, in this same conversation.",
     };
   };
+  const search = async ({ query, from, to, limit }) => {
+    if (typeof query !== "string" || !query.trim()) return { text: "Pass what to search for.", error: true };
+    const q = new URLSearchParams({ q: query.trim().slice(0, 200) });
+    if (typeof from === "string" && from.trim()) q.set("from", from.trim());
+    if (typeof to === "string" && to.trim()) q.set("to", to.trim());
+    if (Number.isFinite(Number(limit)) && limit !== undefined && limit !== null) q.set("limit", String(Math.min(Math.max(Math.trunc(Number(limit)), 1), 50)));
+    const { results = [] } = await api("GET", `/v1/bot/history?${q}`);
+    if (!Array.isArray(results) || !results.length) return { text: "Nothing found." };
+    return { text: results.map((r) => `${when(r.at)} ${r.who ?? "?"} (${r.where ?? "thread"}): ${String(r.text ?? "").replace(/\s+/g, " ").trim()}`).join("\n") };
+  };
   createInterface({ input: process.stdin }).on("line", async (line) => {
     let m;
     try {
@@ -956,9 +990,12 @@ async function botMcp() {
       if (m.method === "initialize") {
         send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: m.params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "ambient-bot", version: VERSION } } });
       } else if (m.method === "tools/list") {
-        send({ jsonrpc: "2.0", id: m.id, result: { tools: [ASK_TOOL] } });
+        send({ jsonrpc: "2.0", id: m.id, result: { tools: [ASK_TOOL, SEARCH_TOOL] } });
       } else if (m.method === "tools/call" && m.params?.name === "ask_owner") {
         const out = await ask(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't ask: ${err.message}. Decide yourself if you can, and say so in your summary.`, error: true }));
+        send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
+      } else if (m.method === "tools/call" && m.params?.name === "search_history") {
+        const out = await search(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't search: ${err.message}`, error: true }));
         send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
       } else if (m.method === "ping") {
         send({ jsonrpc: "2.0", id: m.id, result: {} });
@@ -969,6 +1006,65 @@ async function botMcp() {
       send({ jsonrpc: "2.0", id: m.id, error: { code: -32603, message: err.message } });
     }
   });
+}
+
+// ---- a bot's folder (docs/bots.md, "A bot's folder, its memory and its handoffs") ----
+//
+// The gateway sends the run's workspace: its instructions (`system`, with {{OUT}} for the out
+// folder), its skills, and its memory.md. The run gets an out folder with memory.md (as it is now)
+// and an empty handoff.md; what the bot leaves in them goes back with the result. The gateway
+// decides what's a new version: the runner only carries files.
+
+const OUT_MAX = 64 * 1024;
+const CONTAINER_OUT = "/opt/ambient/out";
+const CONTAINER_SKILLS = "/opt/ambient/skills";
+
+/** A skill's path as the gateway sends it: `<name>/<file>` or `<name>/<folder>/<file>`, nothing else. */
+function skillPath(path) {
+  if (typeof path !== "string" || !/^[a-z0-9][a-z0-9-]{0,47}\/([A-Za-z0-9._-]{1,64}\/)?[A-Za-z0-9._-]{1,64}$/.test(path)) return null;
+  return path.split("/").some((part) => part === "." || part === "..") ? null : path;
+}
+
+/**
+ * Before Claude Code starts in the container: the skills Ambient put there last time go, this
+ * run's come in (as ~/.claude/skills/<name>), and .ambient-managed lists them for next time. The
+ * bot's own skills (folders it made itself) stay.
+ */
+const SKILLS_SCRIPT = `set -e
+d="$HOME/.claude/skills"
+mkdir -p "$d"
+if [ -f "$d/.ambient-managed" ]; then
+  while IFS= read -r n; do case "$n" in ""|*/*|.*) ;; *) rm -rf "\${d:?}/$n" ;; esac; done < "$d/.ambient-managed"
+fi
+: > "$d/.ambient-managed.new"
+for s in ${CONTAINER_SKILLS}/*/; do
+  [ -d "$s" ] || continue
+  n=$(basename "$s")
+  rm -rf "\${d:?}/$n"
+  cp -R "$s" "$d/$n"
+  echo "$n" >> "$d/.ambient-managed.new"
+done
+mv "$d/.ambient-managed.new" "$d/.ambient-managed"
+set +e
+exec claude "$@"`;
+
+/** A file the run left in its out folder: a regular file only (never a link), at most 64 KB. */
+function readOut(dir, name) {
+  try {
+    if (!lstatSync(dir).isDirectory()) return undefined;
+    const fd = openSync(join(dir, name), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      if (!fstatSync(fd).isFile()) return undefined;
+      const buf = Buffer.alloc(OUT_MAX);
+      let n = 0;
+      for (let r; n < OUT_MAX && (r = readSync(fd, buf, n, OUT_MAX - n, null)) > 0; ) n += r;
+      return buf.subarray(0, n).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
 }
 
 async function run(id) {
@@ -985,7 +1081,9 @@ async function run(id) {
     die(`Couldn't start the run: ${err.message}`);
   }
   // `env`: the owner's secrets (a bot: only those granted to it). They go to the run only.
-  const { run: runInfo, routine, env: secrets = {}, bot = null, resume = null, runToken = null } = start;
+  const { run: runInfo, routine, env: secrets = {}, bot = null, resume = null, runToken = null, workspace = null } = start;
+  // A bot's folder for this run (gateways from runner 0.8.0 on); without it, runs go as before.
+  const ws = bot && workspace && typeof workspace === "object" ? workspace : null;
   const user = cfg.user;
   const runtime = bot?.runtime ?? "claude-code";
   const adapter = ADAPTERS[runtime];
@@ -1036,10 +1134,49 @@ async function run(id) {
       chownSync(mcpFile, owner.uid, owner.gid);
     }
   }
+  // The run's out folder (memory.md, handoff.md) and, in a container, its skills.
+  let outDir = null;
+  let skillsDir = null;
+  if (ws) {
+    const owner = contained ? { uid: 1000, gid: 1000 } : as;
+    const chown = (path) => {
+      if (owner && process.getuid?.() === 0) chownSync(path, owner.uid, owner.gid);
+    };
+    if (!existsSync(runDir)) {
+      mkdirSync(join(STATE_DIR, "runs"), { recursive: true, mode: 0o711 });
+      chmodSync(join(STATE_DIR, "runs"), 0o711);
+      mkdirSync(runDir, { mode: 0o700 });
+      chown(runDir);
+    }
+    outDir = join(runDir, "out");
+    mkdirSync(outDir, { mode: 0o700 });
+    chown(outDir);
+    for (const [name, text] of [["memory.md", typeof ws.memory === "string" ? ws.memory : ""], ["handoff.md", ""]]) {
+      writeFileSync(join(outDir, name), text, { mode: 0o600 });
+      chown(join(outDir, name));
+    }
+    // Skills only in a container: on the computer itself they'd go into the user's own ~/.claude.
+    if (contained) {
+      skillsDir = join(runDir, "skills");
+      mkdirSync(skillsDir, { mode: 0o755 });
+      chmodSync(skillsDir, 0o755);
+      for (const skill of Array.isArray(ws.skills) ? ws.skills : []) {
+        const path = skillPath(skill?.path);
+        if (!path || typeof skill.content !== "string") {
+          log(`Skipping a skill file with a path that isn't allowed: ${String(skill?.path).slice(0, 80)}`);
+          continue;
+        }
+        const file = join(skillsDir, path);
+        mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
+        writeFileSync(file, skill.content, { mode: 0o644 });
+      }
+    }
+  }
+  const system = ws && typeof ws.system === "string" && ws.system.trim() ? ws.system.replaceAll("{{OUT}}", contained ? CONTAINER_OUT : outDir) : null;
   const cleanup = () => rmSync(runDir, { recursive: true, force: true });
 
   const runCfg = { ...cfg, claudeArgs: withModel(cfg.claudeArgs, bot?.model ?? readState().model) };
-  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, resume, mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile));
+  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, resume, mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile), system);
   let child;
   let containerName = null;
   if (contained) {
@@ -1061,12 +1198,16 @@ async function run(id) {
       "-v", `ambient-bot-${routine.id}:/home/bot:U`,
       "-v", `${fileURLToPath(import.meta.url)}:/opt/ambient/ambient-runner.mjs:ro`,
       ...(mcpFile ? ["-v", `${mcpFile}:/opt/ambient/mcp.json:ro`] : []),
+      // Its out folder (memory.md, handoff.md) to write, its skills to read.
+      ...(outDir ? ["-v", `${outDir}:${CONTAINER_OUT}`] : []),
+      ...(skillsDir ? ["-v", `${skillsDir}:${CONTAINER_SKILLS}:ro`] : []),
       // A team's bot reads the team's wiki (the brain), never writes it.
       ...teamWikiMount(),
       "-w", "/home/bot",
       "-e", `AMBIENT_ROUTINE_ID=${routine.id}`, "-e", `AMBIENT_ROUTINE_NAME=${routine.name.replace(/[\r\n]/g, " ")}`, "-e", `AMBIENT_RUN_ID=${runInfo.id}`,
       ...Object.keys(pass).flatMap((k) => ["-e", k]),
-      IMAGE, "claude", ...args,
+      // With a workspace, a small shell puts the skills in place first, then becomes Claude Code.
+      ...(skillsDir ? [IMAGE, "sh", "-c", SKILLS_SCRIPT, "sh", ...args] : [IMAGE, "claude", ...args]),
     ];
     child = spawn(p, podArgs, { env: { PATH: SYSTEM_PATH.join(":"), HOME: "/root", ...pass }, stdio: ["pipe", "pipe", "pipe"] });
   } else {
@@ -1146,6 +1287,8 @@ async function run(id) {
     child.on("close", (c) => resolve(c ?? 1));
   });
   clearInterval(progressTimer);
+  // What the bot left for its next run, read before the run's folder goes.
+  const files = outDir ? { memory: readOut(outDir, "memory.md"), handoff: readOut(outDir, "handoff.md") } : {};
   cleanup();
 
   const ok = code === 0 && result && result.ok && !stopped;
@@ -1171,6 +1314,7 @@ async function run(id) {
     costUsd: result?.costUsd,
     turns: result?.turns,
     sessionId: result?.session,
+    ...files,
   });
   log(`Run ${ok ? "succeeded" : "failed"} (exit ${code}${result?.costUsd !== undefined ? `, $${Number(result.costUsd).toFixed(2)}` : ""})`);
   process.exit(ok ? 0 : 1);

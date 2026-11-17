@@ -13,6 +13,7 @@ import type { RoutineService } from "../routines/service.ts";
 import type { BotService } from "../bots/service.ts";
 import type { AdminService } from "../bots/admin.ts";
 import type { DecisionService } from "../bots/decisions.ts";
+import type { Folders } from "../bots/files.ts";
 import { newNoteId, type NoteSpec } from "../sessions/service.ts";
 import type { SettingsService } from "../team-admin.ts";
 import type { Voices } from "../voices.ts";
@@ -72,6 +73,8 @@ export interface ToolDeps {
   admin?: AdminService;
   /** What waits for the person's decision (docs/bots.md, "Decisions"). */
   decisions?: DecisionService;
+  /** Bots' files, Amb's memory and history search (docs/bots.md, "A bot's folder"). */
+  folders?: Folders;
   /** Settings: the user's preferences and their teams' settings, as the app changes them. */
   settings?: SettingsService;
   /** The user's voice fingerprint: whether one is stored and who gets it, and forgetting it. */
@@ -241,7 +244,7 @@ function interleave<T>(lists: T[][], limit: number): T[] {
   return out;
 }
 
-export function buildMcpServer({ principal, readers, routines, bots, admin, decisions, settings, voices, version, personal }: ToolDeps): McpServer {
+export function buildMcpServer({ principal, readers, routines, bots, admin, decisions, folders, settings, voices, version, personal }: ToolDeps): McpServer {
   // Claude Code with the Ambient plugin sends whole sessions itself (sessions:write): no log_work there.
   const canLog = Boolean(readers.logWork) && !principal.scopes.has("sessions:write");
   const general = canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS;
@@ -944,7 +947,7 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     },
   );
 
-  if (routines && (principal.personal || principal.teams.length > 0)) registerRoutineTools(server, principal, routines, bots, admin, decisions);
+  if (routines && (principal.personal || principal.teams.length > 0)) registerRoutineTools(server, principal, routines, bots, admin, decisions, folders);
   if (settings && (principal.personal || principal.teams.length > 0)) registerSettingsTools(server, principal, settings, voices);
 
   return server;

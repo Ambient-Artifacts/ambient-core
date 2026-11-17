@@ -14,6 +14,8 @@ const MAX_A_DAY = 6;
 const DAY_START = 8;
 const DAY_END = 21;
 const ZONE = "Europe/Vienna";
+/** When Amb goes through the day for its memory. */
+const MEMORY_HOUR = 3;
 /** What Ambient replies when nothing needs saying. */
 export const NOTHING = "NOTHING";
 
@@ -80,10 +82,26 @@ export class Heartbeat {
     this.busy = true;
     try {
       const people = (await this.d.control.q(api.bots.heartbeatPeople, { users: this.d.bots.users.filter((u) => u !== "*"), teams: this.d.bots.teams.filter((t) => t !== "*") })) as string[];
-      for (const uid of people) await this.beat(uid).catch((err: Error) => console.warn(`[heartbeat] ${err.message}`));
+      for (const uid of people) {
+        await this.beat(uid).catch((err: Error) => console.warn(`[heartbeat] ${err.message}`));
+        await this.nightly(uid).catch((err: Error) => console.warn(`[heartbeat] nightly: ${err.message}`));
+      }
     } finally {
       this.busy = false;
     }
+  }
+
+  /**
+   * Once a night (03:00 Vienna), Amb looks back at the day and keeps what matters in its memory
+   * (docs/bots.md, "Amb's memory"). Convex records the day first, so a restart doesn't run it twice.
+   */
+  async nightly(uid: string, opts: { force?: boolean } = {}): Promise<"kept" | "skipped"> {
+    const { hour, day } = localParts(this.now());
+    if (!opts.force && hour !== MEMORY_HOUR) return "skipped";
+    const out = (await this.d.control.m(api.bots.memoryDay, { uid: uid as never, day })) as { first: boolean };
+    if (!out.first) return "skipped";
+    await this.d.ambient.keepMemory(uid, await this.d.ambient.nameOf(uid), "nightly");
+    return "kept";
   }
 
   /** One person's beat; `force` (tests) skips the half-hour wait and the daytime window. */

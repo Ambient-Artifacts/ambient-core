@@ -12,9 +12,12 @@ import { ModelChoice } from "@brain/spec";
 import type { BotService } from "./service.ts";
 import type { AmbientComputers } from "./computer.ts";
 import type { Host } from "../routines/service.ts";
+import { FolderError, type BotFolder } from "./folder.ts";
+import type { BotFiles } from "./files.ts";
+import type { HistorySearch } from "./history.ts";
 
 function fail(res: Response, err: unknown) {
-  if (err instanceof RoutineError) {
+  if (err instanceof RoutineError || err instanceof FolderError) {
     res.status(err.status).json({ error: err.code, message: err.message });
     return;
   }
@@ -25,7 +28,18 @@ const Text = z.object({ text: z.string().trim().min(1).max(8_000) });
 
 export function botAppRoutes(
   r: Router,
-  d: { routines: RoutineService; bots: BotService; ambient: AmbientChat; admin?: AdminService; decisions?: DecisionService; directory: Directory; auth: RequestHandler; json: RequestHandler },
+  d: {
+    routines: RoutineService;
+    bots: BotService;
+    ambient: AmbientChat;
+    admin?: AdminService;
+    decisions?: DecisionService;
+    files?: BotFiles;
+    folder?: BotFolder;
+    directory: Directory;
+    auth: RequestHandler;
+    json: RequestHandler;
+  },
 ) {
   const actor = async (res: Response): Promise<Actor> => {
     const uid = res.locals.uid as string;
@@ -170,16 +184,152 @@ export function botAppRoutes(
     }
   });
 
-  r.delete("/v1/app/ambient/chat", d.auth, async (_req, res) => {
+  // "New chat" (the history stays findable), or ?forget=1: the whole history goes for good.
+  r.delete("/v1/app/ambient/chat", d.auth, async (req, res) => {
     const a = await actor(res);
     if (!d.routines.botsEnabled(a)) return notEnabled(res);
-    await d.ambient.clear(a.uid);
+    if (req.query.forget === "1" || req.query.forget === "true") await d.ambient.forget(a.uid);
+    else await d.ambient.clear(a.uid, (await d.directory.user(a.uid))?.name);
     res.status(204).end();
+  });
+
+  // ---- a bot's folder: files, versions, handoffs (docs/bots.md, "A bot's folder") ----
+
+  const files = d.files;
+  const folder = d.folder;
+  if (!files || !folder) return;
+  const pathOf = (req: Request) => (typeof req.query.path === "string" ? req.query.path : "");
+  const versionOf = (v: unknown) => {
+    const n = Number(typeof v === "string" ? v : v === undefined ? NaN : v);
+    return Number.isInteger(n) && n > 0 ? n : undefined;
+  };
+  const Write = z.object({ content: z.string().max(300_000), why: z.string().trim().max(500).optional() });
+  const userBy = async (uid: string) => ({ kind: "user" as const, name: (await d.directory.user(uid))?.name ?? null });
+
+  r.get("/v1/app/routines/:id/files", d.auth, async (req, res) => {
+    try {
+      res.json({ files: (await files.list(await actor(res), id(req))).files });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/routines/:id/files/content", d.auth, async (req, res) => {
+    try {
+      res.json(await files.read(await actor(res), id(req), pathOf(req), versionOf(req.query.version)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.put("/v1/app/routines/:id/files/content", d.auth, express.json({ limit: "1mb" }), async (req, res) => {
+    const body = Write.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Send the file's content (and optionally why)." });
+      return;
+    }
+    try {
+      const a = await actor(res);
+      res.json(await files.write(a, id(req), pathOf(req), body.data.content, await userBy(a.uid), body.data.why ?? null, "app"));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/routines/:id/files/content", d.auth, async (req, res) => {
+    try {
+      const a = await actor(res);
+      await files.remove(a, id(req), pathOf(req), await userBy(a.uid), null);
+      res.status(204).end();
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/routines/:id/files/history", d.auth, async (req, res) => {
+    try {
+      res.json({ versions: await files.history(await actor(res), id(req), pathOf(req)) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/routines/:id/files/revert", d.auth, d.json, async (req, res) => {
+    const body = z.object({ path: z.string().max(200), version: z.number().int().min(1) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Say which file and which version." });
+      return;
+    }
+    try {
+      const a = await actor(res);
+      res.json(await files.revert(a, id(req), body.data.path, body.data.version, await userBy(a.uid), "app"));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/routines/:id/handoffs", d.auth, async (req, res) => {
+    const asked = Number(typeof req.query.limit === "string" ? req.query.limit : NaN);
+    try {
+      res.json({ handoffs: await files.handoffs(await actor(res), id(req), Number.isInteger(asked) ? asked : 10) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // ---- Amb's memory of the person (docs/bots.md, "Amb's memory") ----
+
+  r.get("/v1/app/ambient/memory", d.auth, async (req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    const version = versionOf(req.query.version);
+    try {
+      res.json(version ? await folder.ambMemoryVersion(a.uid, version) : await folder.ambMemory(a.uid));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.put("/v1/app/ambient/memory", d.auth, d.json, async (req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    const body = Write.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Send the memory's content (and optionally why)." });
+      return;
+    }
+    try {
+      res.json(await folder.writeAmbMemory(a.uid, body.data.content, await userBy(a.uid), body.data.why ?? null));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/ambient/memory/history", d.auth, async (_req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    res.json({ versions: await folder.ambHistory(a.uid) });
+  });
+
+  r.post("/v1/app/ambient/memory/revert", d.auth, d.json, async (req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    const body = z.object({ version: z.number().int().min(1) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Say which version." });
+      return;
+    }
+    try {
+      const old = await folder.ambMemoryVersion(a.uid, body.data.version);
+      res.json(await folder.writeAmbMemory(a.uid, old.content, await userBy(a.uid), `restored version ${body.data.version}`));
+    } catch (err) {
+      fail(res, err);
+    }
   });
 }
 
 /** A bot's run asks its owner (the runner's ask_owner tool), with its run token. */
-export function botRunRouter(d: { bots: BotService }): Router {
+export function botRunRouter(d: { bots: BotService; history?: HistorySearch }): Router {
   const r = express.Router();
   const json = express.json({ limit: "64kb" });
   const perRun = limiter(120);
@@ -199,6 +349,21 @@ export function botRunRouter(d: { bots: BotService }): Router {
     }
     try {
       res.json(await d.bots.ask(req.headers.authorization, body.data.question, body.data.choices));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // search_history for a run: its own thread and handoffs (docs/bots.md, "The computer's side").
+  r.get("/v1/bot/history", async (req, res) => {
+    if (slowDown(req, res)) return;
+    if (!d.history) {
+      res.status(404).json({ error: "not_found", message: "History search isn't on here." });
+      return;
+    }
+    const q = (k: string) => (typeof req.query[k] === "string" ? String(req.query[k]).slice(0, 200) : undefined);
+    try {
+      res.json({ results: await d.history.forRun(req.headers.authorization, { q: q("q"), from: q("from"), to: q("to"), limit: Number(q("limit") ?? 20) || 20 }) });
     } catch (err) {
       fail(res, err);
     }

@@ -8,6 +8,9 @@ import { BOT_FACES, BOT_ISOLATIONS, BOT_REPORTS, WEEKDAYS } from "@brain/spec";
 import type { BotService, ThreadMessage } from "../bots/service.ts";
 import type { AdminService, CommandResult } from "../bots/admin.ts";
 import type { Decision, DecisionService } from "../bots/decisions.ts";
+import type { Folders } from "../bots/files.ts";
+import { FolderError, type Author } from "../bots/folder.ts";
+import { historyLines } from "../bots/history.ts";
 import type { Principal } from "../auth/bearer.ts";
 import { RoutineError, RoutineInput, RoutinePatch, SecretName, SecretValue, type Actor, type Computer, type Routine, type RoutineService, type Run } from "../routines/service.ts";
 
@@ -150,7 +153,7 @@ function decisionLine(d: Decision): string {
   return `- ${from} (id: ${d.id}, ${new Date(d.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC): ${d.question}${opts}${rec}`;
 }
 
-export function registerRoutineTools(server: McpServer, principal: Principal, routines: RoutineService, bots?: BotService, admin?: AdminService, decisions?: DecisionService) {
+export function registerRoutineTools(server: McpServer, principal: Principal, routines: RoutineService, bots?: BotService, admin?: AdminService, decisions?: DecisionService, folders?: Folders) {
   const actor: Actor = {
     uid: principal.uid,
     teams: principal.teams,
@@ -165,7 +168,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof RoutineError) return error(err.message);
+      if (err instanceof RoutineError || err instanceof FolderError) return error(err.message);
       throw err;
     }
   };
@@ -458,6 +461,8 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     );
   }
 
+  if (hasBots && folders) registerFolderTools(server, principal, actor, folders, source, guard);
+
   if (!hasBots || !bots) return;
 
   server.registerTool(
@@ -490,6 +495,154 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         const out = await bots.post(actor, id, text);
         const what = out.message.kind === "answer" ? "Answered its question" : "Sent";
         return result(`${what}. "${out.routine.name}" starts a run with it within a minute.`, { message: out.message });
+      }),
+  );
+}
+
+// ---- bots' folders, Amb's memory, history (docs/bots.md, "A bot's folder", "History", "Amb's memory") ----
+
+function registerFolderTools(
+  server: McpServer,
+  principal: Principal,
+  actor: Actor,
+  folders: Folders,
+  source: string,
+  guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>,
+) {
+  // An AI app's change: Amb's when it's Ambient's own chat, otherwise the app's (by its client name).
+  const by: Author = { kind: "amb", name: principal.clientId?.startsWith("ambient") ? "Ambient" : source };
+
+  server.registerTool(
+    "search_history",
+    {
+      title: "Search earlier conversations",
+      description:
+        "Search what was said before, by words and/or dates, newest first: the user's chat with Ambient (all of it, also from before a new chat was started), their bots' threads and the bots' handoffs (what each run did and left open). For what the brain doesn't hold: things said in a chat or to a bot. Give a few distinctive words; with only from/to it lists that time.",
+      inputSchema: {
+        query: z.string().max(200).optional().describe("Words that must all appear (case and accents don't matter)."),
+        from: z.string().max(40).optional().describe("From this date (YYYY-MM-DD) or moment (ISO)."),
+        to: z.string().max(40).optional().describe("Up to this date (YYYY-MM-DD, the whole day) or moment."),
+        bot: z.string().max(64).optional().describe("Only this bot's thread and handoffs (its id)."),
+        limit: z.number().int().min(1).max(50).optional().describe("How many results; default 20."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ query, from, to, bot, limit }) =>
+      guard(async () => {
+        if (!query?.trim() && !from && !to) return error("Give some words to look for, or a time (from/to).");
+        if (!bot && !principal.personal) return error("This connection only reaches the team: pass a bot's id to search its thread.");
+        const hits = await folders.history.forPerson(actor, { q: query, from, to, bot, limit });
+        return result(historyLines(hits), { results: hits });
+      }),
+  );
+
+  if (principal.personal) {
+    server.registerTool(
+      "amb_memory",
+      {
+        title: "Ambient's memory of the user",
+        description: "What Ambient keeps about the user beyond the brain: their preferences, standing instructions, decisions from the chat. Ambient's own notes (memory.md), with its version.",
+        inputSchema: {},
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async () =>
+        guard(async () => {
+          const m = await folders.folder.ambMemory(actor.uid);
+          return result(m.content.trim() ? `${m.content}\n\n(version ${m.version})` : "Empty so far.", { memory: m });
+        }),
+    );
+
+    server.registerTool(
+      "update_amb_memory",
+      {
+        title: "Update Ambient's memory of the user",
+        description:
+          "Replace Ambient's memory of the user (memory.md, up to 16 KB) with a new version: send the whole file. Keep lasting things only (preferences, standing instructions, decisions made in the chat, facts not in the brain), as short lines; merge instead of appending duplicates, drop what's no longer true. Never secrets. Every version is kept; the user can undo in the app.",
+        inputSchema: {
+          content: z.string().max(20_000),
+          why: z.string().min(1).max(300).describe("One short sentence: what changed and why."),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      },
+      async ({ content, why }) =>
+        guard(async () => {
+          const m = await folders.folder.writeAmbMemory(actor.uid, content, by, why);
+          return result(`Kept (version ${m.version}).`, { memory: { version: m.version, size: m.size } });
+        }),
+    );
+  }
+
+  server.registerTool(
+    "bot_files",
+    {
+      title: "A bot's files and last runs",
+      description:
+        "A bot's folder: AGENTS.md (what it does: its prompt), memory.md (what it learned; it updates it itself), skills/<name>/SKILL.md (know-how), with who changed each last; and its last three handoffs (what each run did and left open).",
+      inputSchema: { id: z.string().max(64) },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id }) =>
+      guard(async () => {
+        const { files, handoffs } = await folders.files.list(actor, id);
+        const lines = files.map((f) => `- ${f.path} (${f.size} bytes, version ${f.version}${f.by ? `, last by ${f.by.kind === "bot" ? "the bot" : f.by.kind === "amb" ? (f.by.name ?? "an AI app") : (f.by.name ?? "a person")}` : ""})`);
+        const h = handoffs.map((x) => `### ${new Date(x.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC · ${x.status}\n${x.text}`);
+        return result(`Files:\n${lines.join("\n")}\n\nLast runs:\n${h.join("\n\n") || "(no handoffs yet)"}`, { files, handoffs });
+      }),
+  );
+
+  server.registerTool(
+    "read_bot_file",
+    {
+      title: "Read a bot's file",
+      description: "One of a bot's files as it is now, or an earlier version; history: true lists its versions (who, why, when) instead.",
+      inputSchema: {
+        id: z.string().max(64),
+        path: z.string().max(200).describe("AGENTS.md, memory.md, or skills/<name>/<file>."),
+        version: z.number().int().min(1).optional(),
+        history: z.boolean().optional(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id, path, version, history }) =>
+      guard(async () => {
+        if (history) {
+          const versions = await folders.files.history(actor, id, path);
+          return result(versions.map((v) => `- version ${v.version}, ${new Date(v.updatedAt).toISOString().slice(0, 16).replace("T", " ")} UTC, by ${v.by.name ?? v.by.kind}${v.deleted ? " (deleted)" : ""}${v.why ? `: ${v.why}` : ""}`).join("\n") || "No versions yet.", { versions });
+        }
+        const f = await folders.files.read(actor, id, path, version);
+        return result(`${f.path} (version ${f.version}):\n\n${f.content || "(empty)"}`, { file: f });
+      }),
+  );
+
+  server.registerTool(
+    "write_bot_file",
+    {
+      title: "Change a bot's file",
+      description:
+        "Change one of a bot's files: a new version of memory.md (what it should remember), a skill (skills/<name>/SKILL.md: when to use it, then how), or AGENTS.md (its instructions; only when the user asked, or it's plainly broken). Send the whole file. delete: true removes a skill file; restore_version brings an earlier version back. Every change is a version the user can undo in the app, and changes to AGENTS.md or skills are posted in the bot's thread with your why. Never secrets.",
+      inputSchema: {
+        id: z.string().max(64),
+        path: z.string().max(200),
+        content: z.string().max(70_000).optional(),
+        delete: z.boolean().optional(),
+        restore_version: z.number().int().min(1).optional(),
+        why: z.string().min(1).max(300).describe("One short sentence the owner reads: what changed and why."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async (a) =>
+      guard(async () => {
+        if (a.delete) {
+          await folders.files.remove(actor, a.id, a.path, by, a.why);
+          return result(`Deleted ${a.path}.`);
+        }
+        if (a.restore_version !== undefined) {
+          const f = await folders.files.revert(actor, a.id, a.path, a.restore_version, by, source);
+          return result(`Restored ${a.path} to version ${a.restore_version} (now version ${f.version}).`, { file: { path: f.path, version: f.version } });
+        }
+        if (a.content === undefined) return error("Send the file's content, delete: true, or restore_version.");
+        const f = await folders.files.write(actor, a.id, a.path, a.content, by, a.why, source);
+        return result(`Saved ${f.path} (version ${f.version}).`, { file: { path: f.path, version: f.version, size: f.size } });
       }),
   );
 }

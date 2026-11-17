@@ -553,7 +553,37 @@ export default defineSchema({
     day: v.string(),
     sentToday: v.number(),
     seen: v.array(v.string()),
+    /** "New chat": the app shows the chat from here; older messages stay findable (docs/bots.md, "History"). */
+    chatClearedAt: v.optional(v.number()),
+    /** The day (Vienna) Amb last went through the day to keep its memory. */
+    memoryDay: v.optional(v.string()),
   }).index("by_user", ["userId"]),
+
+  /**
+   * Small sealed files with a version per change, for a person or a team: a bot's folder
+   * (AGENTS.md history, skills, memory.md), its handoffs, Amb's memory. Generic on purpose: a new
+   * kind of file needs no schema change and so no Convex deploy (docs/bots.md, "A bot's folder").
+   * The gateway seals the content (and why) with the owner's key and decides who may read and
+   * write; these functions only keep the versions.
+   */
+  records: defineTable({
+    ownerKind: v.union(v.literal("user"), v.literal("team")),
+    ownerId: v.string(),
+    kind: v.string(),
+    key: v.string(),
+    version: v.number(),
+    /** Only the newest version of a key is latest. */
+    latest: v.boolean(),
+    iv: v.string(),
+    ct: v.string(),
+    size: v.number(),
+    byKind: v.union(v.literal("user"), v.literal("bot"), v.literal("amb")),
+    byName: v.optional(v.string()),
+    deleted: v.optional(v.boolean()),
+    createdAt: v.number(),
+  })
+    .index("by_key", ["ownerKind", "ownerId", "kind", "key", "version"])
+    .index("by_latest", ["ownerKind", "ownerId", "kind", "latest", "key"]),
 
   /**
    * Values a routine's runs get as environment variables (a GitHub token, say), per user or per

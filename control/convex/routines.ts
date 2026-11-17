@@ -514,13 +514,16 @@ export const startRun = mutation({
     });
     // A bot's run that starts with an answer or a message continues its last session with it.
     const pending = r.bot && r.pendingMessageId ? await ctx.db.get(r.pendingMessageId) : null;
+    // What the gateway needs to wake a bot (docs/bots.md, "How a bot wakes up"): its last session,
+    // and when its last run started and ended (what's new in its thread since).
+    const previous = r.bot ? { session: r.lastSessionId ?? null, startedAt: r.lastRun?.startedAt ?? null, finishedAt: r.lastRun?.finishedAt ?? null, status: r.lastRun?.status ?? null } : null;
     await ctx.db.patch(r._id, { runRequestedAt: undefined, runRequestedBy: undefined, pendingMessageId: undefined, lastRun: { status: "running", startedAt: now } });
     await pruneRuns(ctx, r._id);
     // A bot gets only the secrets granted to it; a loop (or a bot from before grants) all of its owner's.
     const granted = r.bot?.secrets ? new Set(r.bot.secrets) : null;
     const secrets = (await secretRows(ctx, r.userId, r.teamId)).filter((s) => !granted || granted.has(s.name)).map((s) => ({ name: s.name, iv: s.valueIv, ct: s.valueCt }));
-    const resume = pending ? { sessionId: r.lastSessionId ?? null, kind: pending.kind, iv: pending.iv, ct: pending.ct, authorName: pending.authorName ?? null } : null;
-    return { ok: true as const, runId, trigger, routine: routineShape(r), secrets, resume };
+    const resume = pending ? { id: pending._id, sessionId: r.lastSessionId ?? null, kind: pending.kind, iv: pending.iv, ct: pending.ct, authorName: pending.authorName ?? null } : null;
+    return { ok: true as const, runId, trigger, routine: routineShape(r), secrets, resume, previous };
   },
 });
 
@@ -643,7 +646,7 @@ export const runOwner = query({
     const run = id ? await ctx.db.get(id) : null;
     if (!run || run.hostId !== hostId) return null;
     const r = await ctx.db.get(run.routineId);
-    return { uid: run.userId, teamId: r?.teamId ?? null, bot: Boolean(r?.bot) };
+    return { uid: run.userId, teamId: r?.teamId ?? null, bot: Boolean(r?.bot), routineId: run.routineId, startedAt: run.startedAt, name: r?.name ?? "" };
   },
 });
 
