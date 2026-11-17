@@ -18,6 +18,8 @@ export interface AmbientComputer {
   id: string;
   uid: string;
   name: string;
+  /** A team's server (its team's name), or null for the person's own computer. */
+  team: string | null;
 }
 
 export interface ChatMessage {
@@ -149,13 +151,13 @@ export class AmbientChat {
           (await this.d.computers!.ask(computer, {
             text: question,
             name,
-            instructions: computerInstructions(name, computer.name),
+            instructions: computerInstructions(name, computer.team ? `${computer.team}'s server` : computer.name, computer.team === null),
             fresh: history.length === 0,
             history: trimHistory(history),
           })) || "I don't have an answer to that.";
       } catch (err) {
         console.warn(`[ambient] ${computer.name} couldn't answer: ${(err as Error).message}`);
-        text = `I couldn't answer on ${computer.name}: ${(err as Error).message}. Please try again in a minute.`;
+        text = `I couldn't answer on ${computer.team ? `${computer.team}'s server` : computer.name}: ${(err as Error).message}. Please try again in a minute.`;
       }
     } else if (!this.d.apiKey) {
       text =
@@ -192,10 +194,10 @@ export class AmbientChat {
 }
 
 /** Ambient on the person's computer: the same rules, and it can work on that machine when asked. */
-export function computerInstructions(name: string, computer: string): string {
+export function computerInstructions(name: string, computer: string, own = true): string {
   return [
     ambientInstructions(name),
-    `You run as Claude Code on ${computer}, ${name}'s own computer, signed in with their Claude plan, with Ambient's tools (the mcp__ambient tools) and this computer's own. When ${name} asks you to do something here (look at a repo, run a script, check a server), do it, carefully: say what you'll change before anything that can't be undone.`,
+    `You run as Claude Code on ${computer}${own ? `, ${name}'s own computer` : ", Ambient's machine for the team, where the team's bots run too"}, with Ambient's tools (the mcp__ambient tools) and this machine's own. When ${name} asks you to do something here (look at a repo, run a script, check on a bot's workspace), do it, carefully: say what you'll change before anything that can't be undone.`,
     "This conversation continues across messages; earlier turns are yours.",
   ].join("\n");
 }

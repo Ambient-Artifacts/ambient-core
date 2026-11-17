@@ -133,21 +133,26 @@ nothing.
   limits on memory, CPU and time. The image is built on the computer from the runner's
   Containerfile (Debian, Node, Claude Code, git, gh).
 
-## Ambient on the person's own computer
+## Ambient on a computer: the person's own, or the team's server
 
-When the person has a computer connected (their own, not a team's server), Ambient's chat runs
-there instead of on the gateway: as Claude Code signed in with their own Claude plan, with
-Ambient's tools and the computer's own, so it can work on that machine when asked.
+Ambient's chat runs on a machine with Claude Code instead of on the gateway, with Ambient's tools
+and that machine's own, so it can work there when asked. The gateway picks, for each person: their
+own connected computer first, then the server of a team of theirs that has bots (Ambient's machine
+for the team, one session per person), then its own `ANTHROPIC_API_KEY`; with none of these the
+chat says no computer is connected.
 
-- `POST /v1/host/sync` answers `"ambient": true` for such a computer; the runner (0.7.0) then
+- `POST /v1/host/sync` answers `"ambient": true` for such a machine; the runner (0.7.0) then
   installs `ambient-runner-ambient.service` (`ambient-runner ambient`, restarted by systemd).
-- The service keeps one Claude Code session open (`--input-format stream-json`, resumed after a
-  restart) and waits on `GET /v1/host/ambient/next` (computer token, a 25-second long poll; with
-  `?token=missing` when it has no token yet). A message comes as
-  `{ id, text, name, instructions, fresh, history, token? }`; `token` is a personal token for
-  Ambient's MCP (24 hours, renewed an hour before it ends, listed in the app's tokens as "Ambient on
-  <computer>"). The reply goes to `POST /v1/host/ambient/:id` as `{ text }` or `{ error }`.
-- It runs as the computer's routine user, in `~/ambient`, not in a container: Ambient is meant to
-  work on that machine. `set_routine_secret` is left out; secrets go in through the app.
-- No computer connected: the gateway answers with Claude and `ANTHROPIC_API_KEY` when it has one,
-  otherwise the chat says the computer isn't connected.
+- The service keeps one Claude Code session open per person (`--input-format stream-json`, resumed
+  after a restart, in `~/ambient/<account id>`) and waits on `GET /v1/host/ambient/next` (computer
+  token, a 25-second long poll). A message comes as
+  `{ id, uid, text, name, instructions, fresh, history, token }`; `token` is that person's token
+  for Ambient's MCP (24 hours, renewed an hour before it ends, listed in the app's tokens as
+  "Ambient on <computer>"). The reply goes to `POST /v1/host/ambient/:id` as `{ text }` or
+  `{ error }`.
+- It runs as the machine's routine user, not in a container: Ambient is meant to work on that
+  machine. `set_routine_secret` is left out; secrets go in through the app.
+- Its Claude sign-in is the machine's (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in
+  `/etc/ambient-runner/extra.env`), or a plan of its own: `CLAUDE_CODE_OAUTH_TOKEN` from
+  `claude setup-token` in `/etc/ambient-runner/ambient.env`, which then wins over the API key (the
+  team's bots keep the key).

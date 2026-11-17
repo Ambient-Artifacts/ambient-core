@@ -13,6 +13,8 @@ import type { Turn } from "../ai/loop.ts";
 
 export interface ComputerJob {
   id: string;
+  /** Whose chat it is (a team's server runs Ambient for each of its people, one session each). */
+  uid: string;
   /** What the person wrote. */
   text: string;
   /** Their name, and Ambient's instructions (the session's system prompt). */
@@ -21,8 +23,8 @@ export interface ComputerJob {
   /** The chat was cleared (or is new): start a new session; `history` is what it starts from. */
   fresh: boolean;
   history: Turn[];
-  /** A personal token for Ambient's MCP, when the computer needs a new one. */
-  token?: string;
+  /** The person's token for Ambient's MCP (the same until it's renewed). */
+  token: string;
 }
 
 interface Waiter {
@@ -60,19 +62,20 @@ export class AmbientComputers {
     return this.waiters.has(hostId) || this.now() - (this.seen.get(hostId) ?? 0) < CONNECTED_MS;
   }
 
-  /** A personal token for Ambient's tools on that computer, renewed a day at a time. */
-  private async token(hostId: string, uid: string, computer: string): Promise<string | undefined> {
-    const t = this.tokens.get(hostId);
-    if (t && t.expiresAt - this.now() > TOKEN_RENEW_MS) return undefined;
+  /** The person's token for Ambient's tools on that computer, renewed a day at a time. */
+  private async token(hostId: string, uid: string, computer: string): Promise<string> {
+    const key = `${hostId}:${uid}`;
+    const t = this.tokens.get(key);
+    if (t && t.expiresAt - this.now() > TOKEN_RENEW_MS) return t.token;
     const expiresAt = this.now() + TOKEN_TTL_MS;
     const made = await this.d.pats.create({ uid, scopes: this.d.scopes, resource: { kind: "personal" }, label: `Ambient on ${computer}`, expiresAt });
-    this.tokens.set(hostId, { token: made.token, expiresAt });
+    this.tokens.set(key, { token: made.token, expiresAt });
     return made.token;
   }
 
   /** Hand a message to the computer and wait for Ambient's reply there. */
-  async ask(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token">): Promise<string> {
-    const full: ComputerJob = { ...job, id: randomUUID(), token: await this.token(host.id, host.uid, host.name) };
+  async ask(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token" | "uid">): Promise<string> {
+    const full: ComputerJob = { ...job, id: randomUUID(), uid: host.uid, token: await this.token(host.id, host.uid, host.name) };
     const reply = new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(full.id);
@@ -134,8 +137,6 @@ export class AmbientComputers {
     if (!p || p.hostId !== hostId) return false;
     this.pending.delete(jobId);
     clearTimeout(p.timer);
-    // The computer lost its token (a reinstall): the next message brings a new one.
-    if (/no token/i.test(why)) this.tokens.delete(hostId);
     p.reject(new Error(why));
     return true;
   }
@@ -147,11 +148,6 @@ export class AmbientComputers {
     clearTimeout(w.timer);
     this.waiters.delete(hostId);
     w.resolve(null);
-  }
-
-  /** The computer has no token (new, or reinstalled): its next message brings one. */
-  forgetToken(hostId: string) {
-    this.tokens.delete(hostId);
   }
 
   /** A message handed to a connection that had just closed goes first in line again. */

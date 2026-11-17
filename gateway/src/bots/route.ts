@@ -137,11 +137,12 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
   const json = express.json({ limit: "256kb" });
   const host = async (req: Request, res: Response): Promise<Host | undefined> => {
     const h = await d.routines.authenticate(req.headers.authorization);
-    if (!h || !h.uid || h.teamId || !(await d.directory.user(h.uid))) {
+    // A person's computer stops with their account; a team's server with its team (checked in Convex).
+    if (!h || (h.uid && !(await d.directory.user(h.uid)))) {
       res.status(401).json({ error: "invalid_token", message: "This computer isn't connected anymore. Set it up again from the Ambient app." });
       return undefined;
     }
-    if (!(await d.routines.botsForUser(h.uid))) {
+    if (!(await d.routines.ambientOn(h))) {
       res.status(403).json({ error: "bots_not_enabled", message: "Ambient isn't switched on for this account." });
       return undefined;
     }
@@ -151,7 +152,6 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
   r.get("/v1/host/ambient/next", async (req, res) => {
     const h = await host(req, res);
     if (!h) return;
-    if (req.query.token === "missing") d.computers.forgetToken(h.id);
     let closed = false;
     res.on("close", () => {
       closed = true;

@@ -117,6 +117,7 @@ export function createApp(deps: AppDeps) {
     notifier,
     bots: config.bots,
     teamsOf: (uid) => directory.teamsOf(uid),
+    teamBySlug: (slug) => directory.teamBySlug(slug),
   });
   // Bots talk to people through channels; the app is the first (docs/bots.md).
   const bots = new BotService({ routines, channels: [new AppChannel(notifier)] });

@@ -2,6 +2,7 @@
 // poll with a personal token for Ambient's tools, and the reply lands in the chat. Then the real
 // runner's `ambient` service with a stand-in claude that keeps one session open.
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ const info = { hostname: "vps", os: "Linux 6.8", runner: "0.7.0", claude: "2.1.3
 let s: Stack;
 let lena: AppSession;
 let host: string;
+let firstToken: string;
 
 const hostCall = async (token: string, method: string, path: string, body?: unknown) => {
   const res = await fetch(`${s.origin}${path}`, {
@@ -63,8 +65,9 @@ describe("Ambient on the person's computer", () => {
     const waiting = hostCall(host, "GET", "/v1/host/ambient/next");
     await new Promise((r) => setTimeout(r, 100));
     await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "What's on the VPS?" });
-    const job = (await waiting).json as { id: string; text: string; fresh: boolean; token: string; instructions: string; name: string };
-    expect(job).toMatchObject({ text: "What's on the VPS?", fresh: true, name: "Lena Vogel" });
+    const job = (await waiting).json as { id: string; uid: string; text: string; fresh: boolean; token: string; instructions: string; name: string };
+    expect(job).toMatchObject({ text: "What's on the VPS?", fresh: true, name: "Lena Vogel", uid: lena.user.uid });
+    firstToken = job.token;
     expect(job.instructions).toContain("You run as Claude Code on VPS");
     expect(job.token).toMatch(/^ambient_pat_/);
     // The token reaches Ambient's tools as Lena.
@@ -84,11 +87,40 @@ describe("Ambient on the person's computer", () => {
 
   it("queues a message until the computer asks, keeps the token, and reports failures", async () => {
     await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "And now?" });
-    const job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; fresh: boolean; token?: string };
+    const job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; fresh: boolean; token: string };
     expect(job.fresh).toBe(false);
-    expect(job.token).toBeUndefined();
+    // The same token until it's renewed.
+    expect(job.token).toBe(firstToken);
     await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { error: "Claude Code stopped (exit 1)" });
     expect((await settled()).messages.at(-1)?.text).toContain("I couldn't answer on VPS: Claude Code stopped");
+  });
+});
+
+describe("Ambient on the team's server", () => {
+  it("answers a member of a team with bots when they have no computer of their own connected", async () => {
+    const ben = await signIn(s, "apple-ben", "Ben Weiss");
+    const made = await appCall(s, ben.access_token, "POST", "/v1/app/teams", { name: "Ops" });
+    const slug = (made.json.team as { slug: string }).slug;
+    const codeHash = createHash("sha256").update("host-setup:TEAM-AMB1").digest("hex");
+    await s.t.mutation(s.internal.routines.staffAddHost, { team: slug, name: "Team server", codeHash, expiresAt: Date.now() + 60_000 });
+    const teamHost = String((await hostCall("", "POST", "/v1/host/setup", { code: "TEAM-AMB1", info })).json.token);
+    expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(false);
+    s.config.bots!.teams.push(slug);
+    expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
+
+    const waiting = hostCall(teamHost, "GET", "/v1/host/ambient/next");
+    await new Promise((r) => setTimeout(r, 100));
+    await appCall(s, ben.access_token, "POST", "/v1/app/ambient/chat", { text: "Status?" });
+    const job = (await waiting).json as { id: string; uid: string; instructions: string };
+    expect(job.uid).toBe(ben.user.uid);
+    expect(job.instructions).toContain("on Ops's server, Ambient's machine for the team");
+    await hostCall(teamHost, "POST", `/v1/host/ambient/${job.id}`, { text: "All quiet." });
+    let c = (await appCall(s, ben.access_token, "GET", "/v1/app/ambient/chat")).json as Chat;
+    for (let i = 0; i < 100 && c.pending; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      c = (await appCall(s, ben.access_token, "GET", "/v1/app/ambient/chat")).json as Chat;
+    }
+    expect(c.messages.at(-1)?.text).toBe("All quiet.");
   });
 });
 
@@ -139,11 +171,11 @@ done
       const c = await settled();
       expect(c.messages.at(-1)?.text, out).toBe(want);
     }
-    const args = readFileSync(join(dir, "ambient", "args.txt"), "utf8");
+    const args = readFileSync(join(dir, "ambient", lena.user.uid, "args.txt"), "utf8");
     expect(args).toContain("--input-format stream-json");
     expect(args).toContain("--mcp-config");
     expect(args).toContain("--disallowedTools mcp__ambient__set_routine_secret");
     expect(args).toContain("You run as Claude Code on VPS");
-    expect(JSON.parse(readFileSync(join(dir, "state", "state.json"), "utf8")).ambientSession).toBe("amb-1");
+    expect(JSON.parse(readFileSync(join(dir, "state", "state.json"), "utf8")).ambientSessions).toEqual({ [lena.user.uid]: "amb-1" });
   }, 30_000);
 });
