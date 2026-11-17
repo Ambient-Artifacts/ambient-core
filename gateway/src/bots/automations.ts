@@ -22,7 +22,7 @@ import { RoutineError, type Actor, type RoutineService } from "../routines/servi
 import type { AmbientChat } from "./ambient.ts";
 import type { DecisionService, ProposedChange } from "./decisions.ts";
 import type { BotFiles } from "./files.ts";
-import { AGENTS, type Author } from "./folder.ts";
+import { AGENTS, GOAL, type Author } from "./folder.ts";
 import { NOTHING, type Heartbeat } from "./heartbeat.ts";
 import { openMessage } from "./messages.ts";
 
@@ -150,7 +150,7 @@ export const TEMPLATES: Template[] = [
     description: "When a bot fails, gets corrected or asks the same thing twice, Ambient improves its memory and skills, and asks you before it changes a bot's instructions.",
     trigger: { kind: "event", events: ["bot_failed", "bot_corrected", "bot_asked_twice"] },
     instructions:
-      "Find out what went wrong or what they corrected: bot_files (its files and handoffs), bot_thread, read_bot_file, search_history. If the bot should do better next time, improve it: write a lesson into its memory.md, or a skill for something it does repeatedly (write_bot_file, with a short why). Changes to its AGENTS.md or its settings (schedule, secrets, isolation, model, runtime, what it publishes, deletes or sends) you only propose, with propose_bot_change. Don't touch it if one failure was bad luck (a network error, a full disk). Reply with one sentence on what you changed or proposed, or NOTHING.",
+      "Find out what went wrong or what they corrected: bot_files (its files and handoffs), bot_thread, read_bot_file, search_history. If the bot should do better next time, improve it: write a lesson into its memory.md, or a skill for something it does repeatedly (write_bot_file, with a short why). Changes to its AGENTS.md, its GOAL.md or its settings (schedule, secrets, isolation, model, runtime, what it publishes, deletes or sends) you only propose, with propose_bot_change. Don't touch it if one failure was bad luck (a network error, a full disk). Reply with one sentence on what you changed or proposed, or NOTHING.",
     delivery: "chat_silent",
   },
   {
@@ -274,8 +274,8 @@ export class Automations {
   ) {
     // The reviewer never rewrites a bot's instructions: it proposes (docs/bots.md, "Automations").
     d.files.guard = (actor, id, path, by) =>
-      by.kind === "amb" && path === AGENTS && this.reviewing.get(actor.uid)?.has(id)
-        ? "While improving a bot on its own, Ambient doesn't change its AGENTS.md: propose the change with propose_bot_change, and the user applies it."
+      by.kind === "amb" && (path === AGENTS || path === GOAL) && this.reviewing.get(actor.uid)?.has(id)
+        ? `While improving a bot on its own, Ambient doesn't change its ${path}: propose the change with propose_bot_change, and the user applies it.`
         : null;
     d.decisions.applyChange = (actor, change) => this.apply(actor, change);
   }
