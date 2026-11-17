@@ -107,7 +107,19 @@ export function parseHandoff(raw: string): { status: "done" | "continue"; text: 
 
 const when = (ts: number) => new Date(ts).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 
+/** A change to a bot's folder or the bot itself, for the git mirror (bots/mirror.ts). */
+export interface FolderChangeEvent {
+  routineId: string;
+  /** The file, or "" for the bot itself (created, renamed, settings, deleted). */
+  path: string;
+  by: Author;
+  why: string | null;
+}
+
 export class BotFolder {
+  /** Called after every change to a bot's folder (the git mirror listens). */
+  onChange?: (owner: Owner, change: FolderChangeEvent) => void;
+
   constructor(
     private d: {
       control: Control;
@@ -115,6 +127,15 @@ export class BotFolder {
       now?: () => number;
     },
   ) {}
+
+  /** The bot itself changed (created, renamed, its settings, deleted): mirrored like a file. */
+  touched(owner: Owner, change: FolderChangeEvent): void {
+    try {
+      this.onChange?.(owner, change);
+    } catch {
+      // A listener's trouble never stops a write.
+    }
+  }
 
   private now(): number {
     return this.d.now?.() ?? Date.now();
@@ -154,6 +175,10 @@ export class BotFolder {
       now: this.now(),
     });
     if (!out.ok) throw new FolderError("changed", `It was changed in the meantime (now version ${out.version}). Open it again and redo your edit.`, 409);
+    if (kind === FILE) {
+      const slash = key.indexOf("/");
+      this.touched(owner, { routineId: key.slice(0, slash), path: key.slice(slash + 1), by, why: why?.trim().slice(0, 200) || null });
+    }
     return out.record as RecordRow;
   }
 
@@ -322,6 +347,7 @@ export class BotFolder {
         if (!out.removed) break;
       }
     }
+    this.touched(owner, { routineId, path: "", by: { kind: "user", name: null }, why: "deleted" });
   }
 
   // ---- how a bot wakes up ----

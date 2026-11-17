@@ -18,6 +18,9 @@ import { TeamLink } from "../teams.ts";
 import { PersonalStore } from "../personal.ts";
 import { Revisions } from "../revisions.ts";
 import { PersonalRepos } from "../repos/personal.ts";
+import { RoutineKeys } from "../routines/keys.ts";
+import { BotFolder } from "../bots/folder.ts";
+import { BotMirror } from "../bots/mirror.ts";
 import { alerts, checkHealth, loadState, post, saveState, systemdUnit } from "./health.ts";
 import { runPersonalWorker } from "./personal.ts";
 import { runDigest } from "../digest.ts";
@@ -44,7 +47,10 @@ if (cmd === "personal") {
     : [];
   // 2. Users' own repos, after upkeep so its changes go out in the same pass. Their failures
   //    (a revoked token) are the health check's business, not an OnFailure alert every 15 min.
-  const repos = await new PersonalRepos(control, personal).syncAll();
+  //    Their bots' folders go along (docs/bots.md, "A bot's folder in git").
+  const keys = new RoutineKeys({ control, personal, master: config.masterKey });
+  const mirror = new BotMirror({ control, keys, folder: new BotFolder({ control, keys }) });
+  const repos = await new PersonalRepos(control, personal, {}, { files: (uid) => mirror.personalFiles(uid) }).syncAll();
   console.log(
     JSON.stringify({
       at: new Date().toISOString(),

@@ -35,6 +35,7 @@ import { ambientHostRouter, botRunRouter } from "./bots/route.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
+import { BotMirror } from "./bots/mirror.ts";
 import { AmbientComputers } from "./bots/computer.ts";
 import { AdminService } from "./bots/admin.ts";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -80,6 +81,8 @@ export interface AppDeps {
   msteams?: { fetchImpl?: typeof fetch; verifier?: InboundVerifier; apiKey?: string };
   /** Tests: Ambient's chat against a fake Anthropic; how long it may look at a bot's question; no heartbeat timer. */
   ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number; noHeartbeat?: boolean };
+  /** Tests: how long after a change bots are mirrored into git (default 30 s). */
+  mirrorDelayMs?: number;
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
   microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
@@ -93,7 +96,9 @@ export function createApp(deps: AppDeps) {
   const signInNonces = new SignInNonces(config.masterKey, async (key, expiresAt) => (await control.m(api.oauth.useOnce, { model: "SignInNonce", key, expiresAt })).first);
   const pairing = new Pairing(control, codeHasher);
   const personal = new PersonalStore(control, config.masterKey);
-  const repos = new PersonalRepos(control, personal, { allowFile: config.allowFileRepos });
+  // A person's bots go into their repo with each sync (docs/bots.md, "A bot's folder in git").
+  let botMirror: BotMirror | undefined;
+  const repos = new PersonalRepos(control, personal, { allowFile: config.allowFileRepos }, { files: (uid) => botMirror?.personalFiles(uid) ?? Promise.resolve(new Map()) });
   const revisions = new Revisions(control);
   const teams = new TeamLink(config.origin, config.signingKeys[0]!, deps.fetchImpl, (team) => revisions.teamChanged(team.id));
   const events = new EventHub(deps.revisionSource ?? new PollingRevisionSource(revisions, deps.revisionPollMs ?? 5_000));
@@ -130,9 +135,13 @@ export function createApp(deps: AppDeps) {
     teamsOf: (uid) => directory.teamsOf(uid),
     teamBySlug: (slug) => directory.teamBySlug(slug),
   });
+  botMirror = new BotMirror({ control, keys: routineKeys, folder, teams, repos, delayMs: deps.mirrorDelayMs });
+  const mirror = botMirror;
+  folder.onChange = (owner, change) => mirror.changed(owner, change);
   const folders: Folders = {
     folder,
-    files: new BotFiles({ routines, folder }),
+    mirror,
+    files: new BotFiles({ routines, folder, mirror }),
     history: new HistorySearch({ control, keys: routineKeys, routines, folder, nameOf: async (uid) => (await directory.user(uid))?.name ?? "them" }),
   };
   // Bots talk to people through channels; the app is the first (docs/bots.md).

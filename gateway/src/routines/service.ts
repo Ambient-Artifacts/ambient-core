@@ -633,6 +633,7 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    if (input.bot) this.d.folder?.touched(this.ownerOf(out.routine as unknown as RoutineRow), { routineId: String(out.routine.id), path: "", by: source === "app" ? { kind: "user", name: null } : { kind: "amb", name: source }, why: "created" });
     return this.get(actor, String(out.routine.id));
   }
 
@@ -660,6 +661,10 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    // A bot's name or settings changed (or it became a loop again): its mirror in git follows.
+    if (this.d.folder && (r.bot || patch.bot) && (patch.name !== undefined || patch.schedule !== undefined || patch.enabled !== undefined || patch.bot !== undefined)) {
+      this.d.folder.touched(this.ownerOf(r), { routineId: id, path: "", by: meta.by ?? (source === "app" ? { kind: "user", name: null } : { kind: "amb", name: source }), why: meta.why ?? "settings" });
+    }
     // A bot's prompt is its AGENTS.md: every change is a version of it (undo, who and why).
     if (this.d.folder && patch.prompt !== undefined && (r.bot || patch.bot)) {
       const owner = this.ownerOf(r);

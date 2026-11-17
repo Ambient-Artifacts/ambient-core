@@ -208,7 +208,18 @@ export function botAppRoutes(
 
   r.get("/v1/app/routines/:id/files", d.auth, async (req, res) => {
     try {
-      res.json({ files: (await files.list(await actor(res), id(req))).files });
+      const a = await actor(res);
+      const [{ files: list }, mirror] = await Promise.all([files.list(a, id(req)), files.mirrorStatus(a, id(req)).catch(() => null)]);
+      res.json({ files: list, mirror });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // The bot's folder (and its owner's other bots) into git now (docs/bots.md, "A bot's folder in git").
+  r.post("/v1/app/routines/:id/files/mirror", d.auth, async (req, res) => {
+    try {
+      res.json({ mirror: await files.mirrorNow(await actor(res), id(req)) });
     } catch (err) {
       fail(res, err);
     }

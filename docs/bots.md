@@ -430,6 +430,69 @@ over its own thread and handoffs (`at` in milliseconds, newest first; `from`/`to
 `YYYY-MM-DD`, meaning the whole day, or an ISO moment; every word of `q` must appear, case and
 accents don't matter). The run token works while the run is going.
 
+### A bot's folder in git
+
+Every bot's folder is also mirrored into git, so its owner has it in a repo of their own, with the
+history git gives. Ambient's store stays the source: a broken repo or token never stops a bot, and
+the mirror is **one way**: an edit made in git is overwritten the next time the bot changes.
+Bringing edits back from git is a later step.
+
+```
+bots/
+  README.md          generated: what this is, and to change bots in Ambient
+  .mirrored          generated: the files Ambient wrote (only those are ever removed)
+  blog-draft/
+    AGENTS.md
+    memory.md
+    bot.json         generated: name, face, runtime, isolation, schedule, enabled, report,
+                     the granted secrets' names (never values; "all" for a loop from before
+                     grants), model, delegate
+    skills/tone/SKILL.md
+```
+
+A bot's folder name is its name in lowercase letters, digits and dashes (`Blög Draft` →
+`blog-draft`); when two bots would share one, the newer gets the end of its id. Handoffs aren't
+mirrored: they're run logs. A `bots/` folder the repo had of its own keeps its files.
+
+- **A person's bots** go into their own connected repo (the one their personal wiki syncs with),
+  in its sync: every 15 minutes, and within half a minute of a change. Without a connected repo
+  they aren't mirrored.
+- **A team's bots** go into the team's wiki repo on its server, in one commit with who changed
+  what and why (`bots: Release notes skills/changelog/SKILL.md (Lena Vogel: readers asked)`, by
+  that person when it was one person's change), pushed to the team's own repo when one is
+  connected. When another tool keeps the team's repo and Ambient writes one folder of it, they go
+  inside that folder (`ambient/bots/`); when it's read-only, nowhere. The brain leaves `bots/` out:
+  no pages, no search, no indexes, and the nightly upkeep doesn't touch it.
+- **When:** after any change to a bot (a file, its prompt, its name or settings, its memory after a
+  run, deleting it), once things have been quiet for 30 seconds, so a run's memory makes one commit.
+  A renamed bot's old folder goes; a deleted bot's folder goes.
+
+`GET /v1/app/routines/:id/files` also returns where the bot is mirrored:
+
+```json
+"mirror": {
+  "state": "mirrored",
+  "repo": "https://github.com/acme/brain.git",
+  "path": "bots/blog-draft/",
+  "lastMirroredAt": 1763380000000,
+  "lastError": null
+}
+```
+
+`state`: `mirrored`; `pending` (a change waits, or it hasn't run yet); `not_connected` (a person
+without a connected repo: the app can offer to connect one); `read_only` (another tool keeps the
+team's repo); `error` (`lastError` says why; the bot itself is fine). `repo` is null for a team
+without a repo of its own: then the folder is in the brain's git on the team's server. `null`
+instead of the object: the gateway doesn't mirror at all.
+
+`POST /v1/app/routines/:id/files/mirror` mirrors the owner's bots now (who may change the bot) and
+answers `{ "mirror": … }` as above. `bot_files` tells Amb the same in a line.
+
+The team server takes the folder as `PUT /v1/bots` (purpose `bots` in the gateway's token):
+`{ "bots": [{ "slug", "files": [{ "path", "content" }] }], "readme", "message", "author"? }`, every
+bot of the team at once; it answers `{ "commit", "folder", "files", "repo": { "url", "mode",
+"status", "lastError", "lastPushAt" } | null }`, or 409 `read_only`.
+
 ## History: nothing is forgotten
 
 Amb's chat and every bot's thread are kept in full (sealed), no longer cut at the newest 200 or 300
