@@ -48,6 +48,10 @@ export async function startStack(
     /** Ambient's Microsoft app against a fake Microsoft; `microsoftFetch` also serves the team server's Graph calls. */
     microsoftConnect?: { connector: MicrosoftConnector; propagationDelayMs?: number };
     microsoftFetch?: typeof fetch;
+    /** Who has bots (BRAIN_BOTS); tests add account ids to it once they're signed in. */
+    bots?: { users: string[]; teams: string[] };
+    /** Ambient's chat against a fake Anthropic. */
+    ambient?: { fetchImpl?: typeof fetch; apiKey?: string };
   } = {},
 ) {
   const serviceSecret = randomBytes(24).toString("hex");
@@ -112,6 +116,7 @@ export async function startStack(
     allowFileRepos: true,
     signups: opts.signups,
     requireSignInNonce: opts.requireSignInNonce,
+    bots: opts.bots,
   };
 
   // Team server with a copy of the fixture team wiki.
@@ -161,6 +166,7 @@ export async function startStack(
     microsoft: microsoftVerifier([MICROSOFT_CLIENT], { keys: [microsoftJwk] }),
     google: googleVerifier([GOOGLE_CLIENT], { keys: [googleJwk] }),
     microsoftConnect: opts.microsoftConnect ? { ...opts.microsoftConnect, fetchImpl: opts.microsoftFetch } : undefined,
+    ambient: opts.ambient,
   });
   gatewayServer.on("request", stack.app);
 
@@ -187,6 +193,8 @@ export async function startStack(
     revisions: stack.revisions,
     events: stack.events,
     microsoftConnect: stack.microsoftConnect,
+    bots: stack.bots,
+    ambient: stack.ambient,
     graphTokens,
     deliverer,
     close: async () => {

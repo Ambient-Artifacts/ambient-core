@@ -13,7 +13,9 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { RoutineSchedule, describeSchedule, nextRun, onCalendar } from "@brain/spec";
+import { BotInput, RoutineSchedule, botSettings, botState, describeSchedule, nextRun, onCalendar, type BotSettings, type BotState } from "@brain/spec";
+import { MESSAGE_PURPOSE, openMessage, resultHash, sealMessage } from "../bots/messages.ts";
+import type { BotsAccess } from "../config.ts";
 import { api, type Control } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Team } from "../directory.ts";
@@ -22,6 +24,7 @@ import type { Owner, RoutineKeys } from "./keys.ts";
 import type { CodeHasher } from "../auth/codes.ts";
 
 export const HOST_TOKEN_PREFIX = "ambient_host_";
+export const RUN_TOKEN_PREFIX = "ambient_run_";
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
 const CODE_TTL_MS = 30 * 60_000;
 const SUMMARY_MAX = 4_000;
@@ -55,6 +58,10 @@ const MESSAGES: Record<string, [string, number]> = {
   invalid_code: ["That setup code isn't valid. Create a new one in the Ambient app.", 400],
   expired_code: ["That setup code has expired. Create a new one in the Ambient app.", 400],
   no_such_run: ["There's no such run.", 404],
+  bots_not_enabled: ["Bots aren't switched on for this account or team yet.", 403],
+  no_such_bot: ["There's no such bot.", 404],
+  run_over: ["This run is over; it can't ask anything anymore.", 409],
+  no_such_question: ["There's no such question.", 404],
 };
 
 function refused(code: string): RoutineError {
@@ -79,6 +86,8 @@ export const RoutineInput = z.object({
   computer: z.string().trim().min(1).max(80).nullable().optional(),
   folder: Folder.nullable().optional(),
   enabled: z.boolean().optional(),
+  /** A bot (docs/bots.md); null on a change: a plain loop again. */
+  bot: BotInput.nullable().optional(),
 });
 export type RoutineInput = z.infer<typeof RoutineInput>;
 export const RoutinePatch = RoutineInput.omit({ team: true }).partial();
@@ -111,7 +120,7 @@ export const RunResult = z.object({
   summary: z.string().max(100_000).optional(),
   costUsd: z.number().min(0).max(10_000).optional(),
   turns: z.number().int().min(0).optional(),
-  sessionId: z.string().max(100).optional(),
+  sessionId: z.string().max(200).optional(),
 });
 export type RunResult = z.infer<typeof RunResult>;
 
@@ -137,6 +146,8 @@ interface RoutineRow {
   runRequestedAt: number | null;
   source: string;
   lastRun: { status: string; startedAt: number; finishedAt?: number } | null;
+  bot: BotSettings | null;
+  openQuestionId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -203,8 +214,29 @@ export interface Routine {
   runRequested: boolean;
   source: string;
   lastRun: { status: string; startedAt: number; finishedAt: number | null } | null;
+  /** A bot's settings and how it's doing; null for a plain loop. */
+  bot: BotView | null;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface BotView {
+  face: BotSettings["face"];
+  runtime: BotSettings["runtime"];
+  isolation: BotSettings["isolation"];
+  /** The secrets its runs get; null: all of its owner's. */
+  secrets: string[] | null;
+  report: BotSettings["report"];
+  state: BotState;
+  openQuestion: { id: string; text: string; choices: string[] | null; askedAt: number } | null;
+  /** The newest thing it said: a result, a failure or a question. */
+  lastMessage: { text: string; kind: string; at: number } | null;
+}
+
+interface LatestRow {
+  id: string;
+  question: { id: string; iv: string; ct: string; createdAt: number } | null;
+  last: { id: string; kind: string; iv: string; ct: string; createdAt: number } | null;
 }
 
 export interface Run {
@@ -276,8 +308,41 @@ export class RoutineService {
       now?: () => number;
       /** Pushes to the owner's apps when a run fails (finishRun decides when it's news). */
       notifier?: Notifier;
+      /** Who has bots (BRAIN_BOTS); absent: nobody. */
+      bots?: BotsAccess;
     },
   ) {}
+
+  // ---- bots: who has them ----
+
+  /** Bots for a personal owner (`uid`), or a team (by slug). */
+  private botsOn(owner: { uid: string } | { slug: string }): boolean {
+    const b = this.d.bots;
+    if (!b) return false;
+    return "uid" in owner ? b.users.includes("*") || b.users.includes(owner.uid) : b.teams.includes("*") || b.teams.includes(owner.slug);
+  }
+
+  /** Whether the app shows bots to this user: their own, or one of their teams has them. */
+  botsEnabled(actor: Actor): boolean {
+    return (actor.personal && this.botsOn({ uid: actor.uid })) || this.readable(actor).some((t) => this.botsOn({ slug: t.slug }));
+  }
+
+  /** Bots for the owner of `r` (its team, or whoever made a personal one). */
+  botsFor(actor: Actor, r: { teamId: string | null; createdBy: string }): boolean {
+    if (r.teamId) {
+      const team = this.teamOf(actor, r.teamId);
+      return !!team && this.botsOn({ slug: team.slug });
+    }
+    return this.botsOn({ uid: r.createdBy });
+  }
+
+  get keys(): RoutineKeys {
+    return this.d.keys;
+  }
+
+  get control(): Control {
+    return this.d.control;
+  }
 
   private now(): number {
     return this.d.now?.() ?? Date.now();
@@ -334,7 +399,33 @@ export class RoutineService {
     };
   }
 
-  private async routine(actor: Actor, r: RoutineRow, hosts: HostRow[]): Promise<Routine> {
+  private async botView(r: RoutineRow, ready: boolean, latest: LatestRow | undefined): Promise<BotView | null> {
+    if (!r.bot) return null;
+    const owner = this.ownerOf(r);
+    const open = async (m: { iv: string; ct: string }) => openMessage(this.d.keys, owner, m.iv, m.ct, MESSAGE_PURPOSE).catch(() => ({ text: "", choices: undefined }));
+    const q = latest?.question ? { m: latest.question, body: await open(latest.question) } : null;
+    const last = latest?.last ? { m: latest.last, body: await open(latest.last) } : null;
+    return {
+      face: r.bot.face,
+      runtime: r.bot.runtime,
+      isolation: r.bot.isolation,
+      secrets: r.bot.secrets ?? null,
+      report: r.bot.report,
+      state: botState({ enabled: r.enabled, ready, lastRunStatus: r.lastRun?.status ?? null, openQuestion: r.openQuestionId !== null }),
+      openQuestion: q ? { id: String(q.m.id), text: q.body.text, choices: q.body.choices ?? null, askedAt: q.m.createdAt } : null,
+      lastMessage: last ? { text: last.body.text, kind: last.m.kind, at: last.m.createdAt } : null,
+    };
+  }
+
+  /** The open question and newest message of each bot among `rows`. */
+  private async latest(actor: Actor, rows: RoutineRow[]): Promise<Map<string, LatestRow>> {
+    const ids = rows.filter((r) => r.bot).map((r) => r.id);
+    if (!ids.length) return new Map();
+    const out = (await this.d.control.q(api.bots.latest, { uid: actor.uid as never, teamIds: this.readable(actor).map((t) => t.id) as never, ids })) as unknown as LatestRow[];
+    return new Map(out.map((x) => [String(x.id), x]));
+  }
+
+  private async routine(actor: Actor, r: RoutineRow, hosts: HostRow[], latest?: Map<string, LatestRow>): Promise<Routine> {
     const team = this.teamOf(actor, r.teamId);
     const host = r.teamId ? hosts.find((h) => h.teamId === r.teamId) : r.hostId ? hosts.find((h) => h.id === r.hostId) : undefined;
     const canEdit = team ? this.manageable(actor).some((t) => t.id === team.id) : actor.canWritePersonal;
@@ -353,6 +444,7 @@ export class RoutineService {
       runRequested: r.runRequestedAt !== null,
       source: r.source,
       lastRun: r.lastRun ? { status: r.lastRun.status, startedAt: r.lastRun.startedAt, finishedAt: r.lastRun.finishedAt ?? null } : null,
+      bot: await this.botView(r, Boolean(host?.ready), latest?.get(r.id)),
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     };
@@ -388,15 +480,22 @@ export class RoutineService {
 
   async list(actor: Actor): Promise<{ routines: Routine[]; computers: Computer[] }> {
     const { routines, hosts } = await this.rows(actor);
+    const latest = await this.latest(actor, routines);
     return {
-      routines: await Promise.all(routines.map((r) => this.routine(actor, r, hosts))),
+      routines: await Promise.all(routines.map((r) => this.routine(actor, r, hosts, latest))),
       computers: hosts.map((h) => this.computer(h, actor)),
     };
   }
 
   async get(actor: Actor, id: string): Promise<Routine> {
     const { r, hosts } = await this.row(actor, id);
-    return this.routine(actor, r, hosts);
+    return this.routine(actor, r, hosts, await this.latest(actor, [r]));
+  }
+
+  /** The raw row (for the bots' own service). */
+  async rowOf(actor: Actor, id: string): Promise<{ id: string; teamId: string | null; createdBy: string; bot: BotSettings | null; name: string }> {
+    const { r } = await this.row(actor, id);
+    return { id: r.id, teamId: r.teamId, createdBy: r.createdBy, bot: r.bot, name: r.name };
   }
 
   /** One of the user's own computers by id or name (case-insensitive); the only ready one when `ref` is undefined. */
@@ -424,6 +523,7 @@ export class RoutineService {
       hostId = await this.resolveComputer(actor, input.computer);
     }
     const owner: Owner = team ? { kind: "team", teamId: team.id } : { kind: "user", uid: actor.uid };
+    if (input.bot && !this.botsOn(team ? { slug: team.slug } : { uid: actor.uid })) throw refused("bots_not_enabled");
     const sealed = await this.d.keys.seal(owner, "routine:prompt", input.prompt);
     const out = await this.d.control.m(api.routines.create, {
       uid: actor.uid as never,
@@ -435,6 +535,7 @@ export class RoutineService {
       hostId: hostId ?? undefined,
       folder: input.folder ?? undefined,
       enabled: input.enabled ?? true,
+      bot: input.bot ? botSettings(input.bot) : undefined,
       source,
       now: this.now(),
     });
@@ -448,6 +549,8 @@ export class RoutineService {
     if (r.teamId && patch.computer) throw refused("team_routine_computer");
     const sealed = patch.prompt !== undefined ? await this.d.keys.seal(this.ownerOf(r), "routine:prompt", patch.prompt) : undefined;
     const hostId = !r.teamId && patch.computer !== undefined ? await this.resolveComputer(actor, patch.computer) : undefined;
+    if (patch.bot && !this.botsFor(actor, r)) throw refused("bots_not_enabled");
+    const bot = patch.bot === undefined ? undefined : patch.bot === null ? null : botSettings(patch.bot, r.bot ?? undefined);
     const out = await this.d.control.m(api.routines.update, {
       ...access,
       id,
@@ -458,6 +561,7 @@ export class RoutineService {
       hostId,
       folder: patch.folder,
       enabled: patch.enabled,
+      bot,
       source,
       now: this.now(),
     });
@@ -610,18 +714,42 @@ export class RoutineService {
   async startRun(
     host: Host,
     id: string,
-  ): Promise<{ run: { id: string; trigger: string }; routine: { id: string; name: string; prompt: string; folder: string | null }; env: Record<string, string> }> {
-    const out = await this.d.control.m(api.routines.startRun, { hostId: host.id as never, id, now: this.now() });
+  ): Promise<{
+    run: { id: string; trigger: string };
+    routine: { id: string; name: string; prompt: string; folder: string | null };
+    env: Record<string, string>;
+    /** A bot's settings (runtime, isolation, …); null for a plain loop. */
+    bot: BotSettings | null;
+    /** A bot's run that continues a conversation: the session and what it continues with. */
+    resume: { sessionId: string | null; message: string } | null;
+    /** A bot's run: its token for asking the owner (POST /v1/bot/ask), valid while it runs. */
+    runToken: string | null;
+  }> {
+    // Every run gets a token; only a bot's run stores (and so honours) it.
+    const runToken = `${RUN_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
+    const out = await this.d.control.m(api.routines.startRun, { hostId: host.id as never, id, runTokenHash: sha256Hex(runToken), now: this.now() });
     if (!out.ok) throw refused(out.error);
     const r = out.routine as unknown as RoutineRow;
     const owner = this.ownerOf(r);
     const env: Record<string, string> = {};
     // Secrets stored before a name was reserved don't go out either.
     for (const s of out.secrets) if (!RESERVED_ENV.test(s.name)) env[s.name] = await this.d.keys.open(owner, `routine:secret:${s.name}`, s.iv, s.ct);
+    let resume: { sessionId: string | null; message: string } | null = null;
+    if (r.bot && out.resume) {
+      const body = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch(() => ({ text: "" }));
+      const who = out.resume.authorName ?? "Your owner";
+      resume = {
+        sessionId: out.resume.sessionId,
+        message: out.resume.kind === "answer" ? `${who} answered your question: ${body.text}` : `${who} wrote to you in the Ambient app: ${body.text}`,
+      };
+    }
     return {
       run: { id: String(out.runId), trigger: out.trigger },
       routine: { id: r.id, name: r.name, prompt: await this.d.keys.open(owner, "routine:prompt", r.promptIv, r.promptCt), folder: r.folder },
       env,
+      bot: r.bot,
+      resume,
+      runToken: r.bot ? runToken : null,
     };
   }
 
@@ -630,7 +758,10 @@ export class RoutineService {
     if (!who) throw refused("no_such_run");
     const owner: Owner = who.teamId ? { kind: "team", teamId: String(who.teamId) } : { kind: "user", uid: String(who.uid) };
     const text = result.summary?.trim();
-    const sealed = text ? await this.d.keys.seal(owner, "routine:run", text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX)}…` : text) : undefined;
+    const clipped = text && text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX)}…` : text;
+    const sealed = clipped ? await this.d.keys.seal(owner, "routine:run", clipped) : undefined;
+    // A bot's thread gets the result too (Convex decides whether it's news).
+    const message = who.bot && clipped ? { ...(await sealMessage(this.d.keys, owner, { text: clipped })), hash: resultHash(clipped) } : undefined;
     const out = await this.d.control.m(api.routines.finishRun, {
       hostId: host.id as never,
       runId,
@@ -641,6 +772,7 @@ export class RoutineService {
       costUsd: result.costUsd,
       turns: result.turns,
       sessionId: result.sessionId,
+      message,
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);

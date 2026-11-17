@@ -3,6 +3,7 @@ import type { SettingsService } from "../team-admin.ts";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AuthError, type Principal, type ResourceTarget, type createBearerVerifier } from "../auth/bearer.ts";
 import type { RoutineService } from "../routines/service.ts";
+import type { BotService } from "../bots/service.ts";
 import { personalInstructions } from "./context.ts";
 import { buildMcpServer, type ReaderSource } from "./tools.ts";
 import { addressKey, strikes } from "../limiter.ts";
@@ -38,6 +39,7 @@ export function mcpRouter(deps: {
   verify: ReturnType<typeof createBearerVerifier>;
   readers: ReaderSource;
   routines?: RoutineService;
+  bots?: BotService;
   settings?: SettingsService;
   version: string;
   /** The user's name, for the instructions an app gets when it connects. */
@@ -104,7 +106,7 @@ export function mcpRouter(deps: {
     const personal = connecting
       ? await personalInstructions(principal, deps.readers, { name: await deps.userName?.(principal.uid).catch(() => undefined) })
       : null;
-    const server = buildMcpServer({ principal, readers: deps.readers, routines: deps.routines, settings: deps.settings, version: deps.version, personal });
+    const server = buildMcpServer({ principal, readers: deps.readers, routines: deps.routines, bots: deps.bots, settings: deps.settings, version: deps.version, personal });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       void transport.close();

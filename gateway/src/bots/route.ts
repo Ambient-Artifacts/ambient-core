@@ -1,0 +1,127 @@
+// HTTP for bots (docs/bots.md): the app's routes (features, a bot's thread, the chat with Ambient)
+// and a run's own (asking its owner, with the run's token).
+import express, { type Request, type RequestHandler, type Response, type Router } from "express";
+import { z } from "zod";
+import type { Directory } from "../directory.ts";
+import { RoutineError, type Actor, type RoutineService } from "../routines/service.ts";
+import { limiter } from "../limiter.ts";
+import type { AmbientChat } from "./ambient.ts";
+import type { BotService } from "./service.ts";
+
+function fail(res: Response, err: unknown) {
+  if (err instanceof RoutineError) {
+    res.status(err.status).json({ error: err.code, message: err.message });
+    return;
+  }
+  throw err;
+}
+
+const Text = z.object({ text: z.string().trim().min(1).max(8_000) });
+
+export function botAppRoutes(
+  r: Router,
+  d: { routines: RoutineService; bots: BotService; ambient: AmbientChat; directory: Directory; auth: RequestHandler; json: RequestHandler },
+) {
+  const actor = async (res: Response): Promise<Actor> => {
+    const uid = res.locals.uid as string;
+    return { uid, teams: await d.directory.teamsOf(uid), personal: true, canWritePersonal: true, canWriteTeams: true };
+  };
+  const id = (req: Request) => String(req.params.id);
+  const notEnabled = (res: Response) => res.status(403).json({ error: "bots_not_enabled", message: "Bots aren't switched on for this account yet." });
+
+  r.get("/v1/app/features", d.auth, async (_req, res) => {
+    res.json({ bots: d.routines.botsEnabled(await actor(res)) });
+  });
+
+  r.get("/v1/app/routines/:id/thread", d.auth, async (req, res) => {
+    const asked = Number(typeof req.query.limit === "string" ? req.query.limit : NaN);
+    const limit = Number.isInteger(asked) ? Math.min(Math.max(asked, 1), 100) : 50;
+    try {
+      res.json(await d.bots.thread(await actor(res), id(req), limit));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/routines/:id/thread", d.auth, d.json, async (req, res) => {
+    const body = Text.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Write something first (up to 8,000 characters)." });
+      return;
+    }
+    try {
+      const a = await actor(res);
+      res.json(await d.bots.receive(a, { channel: "app", uid: a.uid, target: { kind: "bot", botId: id(req) }, text: body.data.text }));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/ambient/chat", d.auth, async (_req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    res.json(await d.ambient.list(a.uid));
+  });
+
+  r.post("/v1/app/ambient/chat", d.auth, d.json, async (req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    const body = Text.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Write something first (up to 8,000 characters)." });
+      return;
+    }
+    try {
+      const name = (await d.directory.user(a.uid))?.name ?? "them";
+      const { message, pending } = await d.ambient.send(a.uid, name, body.data.text);
+      res.json({ message, pending });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/ambient/chat", d.auth, async (_req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    await d.ambient.clear(a.uid);
+    res.status(204).end();
+  });
+}
+
+/** A bot's run asks its owner (the runner's ask_owner tool), with its run token. */
+export function botRunRouter(d: { bots: BotService }): Router {
+  const r = express.Router();
+  const json = express.json({ limit: "64kb" });
+  const perRun = limiter(120);
+  const slowDown = (req: Request, res: Response) => {
+    const key = (req.headers.authorization ?? "").slice(-16);
+    if (perRun(key)) return false;
+    res.status(429).json({ error: "slow_down" });
+    return true;
+  };
+
+  r.post("/v1/bot/ask", json, async (req, res) => {
+    if (slowDown(req, res)) return;
+    const body = z.object({ question: z.string().trim().min(1).max(2_000), choices: z.array(z.string().max(120)).max(6).optional() }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Ask a question (up to 2,000 characters), with up to 6 choices." });
+      return;
+    }
+    try {
+      res.json(await d.bots.ask(req.headers.authorization, body.data.question, body.data.choices));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/bot/questions/:id", async (req, res) => {
+    if (slowDown(req, res)) return;
+    try {
+      res.json(await d.bots.answer(req.headers.authorization, String(req.params.id)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  return r;
+}

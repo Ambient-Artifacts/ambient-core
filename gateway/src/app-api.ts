@@ -19,6 +19,9 @@ import { localDay, validZone } from "./digest.ts";
 import type { PersonalStore } from "./personal.ts";
 import type { PersonalRepos } from "./repos/personal.ts";
 import { routineAppRoutes } from "./routines/route.ts";
+import { botAppRoutes } from "./bots/route.ts";
+import type { BotService } from "./bots/service.ts";
+import type { AmbientChat } from "./bots/ambient.ts";
 import type { RoutineService } from "./routines/service.ts";
 import type { SessionService } from "./sessions/service.ts";
 import type { EventHub, Revisions } from "./revisions.ts";
@@ -46,6 +49,9 @@ export interface AppApiDeps {
   repos: PersonalRepos;
   sessions: SessionService;
   routines: RoutineService;
+  /** Bots and the chat with Ambient (docs/bots.md). */
+  bots?: BotService;
+  ambient?: AmbientChat;
   appleRevoke: AppleRevoker;
   /** Microsoft's app registration id the apps sign in with (/v1/app/config), when there is one. */
   microsoftClientId?: string;
@@ -461,6 +467,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   // ---- routines (prompts Claude Code runs on a schedule on the user's computers) ----
 
   routineAppRoutes(r, { routines: d.routines, directory: d.directory, auth, json });
+  if (d.bots && d.ambient) botAppRoutes(r, { routines: d.routines, bots: d.bots, ambient: d.ambient, directory: d.directory, auth, json });
 
   // ---- teams ----
 
