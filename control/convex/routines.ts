@@ -50,6 +50,14 @@ function hostShape(h: Doc<"routineHosts">) {
     codeExpiresAt: h.tokenHash ? null : (h.codeExpiresAt ?? null),
     info: h.info ?? null,
     lastSeenAt: h.lastSeenAt ?? null,
+    // Who stored what and when; never the sealed values.
+    claude: h.claude
+      ? {
+          use: h.claude.use,
+          plan: h.claude.plan ? { by: h.claude.plan.by ?? null, at: h.claude.plan.at } : null,
+          key: h.claude.key ? { by: h.claude.key.by ?? null, at: h.claude.key.at } : null,
+        }
+      : null,
     createdAt: h.createdAt,
   };
 }
@@ -633,5 +641,73 @@ export const runOwner = query({
     if (!run || run.hostId !== hostId) return null;
     const r = await ctx.db.get(run.routineId);
     return { uid: run.userId, teamId: r?.teamId ?? null, bot: Boolean(r?.bot) };
+  },
+});
+
+// ---- whose Claude a computer uses (docs/bots.md) ----
+
+/** A computer the user may set Claude for: their own, or the server of a team they manage. */
+async function claudeHost(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, id: string) {
+  const hostId = ctx.db.normalizeId("routineHosts", id);
+  const h = hostId ? await ctx.db.get(hostId) : null;
+  if (!h) return null;
+  if (h.teamId) return (await manages(ctx, uid, h.teamId)) ? h : null;
+  return h.userId === uid ? h : null;
+}
+
+/** Store a plan token or an API key (sealed by the gateway) and use it. */
+export const setClaude = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), kind: v.union(v.literal("plan"), v.literal("key")), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, id, kind, iv, ct, now }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    const user = await ctx.db.get(uid);
+    const stored = { iv, ct, by: user?.name, at: now };
+    await ctx.db.patch(h._id, { claude: { ...(h.claude ?? {}), use: kind, [kind]: stored } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** Switch which sign-in the computer uses. */
+export const useClaude = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), use: v.union(v.literal("plan"), v.literal("key"), v.literal("computer")) },
+  handler: async (ctx, { secret, uid, id, use }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    if (use === "plan" && !h.claude?.plan) return { ok: false as const, error: "no_plan" };
+    if (use === "key" && !h.claude?.key) return { ok: false as const, error: "no_key" };
+    await ctx.db.patch(h._id, { claude: { ...(h.claude ?? {}), use } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** Remove a stored plan or key; the computer falls back to the other, or its own sign-in. */
+export const removeClaude = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), kind: v.union(v.literal("plan"), v.literal("key")) },
+  handler: async (ctx, { secret, uid, id, kind }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    const rest = { ...(h.claude ?? { use: "computer" as const }) };
+    delete rest[kind];
+    const other = kind === "plan" ? "key" : "plan";
+    const use = rest.use === kind ? (rest[other] ? other : "computer") : rest.use;
+    await ctx.db.patch(h._id, { claude: { ...rest, use } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** The computer's chosen sign-in (sealed), for the computer itself; null: its own. */
+export const hostClaude = query({
+  args: { ...secretArg, hostId: v.id("routineHosts") },
+  handler: async (ctx, { secret, hostId }) => {
+    assertService(secret);
+    const h = await ctx.db.get(hostId);
+    if (!h?.claude || h.claude.use === "computer") return null;
+    const c = h.claude[h.claude.use];
+    if (!c) return null;
+    return { kind: h.claude.use, iv: c.iv, ct: c.ct, at: c.at, uid: h.userId ?? null, teamId: h.teamId ?? null };
   },
 });

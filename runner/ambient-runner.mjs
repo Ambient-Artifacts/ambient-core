@@ -22,13 +22,15 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.7.1";
+const VERSION = "0.7.3";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
 const CONFIG = join(CONFIG_DIR, "runner.env");
 /** Optional, written by whoever runs the computer: variables every run gets (a team server's ANTHROPIC_API_KEY). */
 const EXTRA = join(CONFIG_DIR, "extra.env");
+/** The Claude sign-in chosen in Ambient (a plan's token or an API key), fetched by sync. Wins over extra.env. */
+const CLAUDE_ENV = process.env.AMBIENT_CLAUDE_ENV || join(CONFIG_DIR, "claude.env");
 const INSTALL_DIR = process.env.AMBIENT_INSTALL_DIR || "/opt/ambient-runner";
 const INSTALLED = join(INSTALL_DIR, "ambient-runner.mjs");
 const STATE_DIR = process.env.AMBIENT_STATE_DIR || "/var/lib/ambient-runner";
@@ -274,6 +276,7 @@ async function sync() {
     }
   }
   ambientUnit(cfg, out.ambient === true);
+  await claudeSync(cfg, state, out.claude ?? null);
   writeState(state);
   if (out.runner?.sha256 && (await selfUpdate(cfg, out.runner)) && out.ambient === true) systemctl("restart", AMBIENT_UNIT);
 }
@@ -358,8 +361,6 @@ async function ambientService() {
   const own = (path) => {
     if (as) chownSync(path, as.uid, as.gid);
   };
-  // A plan of Ambient's own (ambient.env) wins over the machine's API key.
-  const signIn = process.env.CLAUDE_CODE_OAUTH_TOKEN ? { ANTHROPIC_API_KEY: "" } : {};
 
   /** One open Claude Code session per person: uid → { child, session, token, waiting }. */
   const people = new Map();
@@ -381,8 +382,7 @@ async function ambientService() {
       "--append-system-prompt", instructions,
       ...(p.session ? ["--resume", p.session] : []),
     ];
-    const env = runEnv(cfg, { ...signIn, ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}) });
-    if (signIn.ANTHROPIC_API_KEY === "") delete env.ANTHROPIC_API_KEY;
+    const env = runEnv(cfg, { ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}) });
     const proc = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
       cwd: dir,
       env,
@@ -567,7 +567,49 @@ function runEnv(cfg, extra = {}, secrets = {}) {
   // A Claude Code session's own variables stay out (when the runner itself is started from one); the
   // computer's sign-in (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`, in extra.env) stays in.
   for (const k of Object.keys(env)) if ((k.startsWith("CLAUDE_CODE_") && k !== "CLAUDE_CODE_OAUTH_TOKEN") || k === "CLAUDECODE") delete env[k];
+  return signInEnv(chosenClaude(env));
+}
+
+/**
+ * The sign-in chosen in Ambient (claude.env), over whatever the computer has: a stored plan's token
+ * replaces the computer's key and token, a stored key replaces both too. Nothing chosen: unchanged.
+ */
+function chosenClaude(env) {
+  const c = readEnvFile(CLAUDE_ENV);
+  if (c.CLAUDE_CODE_OAUTH_TOKEN) {
+    const { ANTHROPIC_API_KEY: _key, ...rest } = env;
+    return { ...rest, CLAUDE_CODE_OAUTH_TOKEN: c.CLAUDE_CODE_OAUTH_TOKEN };
+  }
+  if (c.ANTHROPIC_API_KEY) {
+    const { CLAUDE_CODE_OAUTH_TOKEN: _token, ...rest } = env;
+    return { ...rest, ANTHROPIC_API_KEY: c.ANTHROPIC_API_KEY };
+  }
   return env;
+}
+
+/** Fetch the chosen Claude sign-in when its version changed; Ambient's sessions restart with it. */
+async function claudeSync(cfg, state, version) {
+  if ((state.claudeVersion ?? null) === version) return;
+  if (version === null) {
+    rmSync(CLAUDE_ENV, { force: true });
+  } else {
+    let out;
+    try {
+      out = await call(cfg, "GET", "/v1/host/claude");
+    } catch (err) {
+      log(`Couldn't fetch the Claude sign-in chosen in Ambient: ${err.message}`);
+      return;
+    }
+    const lines = Object.entries(out.env ?? {})
+      .filter(([k, v]) => (k === "CLAUDE_CODE_OAUTH_TOKEN" || k === "ANTHROPIC_API_KEY") && /^[A-Za-z0-9_-]+$/.test(String(v)))
+      .map(([k, v]) => `${k}=${v}`);
+    mkdirSync(dirname(CLAUDE_ENV), { recursive: true, mode: 0o700 });
+    writeFileSync(CLAUDE_ENV, lines.length ? `${lines.join("\n")}\n` : "", { mode: 0o600 });
+    chmodSync(CLAUDE_ENV, 0o600);
+  }
+  state.claudeVersion = version;
+  log(version ? `Claude sign-in from Ambient: ${version.split(":")[0] === "plan" ? "a Claude plan" : "an API key"}` : "Claude sign-in: this computer's own");
+  if (existsSync(join(UNIT_DIR, AMBIENT_UNIT))) systemctl("restart", AMBIENT_UNIT);
 }
 
 function systemPrompt(routine, trigger, bot) {
@@ -701,6 +743,17 @@ function ensureImage(p) {
 
 /** Variables a bot's Claude Code signs in with: the computer's own (extra.env), never a secret's. */
 const AUTH_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL"];
+
+/**
+ * One way to sign in: a Claude plan's token (CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`)
+ * wins over an API key when a computer has both. Claude Code itself would take the key, so a team
+ * server whose owner added their plan would keep spending the key (or fail when it ran dry).
+ */
+function signInEnv(env) {
+  if (!env.CLAUDE_CODE_OAUTH_TOKEN) return env;
+  const { ANTHROPIC_API_KEY: _key, ...rest } = env;
+  return rest;
+}
 
 // ---- ask_owner: a small MCP server for a bot's run ----
 //
@@ -861,7 +914,7 @@ async function run(id) {
     }
     containerName = `ambient-run-${runInfo.id}`.slice(0, 60);
     // Values reach podman through its environment (never its command line); `-e NAME` passes one on.
-    const pass = { ...pick(process.env, new RegExp(`^(${AUTH_ENV.join("|")})$`)), ...Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k))) };
+    const pass = { ...signInEnv(chosenClaude(pick(process.env, new RegExp(`^(${AUTH_ENV.join("|")})$`)))), ...Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k))) };
     const podArgs = [
       "run", "--rm", "-i", "--name", containerName, "--user", "node", "--security-opt", "no-new-privileges", "--cap-drop", "all", ...LIMITS,
       "-v", `ambient-bot-${routine.id}:/home/bot:U`,
@@ -965,7 +1018,8 @@ async function run(id) {
         ? contained
           ? "Podman couldn't start the bot's container."
           : `Claude Code wasn't found at ${cfg.claude}.`
-        : `Claude Code ended with exit code ${code}${result?.subtype ? ` (${result.subtype})` : ""}.`;
+        : // "success" is Claude Code's word for a run that ended normally, also with an error.
+          `Claude Code ended with exit code ${code}${result?.subtype && result.subtype !== "success" ? ` (${result.subtype})` : ""}.`;
     const tail = stderr.trim().split("\n").slice(-6).join("\n");
     summary = [why, summary, tail].filter(Boolean).join("\n\n");
   }
