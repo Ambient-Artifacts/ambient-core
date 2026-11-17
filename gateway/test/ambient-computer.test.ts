@@ -1,0 +1,149 @@
+// Ambient on the person's own computer: the gateway hands chat messages to the computer's long
+// poll with a personal token for Ambient's tools, and the reply lands in the chat. Then the real
+// runner's `ambient` service with a stand-in claude that keeps one session open.
+import { spawn, type ChildProcess } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { appCall, mcpClient, signIn, startStack, type AppSession, type Stack } from "./helpers.ts";
+
+const RUNNER = join(import.meta.dirname, "..", "..", "runner", "ambient-runner.mjs");
+const info = { hostname: "vps", os: "Linux 6.8", runner: "0.7.0", claude: "2.1.326 (Claude Code)" };
+
+let s: Stack;
+let lena: AppSession;
+let host: string;
+
+const hostCall = async (token: string, method: string, path: string, body?: unknown) => {
+  const res = await fetch(`${s.origin}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const t = await res.text();
+  return { status: res.status, json: t ? (JSON.parse(t) as Record<string, unknown>) : {} };
+};
+type Chat = { messages: { role: string; text: string }[]; pending: boolean };
+const chat = async () => (await appCall(s, lena.access_token, "GET", "/v1/app/ambient/chat")).json as Chat;
+const settled = async () => {
+  let c = await chat();
+  for (let i = 0; i < 100 && c.pending; i++) {
+    await new Promise((r) => setTimeout(r, 50));
+    c = await chat();
+  }
+  return c;
+};
+
+beforeAll(async () => {
+  // No server key: Ambient answers only on the computer.
+  s = await startStack({ bots: { users: [], teams: [] }, ambient: { apiKey: undefined } });
+  lena = await signIn(s, "apple-lena", "Lena Vogel");
+  const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "VPS" })).json.code);
+  host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
+});
+afterAll(() => s.close());
+
+describe("Ambient on the person's computer", () => {
+  it("is only for accounts with bots, and sync says so", async () => {
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(false);
+    expect((await hostCall(host, "GET", "/v1/host/ambient/next")).status).toBe(403);
+    s.config.bots!.users.push(lena.user.uid);
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
+  });
+
+  it("says when no computer is connected and there's no server key", async () => {
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Hello?" });
+    const c = await settled();
+    expect(c.messages.at(-1)?.text).toContain("isn't connected");
+    await appCall(s, lena.access_token, "DELETE", "/v1/app/ambient/chat");
+  });
+
+  it("hands the message to the computer's long poll and shows its reply", async () => {
+    const waiting = hostCall(host, "GET", "/v1/host/ambient/next");
+    await new Promise((r) => setTimeout(r, 100));
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "What's on the VPS?" });
+    const job = (await waiting).json as { id: string; text: string; fresh: boolean; token: string; instructions: string; name: string };
+    expect(job).toMatchObject({ text: "What's on the VPS?", fresh: true, name: "Lena Vogel" });
+    expect(job.instructions).toContain("You run as Claude Code on VPS");
+    expect(job.token).toMatch(/^ambient_pat_/);
+    // The token reaches Ambient's tools as Lena.
+    const client = await mcpClient(`${s.origin}/mcp`, job.token);
+    expect((await client.listTools()).tools.map((t) => t.name)).toContain("bot_thread");
+    await client.close();
+
+    expect((await chat()).pending).toBe(true);
+    expect((await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { text: "Three repos and a cron." })).status).toBe(204);
+    const c = await settled();
+    expect(c.messages.map((m) => [m.role, m.text])).toEqual([
+      ["user", "What's on the VPS?"],
+      ["ambient", "Three repos and a cron."],
+    ]);
+    expect((await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { text: "again" })).status).toBe(404);
+  });
+
+  it("queues a message until the computer asks, keeps the token, and reports failures", async () => {
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "And now?" });
+    const job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; fresh: boolean; token?: string };
+    expect(job.fresh).toBe(false);
+    expect(job.token).toBeUndefined();
+    await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { error: "Claude Code stopped (exit 1)" });
+    expect((await settled()).messages.at(-1)?.text).toContain("I couldn't answer on VPS: Claude Code stopped");
+  });
+});
+
+describe("the runner's ambient service", () => {
+  let p: ChildProcess | undefined;
+  afterAll(() => p?.kill());
+
+  it("keeps one Claude Code session open and answers each message in it", async () => {
+    await appCall(s, lena.access_token, "DELETE", "/v1/app/ambient/chat");
+    const dir = mkdtempSync(join(tmpdir(), "ambient-service-"));
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    // claude: one process, one reply per message it reads, numbered (the same session answers both).
+    writeFileSync(
+      join(bin, "claude"),
+      `#!/bin/sh
+echo "$@" > args.txt
+n=0
+while IFS= read -r line; do
+  n=$((n+1))
+  echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"is_error\\":false,\\"result\\":\\"reply $n\\",\\"session_id\\":\\"amb-1\\",\\"num_turns\\":1}"
+done
+`,
+    );
+    chmodSync(join(bin, "claude"), 0o755);
+    p = spawn(process.execPath, [RUNNER, "ambient"], {
+      env: {
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
+        HOME: dir,
+        AMBIENT_SERVER: s.origin,
+        AMBIENT_HOST_TOKEN: host,
+        AMBIENT_CLAUDE: join(bin, "claude"),
+        AMBIENT_STATE_DIR: join(dir, "state"),
+        AMBIENT_AMBIENT_HOME: dir,
+      },
+    });
+    let out = "";
+    p.stdout?.on("data", (d) => (out += d));
+    p.stderr?.on("data", (d) => (out += d));
+    await new Promise((r) => setTimeout(r, 300));
+
+    for (const [text, want] of [
+      ["First", "reply 1"],
+      ["Second", "reply 2"],
+    ]) {
+      await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text });
+      const c = await settled();
+      expect(c.messages.at(-1)?.text, out).toBe(want);
+    }
+    const args = readFileSync(join(dir, "ambient", "args.txt"), "utf8");
+    expect(args).toContain("--input-format stream-json");
+    expect(args).toContain("--mcp-config");
+    expect(args).toContain("--disallowedTools mcp__ambient__set_routine_secret");
+    expect(args).toContain("You run as Claude Code on VPS");
+    expect(JSON.parse(readFileSync(join(dir, "state", "state.json"), "utf8")).ambientSession).toBe("amb-1");
+  }, 30_000);
+});

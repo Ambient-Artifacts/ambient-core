@@ -31,7 +31,8 @@ import { EventHub, PollingRevisionSource, Revisions, type RevisionSource } from 
 import { hostRouter } from "./routines/route.ts";
 import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
-import { botRunRouter } from "./bots/route.ts";
+import { ambientHostRouter, botRunRouter } from "./bots/route.ts";
+import { AmbientComputers } from "./bots/computer.ts";
 import { AppChannel } from "./channels/channel.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadRunner, RoutineService } from "./routines/service.ts";
@@ -115,6 +116,7 @@ export function createApp(deps: AppDeps) {
     runner: runner && { version: runner.version, sha256: runner.sha256, signature: runner.signature },
     notifier,
     bots: config.bots,
+    teamsOf: (uid) => directory.teamsOf(uid),
   });
   // Bots talk to people through channels; the app is the first (docs/bots.md).
   const bots = new BotService({ routines, channels: [new AppChannel(notifier)] });
@@ -187,6 +189,8 @@ export function createApp(deps: AppDeps) {
   const settings = new SettingsService({ directory, teams, control });
   const voices = new Voices({ control, personal, directory });
   // Ambient, the master bot: Claude with the person's own MCP server, every scope, as /mcp gives it.
+  // Ambient on a person's own computer (their Claude plan) when one is connected; the server's key otherwise.
+  const computers = new AmbientComputers({ pats, scopes: MCP_SCOPES });
   const ambient = new AmbientChat({
     control,
     keys: routines.keys,
@@ -198,11 +202,14 @@ export function createApp(deps: AppDeps) {
     apiKey: deps.ambient?.apiKey ?? process.env.ANTHROPIC_API_KEY,
     model: config.ambientModel ?? "claude-sonnet-5-5",
     fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
+    computers,
+    computersOf: (uid) => routines.computersOf(uid),
   });
   app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
   app.use(botRunRouter({ bots }));
+  app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
   app.use(
     appApiRouter({

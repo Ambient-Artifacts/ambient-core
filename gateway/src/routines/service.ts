@@ -310,6 +310,8 @@ export class RoutineService {
       notifier?: Notifier;
       /** Who has bots (BRAIN_BOTS); absent: nobody. */
       bots?: BotsAccess;
+      /** A user's teams (for whether their own computer runs Ambient). */
+      teamsOf?: (uid: string) => Promise<Team[]>;
     },
   ) {}
 
@@ -342,6 +344,19 @@ export class RoutineService {
       return !!team && this.botsOn({ slug: team.slug });
     }
     return r.createdBy === actor.uid ? this.personalBots(actor) : this.botsOn({ uid: r.createdBy });
+  }
+
+  /** Whether a user has bots (and so Ambient), from their account alone. */
+  async botsForUser(uid: string): Promise<boolean> {
+    if (this.botsOn({ uid })) return true;
+    const teams = (await this.d.teamsOf?.(uid).catch(() => [])) ?? [];
+    return teams.some((t) => t.status === "active" && this.botsOn({ slug: t.slug }));
+  }
+
+  /** The user's own computers that are set up: where Ambient can run for them. */
+  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string }[]> {
+    const out = (await this.d.control.q(api.routines.list, { uid: uid as never, teamIds: [] as never })) as unknown as { hosts: HostRow[] };
+    return out.hosts.filter((h) => !h.teamId && h.ready).map((h) => ({ id: h.id, uid, name: h.name }));
   }
 
   get keys(): RoutineKeys {
@@ -702,7 +717,10 @@ export class RoutineService {
     return { token, computer: { id: String(out.host.id), name: out.host.name, team: Boolean(out.host.teamId) } };
   }
 
-  async sync(host: Host, info?: HostInfo): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string } }> {
+  async sync(
+    host: Host,
+    info?: HostInfo,
+  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean }> {
     const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info, now: this.now() });
     if (!out) throw new RoutineError("unauthorized", "This computer was removed.", 401);
     return {
@@ -715,6 +733,8 @@ export class RoutineService {
         runRequested: r.runRequestedAt !== null,
       })),
       runner: this.d.runner,
+      // A person's own computer runs Ambient for them (bots are on for them); a team's server doesn't.
+      ambient: host.uid !== null && !host.teamId && (await this.botsForUser(host.uid)),
     };
   }
 

@@ -132,3 +132,22 @@ nothing.
 - `isolation: container`: `podman run` with the bot's own volume as `HOME`, its granted secrets,
   limits on memory, CPU and time. The image is built on the computer from the runner's
   Containerfile (Debian, Node, Claude Code, git, gh).
+
+## Ambient on the person's own computer
+
+When the person has a computer connected (their own, not a team's server), Ambient's chat runs
+there instead of on the gateway: as Claude Code signed in with their own Claude plan, with
+Ambient's tools and the computer's own, so it can work on that machine when asked.
+
+- `POST /v1/host/sync` answers `"ambient": true` for such a computer; the runner (0.7.0) then
+  installs `ambient-runner-ambient.service` (`ambient-runner ambient`, restarted by systemd).
+- The service keeps one Claude Code session open (`--input-format stream-json`, resumed after a
+  restart) and waits on `GET /v1/host/ambient/next` (computer token, a 25-second long poll; with
+  `?token=missing` when it has no token yet). A message comes as
+  `{ id, text, name, instructions, fresh, history, token? }`; `token` is a personal token for
+  Ambient's MCP (24 hours, renewed an hour before it ends, listed in the app's tokens as "Ambient on
+  <computer>"). The reply goes to `POST /v1/host/ambient/:id` as `{ text }` or `{ error }`.
+- It runs as the computer's routine user, in `~/ambient`, not in a container: Ambient is meant to
+  work on that machine. `set_routine_secret` is left out; secrets go in through the app.
+- No computer connected: the gateway answers with Claude and `ANTHROPIC_API_KEY` when it has one,
+  otherwise the chat says the computer isn't connected.
