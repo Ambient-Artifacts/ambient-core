@@ -6,6 +6,8 @@ import type { Directory } from "../directory.ts";
 import { RoutineError, type Actor, type RoutineService } from "../routines/service.ts";
 import { limiter } from "../limiter.ts";
 import { ChatAttachment, type AmbientChat } from "./ambient.ts";
+import type { AdminService } from "./admin.ts";
+import { ModelChoice } from "@brain/spec";
 import type { BotService } from "./service.ts";
 import type { AmbientComputers } from "./computer.ts";
 import type { Host } from "../routines/service.ts";
@@ -22,7 +24,7 @@ const Text = z.object({ text: z.string().trim().min(1).max(8_000) });
 
 export function botAppRoutes(
   r: Router,
-  d: { routines: RoutineService; bots: BotService; ambient: AmbientChat; directory: Directory; auth: RequestHandler; json: RequestHandler },
+  d: { routines: RoutineService; bots: BotService; ambient: AmbientChat; admin?: AdminService; directory: Directory; auth: RequestHandler; json: RequestHandler },
 ) {
   const actor = async (res: Response): Promise<Actor> => {
     const uid = res.locals.uid as string;
@@ -30,6 +32,69 @@ export function botAppRoutes(
   };
   const id = (req: Request) => String(req.params.id);
   const notEnabled = (res: Response) => res.status(403).json({ error: "bots_not_enabled", message: "Bots aren't switched on for this account yet." });
+
+  // A computer's default model, and what Ambient may do there (docs/bots.md).
+  // A bare `null` body clears it (express.json is strict about top-level values by default).
+  r.put("/v1/app/computers/:id/model", d.auth, express.json({ strict: false, limit: "8kb" }), async (req, res) => {
+    const body = ModelChoice.nullable().safeParse(req.body ?? null);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Pick a Claude model (claude-…), an effort and a fallback, or null for Claude Code's own." });
+      return;
+    }
+    try {
+      res.json({ computer: await d.routines.setModel(await actor(res), id(req), body.data) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.put("/v1/app/computers/:id/access", d.auth, d.json, async (req, res) => {
+    const body = z.object({ access: z.enum(["standard", "admin", "full"]) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Access is standard, admin or full." });
+      return;
+    }
+    try {
+      res.json({ computer: await d.routines.setAccess(await actor(res), id(req), body.data.access) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/computers/:id/allowed", d.auth, d.json, async (req, res) => {
+    const body = z.object({ command: z.string().min(1).max(4000) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Which command?" });
+      return;
+    }
+    try {
+      res.json({ computer: await d.routines.removeAllowed(await actor(res), id(req), body.data.command) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/approvals", d.auth, async (_req, res) => {
+    if (!d.admin) return res.json({ approvals: [] });
+    try {
+      res.json({ approvals: await d.admin.list(await actor(res)) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/approvals/:id", d.auth, d.json, async (req, res) => {
+    const body = z.object({ decision: z.enum(["once", "session", "always", "deny"]) }).safeParse(req.body);
+    if (!body.success || !d.admin) {
+      res.status(400).json({ error: "bad_request", message: "Decide once, session, always or deny." });
+      return;
+    }
+    try {
+      res.json({ approval: await d.admin.decide(await actor(res), id(req), body.data.decision) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
 
   r.get("/v1/app/features", d.auth, async (_req, res) => {
     res.json({ bots: d.routines.botsEnabled(await actor(res)) });

@@ -8,7 +8,7 @@ import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
-import { botSettings, routineSchedule, runStatus } from "./schema.js";
+import { botSettings, modelChoice, routineSchedule, runStatus } from "./schema.js";
 import { emailVouched } from "./admin.js";
 
 const MAX_ROUTINES = 50;
@@ -58,6 +58,9 @@ function hostShape(h: Doc<"routineHosts">) {
           key: h.claude.key ? { by: h.claude.key.by ?? null, at: h.claude.key.at } : null,
         }
       : null,
+    model: h.model ?? null,
+    access: h.access ?? "standard",
+    allowed: h.allowed ?? [],
     createdAt: h.createdAt,
   };
 }
@@ -465,7 +468,7 @@ export const hostSync = mutation({
     const h = await ctx.db.get(hostId);
     if (!h) return null;
     await ctx.db.patch(hostId, { lastSeenAt: now, ...(info ? { info } : {}) });
-    return { routines: (await hostRoutines(ctx, h)).map(routineShape) };
+    return { routines: (await hostRoutines(ctx, h)).map(routineShape), model: h.model ?? null };
   },
 });
 
@@ -709,5 +712,113 @@ export const hostClaude = query({
     const c = h.claude[h.claude.use];
     if (!c) return null;
     return { kind: h.claude.use, iv: c.iv, ct: c.ct, at: c.at, uid: h.userId ?? null, teamId: h.teamId ?? null };
+  },
+});
+
+// ---- a computer's model, Ambient's access there, and root commands waiting for approval ----
+
+/** The default model for the computer's runs and Ambient there (null: Claude Code's own). */
+export const setModel = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), model: v.union(modelChoice, v.null()) },
+  handler: async (ctx, { secret, uid, id, model }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    await ctx.db.patch(h._id, { model: model ?? undefined });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** What Ambient may do there. `onlyLower`: an AI app asked, which may only take access away. */
+export const setAccess = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), access: v.union(v.literal("standard"), v.literal("admin"), v.literal("full")), onlyLower: v.boolean() },
+  handler: async (ctx, { secret, uid, id, access, onlyLower }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    const rank = { standard: 0, admin: 1, full: 2 } as const;
+    if (onlyLower && rank[access] > rank[h.access ?? "standard"]) return { ok: false as const, error: "raise_in_app" };
+    await ctx.db.patch(h._id, { access });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+export const removeAllowed = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), command: v.string() },
+  handler: async (ctx, { secret, uid, id, command }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    await ctx.db.patch(h._id, { allowed: (h.allowed ?? []).filter((c) => c !== command) });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** The computer as Ambient's root commands see it: may this person act there, and how. */
+export const hostForAdmin = query({
+  args: { ...secretArg, uid: v.id("users"), id: v.string() },
+  handler: async (ctx, { secret, uid, id }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return null;
+    return { id: h._id, name: h.name, teamId: h.teamId ?? null, ownerUid: h.userId ?? null, access: h.access ?? "standard", allowed: h.allowed ?? [] };
+  },
+});
+
+const APPROVAL_TTL_MS = 10 * 60_000;
+
+export const requestApproval = mutation({
+  args: { ...secretArg, uid: v.id("users"), hostId: v.id("routineHosts"), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, hostId, iv, ct, now }) => {
+    assertService(secret);
+    const id = await ctx.db.insert("approvals", { hostId, uid, iv, ct, status: "pending", createdAt: now, expiresAt: now + APPROVAL_TTL_MS });
+    return { id, expiresAt: now + APPROVAL_TTL_MS };
+  },
+});
+
+function approvalShape(a: Doc<"approvals">, now: number) {
+  const status = a.status === "pending" && a.expiresAt < now ? ("expired" as const) : a.status;
+  return { id: a._id, hostId: a.hostId, iv: a.iv, ct: a.ct, status, decision: a.decision ?? null, createdAt: a.createdAt, expiresAt: a.expiresAt };
+}
+
+/** The person's pending approvals, newest first. */
+export const approvals = query({
+  args: { ...secretArg, uid: v.id("users"), now: v.number() },
+  handler: async (ctx, { secret, uid, now }) => {
+    assertService(secret);
+    const rows = await ctx.db
+      .query("approvals")
+      .withIndex("by_user", (q) => q.eq("uid", uid))
+      .order("desc")
+      .take(50);
+    return rows.map((a) => approvalShape(a, now)).filter((a) => a.status === "pending");
+  },
+});
+
+export const approval = query({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, id, now }) => {
+    assertService(secret);
+    const aid = ctx.db.normalizeId("approvals", id);
+    const a = aid ? await ctx.db.get(aid) : null;
+    return a && a.uid === uid ? approvalShape(a, now) : null;
+  },
+});
+
+/** The person decides; "always" also adds the command to the computer's always-allowed list. */
+export const decide = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), decision: v.union(v.literal("once"), v.literal("session"), v.literal("always"), v.literal("deny")), command: v.optional(v.string()), now: v.number() },
+  handler: async (ctx, { secret, uid, id, decision, command, now }) => {
+    assertService(secret);
+    const aid = ctx.db.normalizeId("approvals", id);
+    const a = aid ? await ctx.db.get(aid) : null;
+    if (!a || a.uid !== uid) return { ok: false as const, error: "no_such_approval" };
+    if (a.status !== "pending" || a.expiresAt < now) return { ok: false as const, error: "already_decided" };
+    // Whoever decides must still be allowed to change the computer.
+    const h = await claudeHost(ctx, uid, a.hostId);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    await ctx.db.patch(a._id, { status: decision === "deny" ? "denied" : "approved", decision, decidedAt: now });
+    if (decision === "always" && command) await ctx.db.patch(h._id, { allowed: [...new Set([...(h.allowed ?? []), command])].slice(-100) });
+    return { ok: true as const, approval: approvalShape((await ctx.db.get(a._id))!, now) };
   },
 });

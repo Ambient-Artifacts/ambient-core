@@ -13,7 +13,7 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { BotInput, RoutineSchedule, botSettings, botState, describeSchedule, nextRun, onCalendar, type BotSettings, type BotState } from "@brain/spec";
+import { BotInput, ModelChoice, RoutineSchedule, botSettings, botState, describeSchedule, nextRun, onCalendar, storedModel, type BotSettings, type BotState } from "@brain/spec";
 import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix } from "../bots/messages.ts";
 import type { BotsAccess } from "../config.ts";
 import { api, type Control } from "../control.ts";
@@ -62,6 +62,7 @@ const MESSAGES: Record<string, [string, number]> = {
   bad_token: ["That isn't a Claude plan token (sk-ant-oat…, from claude setup-token) or an Anthropic API key (sk-ant-api…).", 400],
   no_plan: ["There's no Claude plan stored for this computer yet. Add one in the Ambient app (the computer, then Claude).", 409],
   no_key: ["There's no API key stored for this computer yet. Add one in the Ambient app (the computer, then Claude).", 409],
+  raise_in_app: ["An AI app can only lower Ambient's access to a computer; raise it in the Ambient app (the computer, then Ambient's access).", 403],
   claude_admins_only: ["Only the person whose computer it is, or a team's owners and admins for its server, can change its Claude sign-in.", 403],
   no_such_bot: ["There's no such bot.", 404],
   run_over: ["This run is over; it can't ask anything anymore.", 409],
@@ -164,8 +165,14 @@ interface HostRow {
   info: HostInfo | null;
   lastSeenAt: number | null;
   claude: ClaudeAccount | null;
+  model: StoredModel | null;
+  access: Access;
+  allowed: string[];
   createdAt: number;
 }
+
+export type StoredModel = { model: string; effort?: string; fallback?: string };
+export type Access = "standard" | "admin" | "full";
 
 /** Whose Claude a computer's runs and Ambient sign in with (docs/bots.md). Never the values. */
 export interface ClaudeAccount {
@@ -212,6 +219,12 @@ export interface Computer {
   lastSeenAt: number | null;
   /** Whose Claude it signs in with: a stored plan or key, or its own (`use: "computer"`). */
   claudeAccount: ClaudeAccount;
+  /** The default model for its runs and Ambient there; null: Claude Code's own. */
+  model: { model: string; effort: string | null; fallback: string | null } | null;
+  /** What Ambient may do there (docs/bots.md). */
+  access: Access;
+  /** Root commands approved with "Always". */
+  allowed: string[];
 }
 
 export interface Routine {
@@ -247,6 +260,8 @@ export interface BotView {
   /** The secrets its runs get; null: all of its owner's. */
   secrets: string[] | null;
   report: BotSettings["report"];
+  /** Its own model; null: the computer's default. */
+  model: { model: string; effort: string | null; fallback: string | null } | null;
   state: BotState;
   openQuestion: { id: string; text: string; choices: string[] | null; askedAt: number } | null;
   /** The newest thing it said: a result, a failure or a question; `fix` for a Claude account problem. */
@@ -461,6 +476,9 @@ export class RoutineService {
       runner: h.info?.runner ?? null,
       lastSeenAt: h.lastSeenAt,
       claudeAccount: h.claude ?? { use: "computer", plan: null, key: null },
+      model: h.model ? { model: h.model.model, effort: h.model.effort ?? null, fallback: h.model.fallback ?? null } : null,
+      access: h.access ?? "standard",
+      allowed: h.allowed ?? [],
     };
   }
 
@@ -476,6 +494,7 @@ export class RoutineService {
       isolation: r.bot.isolation,
       secrets: r.bot.secrets ?? null,
       report: r.bot.report,
+      model: r.bot.model ? { model: r.bot.model.model, effort: r.bot.model.effort ?? null, fallback: r.bot.model.fallback ?? null } : null,
       state: botState({ enabled: r.enabled, ready, lastRunStatus: r.lastRun?.status ?? null, openQuestion: r.openQuestionId !== null }),
       openQuestion: q ? { id: String(q.m.id), text: q.body.text, choices: q.body.choices ?? null, askedAt: q.m.createdAt } : null,
       lastMessage: last ? { text: last.body.text, kind: last.m.kind, at: last.m.createdAt, fix: claudeFix(last.m.kind, last.body.text, computer) } : null,
@@ -786,6 +805,29 @@ export class RoutineService {
     return c ? `${c.kind}:${c.at}` : null;
   }
 
+  /** The default model for the computer's runs and Ambient there; null: Claude Code's own. */
+  async setModel(actor: Actor, ref: string, model: ModelChoice | null): Promise<Computer> {
+    const h = await this.claudeComputer(actor, ref);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.setModel, { uid: actor.uid as never, id: h.id, model: model ? storedModel(model) : null }));
+  }
+
+  /** What Ambient may do on the computer. An AI app (`fromAI`) may only lower it. */
+  async setAccess(actor: Actor, ref: string, access: Access, opts: { fromAI?: boolean } = {}): Promise<Computer> {
+    const h = await this.claudeComputer(actor, ref);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.setAccess, { uid: actor.uid as never, id: h.id, access, onlyLower: Boolean(opts.fromAI) }));
+  }
+
+  async removeAllowed(actor: Actor, ref: string, command: string): Promise<Computer> {
+    const h = await this.claudeComputer(actor, ref);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.removeAllowed, { uid: actor.uid as never, id: h.id, command }));
+  }
+
+  /** A computer the user may change, for Ambient's root commands there. */
+  async adminComputer(actor: Actor, ref: string): Promise<Computer & { hostTeamId: string | null }> {
+    const h = await this.claudeComputer(actor, ref);
+    return { ...this.computer(h, actor), hostTeamId: h.teamId };
+  }
+
   /** The computer's chosen sign-in as environment (only the computer asks, with its token). */
   async hostClaude(host: Host): Promise<{ version: string | null; env: Record<string, string> }> {
     const c = await this.d.control.q(api.routines.hostClaude, { hostId: host.id as never });
@@ -821,7 +863,7 @@ export class RoutineService {
   async sync(
     host: Host,
     info?: HostInfo,
-  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null }> {
+  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null; model: StoredModel | null }> {
     const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info, now: this.now() });
     if (!out) throw new RoutineError("unauthorized", "This computer was removed.", 401);
     return {
@@ -838,6 +880,8 @@ export class RoutineService {
       ambient: await this.ambientOn(host),
       // Which Claude sign-in it uses, as a version: the computer fetches it when this changes.
       claude: await this.claudeVersion(host),
+      // The default model for its runs (a bot's own wins; startRun says).
+      model: (out as unknown as { model?: StoredModel | null }).model ?? null,
     };
   }
 

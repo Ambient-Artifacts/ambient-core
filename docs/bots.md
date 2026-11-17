@@ -214,3 +214,58 @@ WebP), PDFs and text files (text/*, JSON, CSV, Markdown). The message in the his
 files came with it ("📎 plan.pdf"); the files themselves aren't kept in Ambient: on a computer they
 are saved in the person's Ambient folder there and Claude Code reads them; on the server they go
 to Claude with the message. Refused: 400 `bad_attachment` with the reason.
+
+## A computer's model, and what Ambient may do there
+
+### Model
+
+A computer has a default model for its bots and loops (and Ambient there): `model` (e.g.
+`claude-opus-5-5`), `effort` (`low`, `medium`, `high`, `xhigh`, `max`, or null for the model's
+default) and `fallback` (a model Claude Code switches to when the first refuses or is overloaded,
+or null). None set: Claude Code's own default. A bot can override it with `bot.model` (same
+shape; null: the computer's default).
+
+Computers in `GET /v1/app/routines` carry `model`: `{ "model": "claude-opus-5-5", "effort":
+"medium", "fallback": "claude-opus-4-6" }` or null. `PUT /v1/app/computers/:id/model` with that
+object (or `null` to clear) answers `{ "computer": Computer }`. Bots: `bot.model` in the
+create/update input and in the routine's `bot` (null when it follows the computer).
+
+The models offered in the app: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`,
+`claude-opus-4-6`. The server accepts any `claude-…` id.
+
+### Access: Standard, Admin, Full root
+
+Computers carry `access`: `standard` (default), `admin` or `full`, and `allowed`: the commands
+approved with "Always" (exact command lines).
+
+- **standard:** Ambient works as the computer's routine user with its tools; it can't run commands
+  as root.
+- **admin:** Ambient may ask to run a command as root (`run_on_computer`); it runs only after an
+  approval (or when it's in `allowed`).
+- **full:** root commands run without asking. Only set in the app.
+
+`PUT /v1/app/computers/:id/access` with `{ "access": "standard" | "admin" | "full" }` (raising it
+only from the app; an AI app may only lower it). `DELETE /v1/app/computers/:id/allowed` with
+`{ "command": "…" }` removes an always-approved command. Who: the computer's person, or a team's
+owners and admins for its server.
+
+### Approval cards
+
+`GET /v1/app/approvals` → `{ "approvals": [Approval] }`, the pending ones for this person (newest
+first):
+
+```json
+{ "id": "…", "computer": { "id": "…", "name": "Ambient's server", "team": "Ambient" },
+  "command": "apt-get install -y ffmpeg", "reason": "To cut the demo video.",
+  "requestedAt": 1763380000000, "expiresAt": 1763380600000 }
+```
+
+`POST /v1/app/approvals/:id` with `{ "decision": "once" | "session" | "always" | "deny" }` answers
+`{ "approval": Approval & { "status": "approved" | "denied" } }`. `session`: approved for this
+command until Ambient's session there restarts; `always`: added to the computer's `allowed`.
+Approvals expire after 10 minutes (status `expired`).
+
+A new approval sends a push: title "Ambient wants to run a command", body "<computer>: <command>",
+`url: ambient://approval/<id>`, collapse id `approval-<id>`. The app shows pending approvals as
+cards in Ambient's chat, above the message bar: the computer, the command in monospace, the
+reason, and buttons **Allow once**, **Allow for this session**, **Always allow**, **Deny**.

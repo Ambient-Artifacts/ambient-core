@@ -33,6 +33,7 @@ import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
 import { ambientHostRouter, botRunRouter } from "./bots/route.ts";
 import { AmbientComputers } from "./bots/computer.ts";
+import { AdminService } from "./bots/admin.ts";
 import { AppChannel } from "./channels/channel.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadRunner, RoutineService } from "./routines/service.ts";
@@ -120,7 +121,8 @@ export function createApp(deps: AppDeps) {
     teamBySlug: (slug) => directory.teamBySlug(slug),
   });
   // Bots talk to people through channels; the app is the first (docs/bots.md).
-  const bots = new BotService({ routines, channels: [new AppChannel(notifier)] });
+  let startNow: ((hostId: string, routineId: string) => boolean) | undefined;
+  const bots = new BotService({ routines, channels: [new AppChannel(notifier)], startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false });
   const userName = async (uid: string) => (await directory.user(uid))?.name;
   const readers: ReaderSource = {
     personal: (uid) => personal.reader(uid),
@@ -192,13 +194,16 @@ export function createApp(deps: AppDeps) {
   // Ambient, the master bot: Claude with the person's own MCP server, every scope, as /mcp gives it.
   // Ambient on a person's own computer (their Claude plan) when one is connected; the server's key otherwise.
   const computers = new AmbientComputers({ pats, scopes: MCP_SCOPES });
+  startNow = (hostId, routineId) => computers.start(hostId, routineId);
+  // Root commands Ambient asks for, run by the computer's runner after an approval (or at once on full access).
+  const admin = new AdminService({ control, keys: routines.keys, routines, computers, notifier });
   const ambient = new AmbientChat({
     control,
     keys: routines.keys,
     mcp: async (uid) => {
       const principal = { uid, scopes: new Set(MCP_SCOPES), via: "pat" as const, clientId: "ambient-chat", personal: true, teams: await directory.teamsOf(uid) };
       const personal = await personalInstructions(principal, readers, { name: await userName(uid).catch(() => undefined) });
-      return buildMcpServer({ principal, readers, routines, bots, settings, voices, version: VERSION, personal });
+      return buildMcpServer({ principal, readers, routines, bots, admin, settings, voices, version: VERSION, personal });
     },
     apiKey: deps.ambient?.apiKey ?? process.env.ANTHROPIC_API_KEY,
     model: config.ambientModel ?? "claude-sonnet-5-5",
@@ -206,7 +211,7 @@ export function createApp(deps: AppDeps) {
     computers,
     computersOf: (uid) => routines.computersOf(uid),
   });
-  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, settings, voices, version: VERSION, userName }));
+  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
   app.use(botRunRouter({ bots }));
@@ -229,6 +234,7 @@ export function createApp(deps: AppDeps) {
       routines,
       bots,
       ambient,
+      admin,
       appleRevoke: deps.appleRevoke ?? appleRevoker(config.appleRevoke, deps.fetchImpl),
       microsoftClientId: microsoft ? config.microsoftClientIds?.[0] : undefined,
       googleClientId: google ? config.googleClientIds?.[0] : undefined,

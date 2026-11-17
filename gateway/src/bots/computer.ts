@@ -11,8 +11,12 @@ import { randomUUID } from "node:crypto";
 import type { PatService } from "../auth/pats.ts";
 import type { Turn } from "../ai/loop.ts";
 
+/** Work for the computer that isn't a chat message: a root command, or a bot run to start now. */
+export type ControlJob = { id: string; kind: "exec"; command: string; timeoutS: number } | { id: string; kind: "start"; routineId: string };
+
 export interface ComputerJob {
   id: string;
+  kind?: "chat";
   /** Whose chat it is (a team's server runs Ambient for each of its people, one session each). */
   uid: string;
   /** What the person wrote. */
@@ -30,7 +34,7 @@ export interface ComputerJob {
 }
 
 interface Waiter {
-  resolve: (job: ComputerJob | null) => void;
+  resolve: (job: ComputerJob | ControlJob | null) => void;
   timer: NodeJS.Timeout;
 }
 
@@ -41,7 +45,7 @@ const TOKEN_RENEW_MS = 3600_000;
 const REPLY_TIMEOUT_MS = 15 * 60_000;
 
 export class AmbientComputers {
-  private queues = new Map<string, ComputerJob[]>();
+  private queues = new Map<string, (ComputerJob | ControlJob)[]>();
   private waiters = new Map<string, Waiter>();
   private seen = new Map<string, number>();
   private pending = new Map<string, { hostId: string; resolve: (text: string) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
@@ -86,19 +90,53 @@ export class AmbientComputers {
       timer.unref();
       this.pending.set(full.id, { hostId: host.id, resolve, reject, timer });
     });
-    const waiter = this.waiters.get(host.id);
-    if (waiter) {
-      this.waiters.delete(host.id);
-      clearTimeout(waiter.timer);
-      waiter.resolve(full);
-    } else {
-      this.queues.set(host.id, [...(this.queues.get(host.id) ?? []), full]);
-    }
+    this.hand(host.id, full);
     return reply;
   }
 
+  /** To the computer's waiting long poll, or first in its queue. */
+  private hand(hostId: string, job: ComputerJob | ControlJob) {
+    const waiter = this.waiters.get(hostId);
+    if (waiter) {
+      this.waiters.delete(hostId);
+      clearTimeout(waiter.timer);
+      waiter.resolve(job);
+    } else {
+      this.queues.set(hostId, [...(this.queues.get(hostId) ?? []), job]);
+    }
+  }
+
+  /** Run a command as root on the computer (its runner, as root) and wait for its output. */
+  exec(hostId: string, command: string, timeoutS = 120): Promise<{ code: number; output: string }> {
+    const job: ControlJob = { id: randomUUID(), kind: "exec", command, timeoutS };
+    const done = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(job.id);
+        reject(new Error("the computer didn't answer"));
+      }, (timeoutS + 30) * 1000);
+      timer.unref();
+      this.pending.set(job.id, { hostId, resolve, reject, timer });
+    });
+    this.hand(hostId, job);
+    return done.then((text) => {
+      try {
+        const out = JSON.parse(text) as { code?: number; output?: string };
+        return { code: typeof out.code === "number" ? out.code : -1, output: String(out.output ?? "") };
+      } catch {
+        return { code: -1, output: text };
+      }
+    });
+  }
+
+  /** Start a bot's run on the computer now (a message to it), instead of at its next check. */
+  start(hostId: string, routineId: string): boolean {
+    if (!this.connected(hostId)) return false;
+    this.hand(hostId, { id: randomUUID(), kind: "start", routineId });
+    return true;
+  }
+
   /** The computer waits up to `waitMs` for the next message (null: nothing yet, ask again). */
-  next(hostId: string, waitMs: number): Promise<ComputerJob | null> {
+  next(hostId: string, waitMs: number): Promise<ComputerJob | ControlJob | null> {
     this.seen.set(hostId, this.now());
     const queued = this.queues.get(hostId);
     if (queued?.length) {
@@ -153,7 +191,7 @@ export class AmbientComputers {
   }
 
   /** A message handed to a connection that had just closed goes first in line again. */
-  requeue(hostId: string, job: ComputerJob) {
+  requeue(hostId: string, job: ComputerJob | ControlJob) {
     this.queues.set(hostId, [job, ...(this.queues.get(hostId) ?? [])]);
   }
 }

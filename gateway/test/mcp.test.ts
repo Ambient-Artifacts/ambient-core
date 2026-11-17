@@ -50,13 +50,14 @@ describe("transport", () => {
 });
 
 describe("tools", () => {
-  it("lists twenty-two tools; save_note, log_work, the routine tools, the settings changes, forget_my_voice and use_claude_account write", async () => {
+  it("lists twenty-six tools; save_note, log_work, the routine tools, the settings changes, forget_my_voice, use_claude_account and the computer admin tools write", async () => {
     const client = await mcpClient(`${s.origin}/mcp`, lenaAll);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "brief",
       "change_preferences",
       "change_team_settings",
+      "command_status",
       "create_routine",
       "delete_routine",
       "fetch",
@@ -69,15 +70,18 @@ describe("tools", () => {
       "list_recent",
       "list_routines",
       "log_work",
+      "run_on_computer",
       "run_routine",
       "save_note",
       "search",
+      "set_computer_access",
+      "set_computer_model",
       "set_routine_secret",
       "transcript",
       "update_routine",
       "use_claude_account",
     ]);
-    const writers = ["save_note", "log_work", "create_routine", "update_routine", "run_routine", "delete_routine", "set_routine_secret", "change_team_settings", "change_preferences", "forget_my_voice", "use_claude_account"];
+    const writers = ["save_note", "log_work", "create_routine", "update_routine", "run_routine", "delete_routine", "set_routine_secret", "change_team_settings", "change_preferences", "forget_my_voice", "use_claude_account", "set_computer_model", "set_computer_access", "run_on_computer", "command_status"];
     for (const t of tools) expect(t.annotations?.readOnlyHint, t.name).toBe(!writers.includes(t.name));
     await client.close();
   });
