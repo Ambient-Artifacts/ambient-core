@@ -35,6 +35,7 @@ import { ambientHostRouter, botRunRouter } from "./bots/route.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
+import { Automations } from "./bots/automations.ts";
 import { AmbientComputers } from "./bots/computer.ts";
 import { AdminService } from "./bots/admin.ts";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -79,7 +80,7 @@ export interface AppDeps {
   /** Tests: the Teams bots against a fake Bot Framework, with their state in memory. */
   msteams?: { fetchImpl?: typeof fetch; verifier?: InboundVerifier; apiKey?: string };
   /** Tests: Ambient's chat against a fake Anthropic; how long it may look at a bot's question; no heartbeat timer. */
-  ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number; noHeartbeat?: boolean };
+  ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number; noHeartbeat?: boolean; turnMs?: number };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
   microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
@@ -241,7 +242,16 @@ export function createApp(deps: AppDeps) {
   ambient.decisionView = (uid, row) => decisions.view(uid, row);
   onQuestion = (q) => void decisions.onBotQuestion(q);
   const heartbeat = new Heartbeat({ control, ambient, bots: config.bots, notifier });
-  if (!deps.ambient?.noHeartbeat) heartbeat.start();
+  // What Amb does on its own: templates on a schedule or an event (docs/bots.md, "Automations").
+  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, heartbeat, notifier, bots: config.bots, actorFor, turnMs: deps.ambient?.turnMs });
+  folders.automations = automations;
+  routines.onBotEvent = (e) => void automations.onEvent(e);
+  bots.onEvent = (e) => void automations.onEvent(e);
+  heartbeat.watching = (uid) => automations.watching(uid);
+  if (!deps.ambient?.noHeartbeat) {
+    heartbeat.start();
+    automations.start();
+  }
   app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
@@ -268,6 +278,7 @@ export function createApp(deps: AppDeps) {
       admin,
       decisions,
       folders,
+      onMeetingNote: (e) => void automations.onEvent({ kind: "meeting_note", ...e }),
       appleRevoke: deps.appleRevoke ?? appleRevoker(config.appleRevoke, deps.fetchImpl),
       microsoftClientId: microsoft ? config.microsoftClientIds?.[0] : undefined,
       googleClientId: google ? config.googleClientIds?.[0] : undefined,
@@ -305,5 +316,5 @@ export function createApp(deps: AppDeps) {
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });
 
-  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, folders, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
+  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, folders, automations, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
 }

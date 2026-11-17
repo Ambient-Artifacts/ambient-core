@@ -12,6 +12,7 @@ import type { Channel, Inbound } from "../channels/channel.ts";
 import { claudeFix, openMessage, sealMessage, type ClaudeFix } from "./messages.ts";
 import { RoutineError, RUN_TOKEN_PREFIX, type Actor, type Routine, type RoutineService } from "../routines/service.ts";
 import type { Owner } from "../routines/keys.ts";
+import type { AutomationEvent } from "./automations.ts";
 
 export interface ThreadMessage {
   id: string;
@@ -51,6 +52,9 @@ function refused(code: string, message: string, status = 400) {
 }
 
 export class BotService {
+  /** What happened in a bot's thread, for automations (docs/bots.md, "Automations"). */
+  onEvent?: (e: AutomationEvent) => void;
+
   constructor(
     private d: {
       routines: RoutineService;
@@ -150,6 +154,10 @@ export class BotService {
     }
     const routine = await this.d.routines.get(actor, id);
     if (routine.computer) this.d.startNow?.(routine.computer.id, id);
+    // The owner wrote to the bot (not an answer to its question, not Amb): maybe a correction.
+    if (!opts.asAmbient && (out.message as unknown as MessageRow).kind === "message") {
+      this.onEvent?.({ kind: "bot_corrected", uid: actor.uid, routineId: id, bot: r.name, text: body, messageId: String((out.message as unknown as MessageRow).id) });
+    }
     return { message: await this.message(owner, out.message as unknown as MessageRow, actor.uid), routine };
   }
 
@@ -178,6 +186,7 @@ export class BotService {
     const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks });
     const out = await this.d.routines.control.m(api.bots.ask, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
+    this.onEvent?.({ kind: "bot_asked", uid: String(out.notify), routineId: String(out.routineId), bot: who.name, text, questionId: String(out.questionId) });
     // Ambient looks first (DecisionService): it answers for the owner, or brings it to them.
     if (this.d.onQuestion) {
       this.d.onQuestion({

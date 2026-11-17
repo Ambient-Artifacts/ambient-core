@@ -66,6 +66,12 @@ export const AMBIENT_TOOLS = new Set([
   "bot_files",
   "read_bot_file",
   "write_bot_file",
+  "list_automations",
+  "create_automation",
+  "update_automation",
+  "delete_automation",
+  "run_automation",
+  "propose_bot_change",
 ]);
 
 const HISTORY = 20;
