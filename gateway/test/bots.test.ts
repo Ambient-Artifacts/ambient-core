@@ -400,6 +400,34 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     expect((out.content as { text: string }[])[0]!.text).toBe("Lena Vogel answered: Yes");
     p.kill();
   }, 30_000);
+
+  it("hands something to its owner without waiting, and an old open question doesn't swallow a later run's result", async () => {
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Hander", prompt: "x", schedule: daily, bot: { isolation: "host" } });
+    const id = (made.json.routine as R).id;
+    const first = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    const p = spawn(process.execPath, [RUNNER, "bot-mcp"], { env: { PATH: process.env.PATH ?? "", AMBIENT_SERVER: s.origin, AMBIENT_RUN_TOKEN: String(first.json.runToken), AMBIENT_ASK_WAIT_S: "20" } });
+    const replies = new Map<number, unknown>();
+    createInterface({ input: p.stdout }).on("line", (l) => {
+      const m = JSON.parse(l) as { id: number; result?: unknown };
+      replies.set(m.id, m.result);
+    });
+    const send = (m: unknown) => p.stdin.write(`${JSON.stringify(m)}\n`);
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+    const started = Date.now();
+    send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "ask_owner", arguments: { question: "PR #19 is ready for 30 Nov. Merge it?", choices: ["Merge", "Changes"], wait: false } } });
+    for (let i = 0; i < 200 && !replies.has(2); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(((replies.get(2) as { content: { text: string }[] }).content[0]!.text)).toContain("Handed to your owner");
+    expect(Date.now() - started).toBeLessThan(5_000);
+    p.kill();
+    expect((await one(id)).bot?.openQuestion?.text).toBe("PR #19 is ready for 30 Nov. Merge it?");
+    // This run asked: its result stays out of the thread (the question is the news).
+    await hostCall(host, "POST", `/v1/host/runs/${(first.json.run as { id: string }).id}`, { status: "succeeded", summary: "Opened PR #19." });
+    expect((await thread(id)).messages.map((m) => m.text)).not.toContain("Opened PR #19.");
+    // The next run, with the question still open, reports what it did.
+    const second = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    await hostCall(host, "POST", `/v1/host/runs/${(second.json.run as { id: string }).id}`, { status: "succeeded", summary: "Opened PR #20 too." });
+    expect((await thread(id)).messages.map((m) => m.text)).toContain("Opened PR #20 too.");
+  }, 30_000);
 });
 
 describe("signing in", () => {

@@ -144,6 +144,13 @@ nothing.
 - `POST /v1/bot/ask` (bearer: run token) with `{ "question": "…", "choices"?: [..] }` →
   `{ "id": "…" }`; `GET /v1/bot/questions/:id` (run token) → `{ "answer": "…" | null }`. The run
   token works while its run is going.
+- `ask_owner` with `wait: false` (runner 0.9.1) hands something to the owner without waiting
+  (a pull request ready to merge, a post to publish): the run gets an answer at once and
+  finishes; the question goes the usual way (Amb looks first, then a decision with a push), and
+  the answer starts the next run. Every bot's instructions say to hand over what only the owner
+  can do this way, not only to mention it in the last message.
+- A run's result is held back from the thread only when that same run asked a question (the
+  question is the news); a question left open from an earlier run doesn't swallow it.
 - The runner (0.6.0) gives Claude Code an `ask_owner` tool (a small stdio MCP server, the runner
   file itself: `ambient-runner bot-mcp`). It waits up to three minutes for an answer; with none,
   Claude ends the run, and the answer later starts a run that resumes the same session.
