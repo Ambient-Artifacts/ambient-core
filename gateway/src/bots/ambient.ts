@@ -68,6 +68,8 @@ export const AMBIENT_TOOLS = new Set([
   "bot_files",
   "read_bot_file",
   "write_bot_file",
+  "github_webhook",
+  "watch_github",
   "list_automations",
   "create_automation",
   "update_automation",

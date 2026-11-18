@@ -133,6 +133,33 @@ export const note = mutation({
   },
 });
 
+/**
+ * Something from outside wakes a bot (docs/bots.md, "GitHub events and the PR gate"): a message in
+ * its thread from `authorName` (e.g. "GitHub") and, with `run`, a run that starts with it. A
+ * message the owner left that no run has taken yet stays the one the run starts with; this one is
+ * then among what's new in its thread. Returns the computer that runs it (to start it at once).
+ */
+export const wake = mutation({
+  args: { ...secretArg, id: v.string(), iv: v.string(), ct: v.string(), authorName: v.string(), run: v.boolean(), now: v.number() },
+  handler: async (ctx, { secret, id, iv, ct, authorName, run, now }) => {
+    assertService(secret);
+    const rid = ctx.db.normalizeId("routines", id);
+    const r = rid ? await ctx.db.get(rid) : null;
+    if (!r?.bot) return { ok: false as const, error: "no_such_bot" };
+    const messageId = await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "user", kind: "message", iv, ct, authorName, createdAt: now });
+    let hostId: string | null = r.hostId ?? null;
+    if (r.teamId) {
+      const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
+      hostId = server?._id ?? null;
+    }
+    if (run && r.enabled) {
+      const pending = r.pendingMessageId ? await ctx.db.get(r.pendingMessageId) : null;
+      await ctx.db.patch(r._id, { ...(pending ? {} : { pendingMessageId: messageId }), runRequestedAt: now, runRequestedBy: authorName, updatedAt: now });
+    }
+    return { ok: true as const, message: messageShape((await ctx.db.get(messageId))!), hostId, enabled: r.enabled };
+  },
+});
+
 async function runByToken(ctx: { db: QueryCtx["db"] }, runTokenHash: string) {
   const run = await ctx.db.query("routineRuns").withIndex("by_run_token", (q) => q.eq("runTokenHash", runTokenHash)).unique();
   if (!run || run.status !== "running") return null;

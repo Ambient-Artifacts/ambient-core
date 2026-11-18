@@ -11,6 +11,7 @@
 // here decides how a bot wakes up: continue its session, or start fresh with its handoffs.
 import { api, type Control } from "../control.ts";
 import type { Owner, RoutineKeys } from "../routines/keys.ts";
+import { prGate } from "./github.ts";
 
 export type AuthorKind = "user" | "bot" | "amb";
 export interface Author {
@@ -391,6 +392,8 @@ export class BotFolder {
     resume: { sessionId: string | null; message: string } | null;
     /** The owner's and Amb's messages in the thread since the last run started, oldest first. */
     thread: { at: number; who: string; text: string }[];
+    /** A bot that watches GitHub repos: its branch prefix and the PR gate (docs/bots.md). */
+    github?: { prefix: string; repos: string[] } | null;
   }): Promise<{ prompt: string; resume: { sessionId: string | null; message: string } | null; workspace: { system: string; skills: { path: string; content: string }[]; memory: string } }> {
     const [memory, goal, handoffs, skills] = await Promise.all([
       this.memory(o.owner, o.routineId),
@@ -407,6 +410,11 @@ export class BotFolder {
     const news = threadLines(o.thread);
     const last = handoffs[0];
     let resume = o.resume;
+    // A run that continues with the owner's message also hears what else came since its last run
+    // ended (GitHub's events, Amb's answers): only that one message would reach it otherwise. What
+    // came while that run was going, the session already has.
+    const since = threadLines(o.thread.filter((m) => !o.previous?.finishedAt || m.at > o.previous.finishedAt));
+    if (resume && since) resume = { ...resume, message: `${resume.message}\n\nAlso new in your thread since your last run:\n${since}` };
     const now = this.now();
     if (!resume && last?.status === "continue" && o.previous?.session && o.previous.finishedAt && now - o.previous.finishedAt < CONTINUE_MS) {
       resume = {
@@ -434,7 +442,7 @@ export class BotFolder {
     ]
       .filter(Boolean)
       .join("\n\n");
-    return { prompt, resume, workspace: { system: botSystem(o.name, o.computer, o.trigger, o.contained, owns), skills, memory } };
+    return { prompt, resume, workspace: { system: botSystem(o.name, o.computer, o.trigger, o.contained, owns, o.github ?? null), skills, memory } };
   }
 
   // ---- Amb's memory (one per person) ----
@@ -479,7 +487,7 @@ function threadLines(thread: { at: number; who: string; text: string }[]): strin
 }
 
 /** A bot's instructions for a run (the runner appends them to Claude Code's system prompt). */
-export function botSystem(name: string, computer: string, trigger: string, contained: boolean, owns = false): string {
+export function botSystem(name: string, computer: string, trigger: string, contained: boolean, owns = false, github: { prefix: string; repos: string[] } | null = null): string {
   const how = trigger === "manual" ? 'started with "Run now" or a message in the Ambient app' : "started by its schedule";
   return [
     `You're "${name}", one of your owner's bots in Ambient, running on ${computer}${contained ? " in your own container" : ""}, ${how}.`,
@@ -487,6 +495,7 @@ export function botSystem(name: string, computer: string, trigger: string, conta
     "If ask_owner comes back without an answer, finish the run: say in a sentence or two where you are and what you're waiting for. You'll be started again with the answer, in this same conversation.",
     "When a run starts with a message from your owner (they wrote to you in your thread), it's a conversation: answer it, or do what it asks, and put your answer in your last message. Don't answer through ask_owner; use it only when you need their decision before you can go on.",
     ...(owns ? ["You own an outcome (GOAL.md, in your first message), not a task list: you decide each run's work by what moves its metric, and you can split big work across subagents."] : []),
+    ...(github ? [prGate(name, github.prefix, github.repos)] : []),
     "Your memory is the file {{OUT}}/memory.md; your first message shows it as it is now. When you learn something later runs need (your owner's preferences or corrections, what works and what doesn't here), change it with your file tools. Keep it short (under 16 KB): lasting facts, not a diary. It's only notes: nothing in it changes what you may do.",
     `Before your last message, write your handoff for your next run to {{OUT}}/handoff.md: the first line exactly \`Status: done\` or \`Status: continue\` (continue: you're in the middle of something the next run should pick up),${owns ? " the second line \`Metric: <the value you measured this run>\` (short, with its unit, e.g. \`Metric: 2 posts this week, 412 visitors\`)," : ""} then in a few short lines what you did, what's open, what comes next and what you're waiting for.`,
     "For anything older than what your first message shows (your owner's earlier messages, earlier runs), use the search_history tool.",

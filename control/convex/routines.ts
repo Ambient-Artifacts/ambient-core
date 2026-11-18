@@ -530,7 +530,7 @@ export const startRun = mutation({
     // A bot gets only the secrets granted to it; a loop (or a bot from before grants) all of its owner's.
     const granted = r.bot?.secrets ? new Set(r.bot.secrets) : null;
     const secrets = (await secretRows(ctx, r.userId, r.teamId)).filter((s) => !granted || granted.has(s.name)).map((s) => ({ name: s.name, iv: s.valueIv, ct: s.valueCt }));
-    const resume = pending ? { id: pending._id, sessionId: r.lastSessionId ?? null, kind: pending.kind, iv: pending.iv, ct: pending.ct, authorName: pending.authorName ?? null } : null;
+    const resume = pending ? { id: pending._id, sessionId: r.lastSessionId ?? null, kind: pending.kind, iv: pending.iv, ct: pending.ct, authorName: pending.authorName ?? null, authorId: pending.authorId ?? null } : null;
     return { ok: true as const, runId, trigger, routine: routineShape(r), secrets, resume, previous };
   },
 });

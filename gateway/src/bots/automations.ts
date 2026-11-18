@@ -28,7 +28,7 @@ import { openMessage } from "./messages.ts";
 
 // ---- what an automation is ----
 
-export const EVENT_KINDS = ["bot_failed", "bot_corrected", "bot_asked_twice", "decision_waiting", "meeting_note"] as const;
+export const EVENT_KINDS = ["bot_failed", "bot_corrected", "bot_asked_twice", "decision_waiting", "meeting_note", "github_ci_failed"] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 export const DELIVERIES = ["chat", "chat_silent", "thread"] as const;
 export type Delivery = (typeof DELIVERIES)[number];
@@ -181,7 +181,8 @@ export type AutomationEvent =
   | { kind: "bot_failed"; uid: string; routineId: string; bot: string; text: string; runId: string }
   | { kind: "bot_corrected"; uid: string; routineId: string; bot: string; text: string; messageId: string }
   | { kind: "bot_asked"; uid: string; routineId: string; bot: string; text: string; questionId: string }
-  | { kind: "meeting_note"; uid: string; title: string; ref: string; team: string | null };
+  | { kind: "meeting_note"; uid: string; title: string; ref: string; team: string | null }
+  | { kind: "github_ci_failed"; uid: string; repo: string; branch: string; url: string; sha: string };
 
 const KIND = "automation";
 const STATE = "automation-state";
@@ -230,6 +231,7 @@ export function describeTrigger(t: Trigger): string {
     bot_asked_twice: "a bot asks the same thing twice",
     decision_waiting: `a decision waits over ${t.hours ?? 4} hours`,
     meeting_note: "a recorded meeting lands in your brain",
+    github_ci_failed: "CI fails on the main branch of a repo your bots watch",
   };
   const list = t.events.map((e) => words[e]);
   return `When ${list.length > 1 ? `${list.slice(0, -1).join(", ")} or ${list.at(-1)}` : list[0]}`;
@@ -603,6 +605,10 @@ export class Automations {
         key = `corrected:${e.messageId}`;
         facts = `They wrote to the bot "${e.bot}" (id ${e.routineId}) after its result: “${e.text.slice(0, 1500)}”.`;
         routineId = e.routineId;
+      } else if (e.kind === "github_ci_failed") {
+        kind = "github_ci_failed";
+        key = `ci:${e.repo}:${e.sha}`;
+        facts = `CI failed on ${e.branch} of ${e.repo} (a repo their bots watch): ${e.url}`;
       } else {
         kind = "meeting_note";
         key = `meeting:${e.ref}`;

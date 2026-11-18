@@ -364,6 +364,8 @@ const isManager = (t: Team) => t.role === "owner" || t.role === "admin";
 export class RoutineService {
   /** A bot's run failed: automations may listen (docs/bots.md, "Automations"). Set once they're up. */
   onBotEvent?: (e: AutomationEvent) => void;
+  /** A bot that watches GitHub repos: its branch prefix and repos, for the PR gate in its instructions (app.ts sets it). */
+  githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[] } | null>;
 
   constructor(
     private d: {
@@ -710,6 +712,21 @@ export class RoutineService {
    * A bot's folder for someone (docs/bots.md, "A bot's folder"): its owner, and AGENTS.md (the
    * prompt). `write`: only who may change the bot.
    */
+  /**
+   * Whose bots someone may change: their own (no team), or a team's they own or admin. For what
+   * belongs to an owner rather than one bot (the GitHub webhook, docs/bots.md).
+   */
+  botOwner(actor: Actor, team?: string | null): Owner {
+    if (team) {
+      const t = this.managedTeam(actor, team);
+      if (!this.botsOn({ slug: t.slug })) throw refused("bots_not_enabled");
+      return { kind: "team", teamId: t.id };
+    }
+    this.assertPersonalWrite(actor);
+    if (!this.personalBots(actor)) throw refused("bots_not_enabled");
+    return { kind: "user", uid: actor.uid };
+  }
+
   async folderOf(actor: Actor, id: string, write: boolean): Promise<{ owner: Owner; routineId: string; name: string; agents: string; teamId: string | null }> {
     const { r } = await this.row(actor, id);
     if (!r.bot) throw new RoutineError("no_such_bot", "There's no such bot.", 404);
@@ -1030,7 +1047,12 @@ export class RoutineService {
       const who = out.resume.authorName ?? "Your owner";
       resume = {
         sessionId: out.resume.sessionId,
-        message: out.resume.kind === "answer" ? `${who} answered your question: ${body.text}` : `${who} wrote to you in the Ambient app: ${body.text}`,
+        message:
+          out.resume.kind === "answer"
+            ? `${who} answered your question: ${body.text}`
+            : out.resume.authorName === "GitHub" && !(out.resume as { authorId?: string | null }).authorId
+              ? body.text
+              : `${who} wrote to you in the Ambient app: ${body.text}`,
       };
     }
     let prompt = await this.d.keys.open(owner, "routine:prompt", r.promptIv, r.promptCt);
@@ -1039,7 +1061,8 @@ export class RoutineService {
       const previous = (out as unknown as { previous: { session: string | null; startedAt: number | null; finishedAt: number | null } | null }).previous;
       const pendingId = (out.resume as { id?: string } | null)?.id ? String((out.resume as { id: string }).id) : null;
       const thread = await this.threadSince(owner, r.id, previous?.startedAt ?? 0, pendingId);
-      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread });
+      const github = this.githubFor ? await this.githubFor(owner, r.id).catch(() => null) : null;
+      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github });
       prompt = woken.prompt;
       resume = woken.resume;
       workspace = woken.workspace;

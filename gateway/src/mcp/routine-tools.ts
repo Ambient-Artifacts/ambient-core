@@ -10,6 +10,7 @@ import type { AdminService, CommandResult } from "../bots/admin.ts";
 import type { Decision, DecisionService } from "../bots/decisions.ts";
 import type { Folders } from "../bots/files.ts";
 import { FolderError, type Author } from "../bots/folder.ts";
+import { GitHubError } from "../bots/github.ts";
 import { historyLines } from "../bots/history.ts";
 import { AutomationInput, EVENT_KINDS, ProposedSettings, TEMPLATES, type AutomationView } from "../bots/automations.ts";
 import type { Principal } from "../auth/bearer.ts";
@@ -178,7 +179,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof RoutineError || err instanceof FolderError) return error(err.message);
+      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError) return error(err.message);
       throw err;
     }
   };
@@ -517,6 +518,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
   }
 
   if (hasBots && folders) registerFolderTools(server, principal, actor, folders, source, guard);
+  if (hasBots && folders?.github) registerGitHubTools(server, principal, actor, routines, folders.github, guard);
 
   if (!hasBots || !bots) return;
 
@@ -829,6 +831,63 @@ function registerAutomationTools(server: McpServer, actor: Actor, auto: import("
         }
         const d = await auto.propose(actor, { routineId: id, bot: "", ...(path !== undefined ? { path, content } : {}), ...(settings ? { settings } : {}), why });
         return result(`Proposed (decision ${d.id}): they'll see it in the chat with Apply / Not now.`, { decision: d });
+      }),
+  );
+}
+
+// ---- GitHub events and the PR gate (docs/bots.md) ----
+
+function registerGitHubTools(
+  server: McpServer,
+  principal: Principal,
+  actor: Actor,
+  routines: RoutineService,
+  github: import("../bots/github.ts").GitHubEvents,
+  guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>,
+) {
+  const teamArg: Record<string, z.ZodTypeAny> = principal.teams.length ? { team: z.string().max(80).optional().describe("A team's slug, for the team's webhook; leave out for the user's own.") } : {};
+
+  server.registerTool(
+    "github_webhook",
+    {
+      title: "The GitHub webhook for bots",
+      description:
+        "The webhook that lets GitHub wake a bot when its pull request gets a review, a comment or a check result (the PR gate): its URL and which events to tick in the repo's Settings → Webhooks. The secret is only shown in the Ambient app; never ask for it or write it here.",
+      inputSchema: teamArg,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (args: Record<string, unknown>) =>
+      guard(async () => {
+        const a = { team: typeof args.team === "string" ? args.team : undefined };
+        const h = await github.hook(routines.botOwner(actor, a.team ?? null));
+        const link = `ambient://github-hook${a.team ? `?team=${encodeURIComponent(a.team)}` : ""}`;
+        return result(
+          `In the repo on GitHub: Settings → Webhooks → Add webhook. Payload URL: ${h.url}. Content type: application/json. Secret: from the Ambient app ([show the secret](${link})). Events: "Let me select individual events", then ${h.events.join(", ")}.`,
+          { url: h.url, events: h.events },
+        );
+      }),
+  );
+
+  server.registerTool(
+    "watch_github",
+    {
+      title: "Which GitHub repos a bot works on",
+      description:
+        "Set the GitHub repos a bot works on through pull requests (owner/name; an empty list stops it). Its pull requests are then known by their branch (ambient/<bot>/…), GitHub's events on them start its runs, and it follows the PR gate: drafts first, ready for review only when every review comment is fixed or answered and CI is green. Only when the user asked.",
+      inputSchema: { id: z.string().max(64), repos: z.array(z.string().max(200)).max(20) },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id, repos }) =>
+      guard(async () => {
+        const f = await routines.folderOf(actor, id, true);
+        const set = await github.setWatch(f.owner, f.routineId, repos);
+        const run = await github.forRun(f.owner, f.routineId);
+        return result(
+          set.length
+            ? `"${f.name}" works on ${set.join(", ")}; its branches start with ${run?.prefix ?? "ambient/<bot>/"}. GitHub reaches it once the owner's webhook is set on each repo (github_webhook).`
+            : `"${f.name}" watches no repos now.`,
+          { repos: set, branchPrefix: run?.prefix ?? null },
+        );
       }),
   );
 }

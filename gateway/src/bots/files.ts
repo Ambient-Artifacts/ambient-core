@@ -111,4 +111,6 @@ export interface Folders {
   history: import("./history.ts").HistorySearch;
   /** Amb's automations (set once Amb is up; docs/bots.md, "Automations"). */
   automations?: import("./automations.ts").Automations;
+  /** GitHub's events for bots and the PR gate (docs/bots.md, "GitHub events and the PR gate"). */
+  github?: import("./github.ts").GitHubEvents;
 }
