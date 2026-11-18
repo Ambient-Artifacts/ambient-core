@@ -3,7 +3,9 @@
 //   node --import tsx gateway/src/admin-cli.ts user add you@example.com --name "You"
 // (in Docker: `docker compose exec gateway admin …`). Everything goes through the same
 // services the app API uses, so the rules (scopes, team servers, encryption) are the same.
-import { slugify } from "@brain/spec";
+import { createHash } from "node:crypto";
+import { BOT_COLORS, BOT_SHAPES, slugify } from "@brain/spec";
+import { BotFolder } from "./bots/folder.ts";
 import { HasContent } from "@brain/wiki";
 import { Pairing } from "./auth/pairing.ts";
 import { PatService } from "./auth/pats.ts";
@@ -61,6 +63,12 @@ Wikis in your own git repo (https; the access token comes on stdin, e.g. < token
   team ignore <slug> [<path>...] [--clear]
       Folders and files of the team's repo that aren't knowledge (templates, scripts, a README):
       they stay out of the brain. Without paths: what's left out now. --clear: nothing is.
+
+Bots
+  bots adopt-loops <email> [--team <slug>] [--dry-run]
+      With bots, every loop is a bot: turn the person's plain loops (or, with --team, the team's,
+      as that person, who must own or admin it) into bots that run exactly as before: on the
+      computer itself, with all of the owner's keys, reporting news. Safe to run again.
 `;
 
 export class AdminError extends Error {}
@@ -76,7 +84,13 @@ export interface AdminDeps {
 
 type Flags = Record<string, string | true>;
 /** Flags that stand alone; every other flag takes a value. */
-const SWITCHES = ["upkeep", "claude-code", "help", "existing", "read-only", "clear"];
+const SWITCHES = ["upkeep", "claude-code", "help", "existing", "read-only", "clear", "dry-run"];
+
+/** A face and colour for a loop that becomes a bot, picked from its id: the same every run. */
+export function adoptedLook(id: string): { face: (typeof BOT_SHAPES)[number]; color: (typeof BOT_COLORS)[number] } {
+  const h = createHash("sha256").update(id).digest();
+  return { face: BOT_SHAPES[h[0]! % BOT_SHAPES.length]!, color: BOT_COLORS[h[1]! % BOT_COLORS.length]! };
+}
 
 function parse(args: string[]): { words: string[]; flags: Flags } {
   const words: string[] = [];
@@ -185,6 +199,47 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
       made.token,
       `Shown once. Send it as "Authorization: Bearer <token>" to ${origin}${slug ? `/t/${slug}` : ""}/mcp.`,
     ].join("\n");
+  }
+
+  // Loops become bots (docs/bots.md, "Loops are bots"): each keeps how it runs today.
+  if (cmd === "bots" && sub === "adopt-loops") {
+    const u = await findUser(words[2]);
+    const slug = text(flags, "team");
+    const dry = flags["dry-run"] === true;
+    const personal = new PersonalStore(d.control, d.config.masterKey);
+    const keys = new RoutineKeys({ control: d.control, personal, master: d.config.masterKey });
+    const folder = new BotFolder({ control: d.control, keys });
+    const routines = new RoutineService({ control: d.control, keys, codes: new CodeHasher(d.config.masterKey), origin, bots: d.config.bots, folder });
+    const teams = await new Directory(d.control, 0).teamsOf(u.uid);
+    if (slug && !teams.some((t) => t.slug === slug)) throw new AdminError(`${u.name} isn't in a team "${slug}".`);
+    const actor = { uid: u.uid, teams, personal: true, canWritePersonal: true, canWriteTeams: true };
+    const all = (await routines.list(actor)).routines.filter((r) => (slug ? r.team?.slug === slug : r.team === null));
+    const loops = all.filter((r) => r.bot === null);
+    if (!loops.length) return `${slug ? `The team "${slug}"` : u.name} has no plain loops left (${all.length} bot(s)).`;
+    const owner = slug ? `team ${slug}` : u.name;
+    const lines: string[] = [];
+    for (const r of loops) {
+      const where = r.team ? `${r.team.name}'s server` : r.computer ? r.computer.name : null;
+      if (!where) {
+        lines.push(`  skipped: "${r.name}" (${owner}): no computer, so it never runs; pick one in the app first.`);
+        continue;
+      }
+      if (dry) {
+        lines.push(`  would become a bot: "${r.name}" (${owner}), on ${where}, on the computer itself, all of the owner's keys, news only${r.enabled ? "" : ", paused"}.`);
+        continue;
+      }
+      const look = adoptedLook(r.id);
+      try {
+        await routines.update(actor, r.id, { bot: { ...look, runtime: "claude-code", isolation: "host", secrets: null, report: "news" } }, "admin:adopt-loops");
+        // Its prompt is its AGENTS.md: the first version, so later changes can be undone to it.
+        const teamId = slug ? teams.find((t) => t.slug === slug)!.id : null;
+        await folder.recordAgents(teamId ? { kind: "team", teamId } : { kind: "user", uid: u.uid }, r.id, r.prompt, null, { kind: "user", name: null }, "was a loop");
+        lines.push(`  now a bot: "${r.name}" (${owner}), on ${where}.`);
+      } catch (err) {
+        lines.push(`  not changed: "${r.name}" (${owner}): ${(err as Error).message}`);
+      }
+    }
+    return [`${dry ? "Dry run, nothing changed" : "Loops to bots"} for ${owner}:`, ...lines].join("\n");
   }
 
   if (cmd === "computer-code") {

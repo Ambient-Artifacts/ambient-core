@@ -155,7 +155,9 @@ export function botAppRoutes(
   });
 
   r.get("/v1/app/features", d.auth, async (_req, res) => {
-    res.json({ bots: d.routines.botsEnabled(await actor(res)) });
+    const bots = d.routines.botsEnabled(await actor(res));
+    // With bots every loop is a bot (docs/bots.md, "Loops are bots"): the app has no plain loops then.
+    res.json({ bots, loopsAreBots: bots });
   });
 
   r.get("/v1/app/routines/:id/thread", d.auth, async (req, res) => {

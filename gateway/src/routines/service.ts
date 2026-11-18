@@ -47,6 +47,7 @@ const MESSAGES: Record<string, [string, number]> = {
   no_such_routine: ["There's no such loop.", 404],
   no_such_computer: ["There's no such computer. Connect one in the Ambient app under Loops.", 400],
   no_computer: ["This loop has no computer to run on. Pick one first.", 400],
+  bots_only: ["With bots, every loop is a bot: it can't be turned back into a plain loop. Pause it instead, or delete it.", 400],
   bot_needs_computer: ["A bot of your own runs on one of your computers, and none is picked. Connect a computer in the Ambient app (Bots, then Computers) or pick one, then try again. A team's bots run on the team's server.", 400],
   no_team_server: ["The team's server isn't set up for loops yet.", 400],
   team_routine_computer: ["A team's loops run on the team's server; leave the computer out.", 400],
@@ -657,7 +658,11 @@ export class RoutineService {
       hostId = await this.resolveComputer(actor, input.computer);
     }
     const owner: Owner = team ? { kind: "team", teamId: team.id } : { kind: "user", uid: actor.uid };
-    if (input.bot && !(team ? this.botsOn({ slug: team.slug }) : this.personalBots(actor))) throw refused("bots_not_enabled");
+    const ownerHasBots = team ? this.botsOn({ slug: team.slug }) : this.personalBots(actor);
+    if (input.bot && !ownerHasBots) throw refused("bots_not_enabled");
+    // With bots there are no plain loops (docs/bots.md, "Loops are bots"): one made without bot
+    // settings is a bot with a new bot's defaults.
+    if (!input.bot && ownerHasBots) input = { ...input, bot: {} };
     // A bot of one's own without a computer would only ever sit there asleep: refused up front.
     if (input.bot && !team && !hostId) throw refused("bot_needs_computer");
     const sealed = await this.d.keys.seal(owner, "routine:prompt", input.prompt);
@@ -688,6 +693,8 @@ export class RoutineService {
     const sealed = patch.prompt !== undefined ? await this.d.keys.seal(this.ownerOf(r), "routine:prompt", patch.prompt) : undefined;
     const hostId = !r.teamId && patch.computer !== undefined ? await this.resolveComputer(actor, patch.computer) : undefined;
     if (patch.bot && !this.botsFor(actor, r)) throw refused("bots_not_enabled");
+    // With bots every loop is a bot: none goes back to being a plain loop.
+    if (patch.bot === null && r.bot && this.botsFor(actor, r)) throw refused("bots_only");
     // A personal bot keeps a computer: taking it away, or making a loop without one a bot, is refused.
     if (!r.teamId && (r.bot || patch.bot) && patch.bot !== null) {
       const keeps = hostId !== undefined ? hostId : r.hostId;

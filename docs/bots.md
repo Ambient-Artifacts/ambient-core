@@ -136,6 +136,23 @@ nothing.
   `url: ambient://routine/<id>?thread=1`, collapse id `bot-question-<id>`.
 - A run fails: as for loops (`ambient://routine/<id>?run=<runId>`).
 
+## Loops are bots
+
+With bots on for an account or team, there are no plain loops anymore: every routine is a bot.
+`GET /v1/app/features` says so (`{ "bots": true, "loopsAreBots": true }`); accounts and teams
+without bots keep loops exactly as they are (`loopsAreBots` false).
+
+- A routine made without `bot` settings (app or `create_routine`) is a new bot: its own container,
+  no keys until granted, news only. A bot of one's own still needs a computer.
+- `PATCH { "bot": null }` (back to a plain loop) answers `400 bots_only`.
+- Loops made before bots were on stay loops (`bot: null`) until they're adopted:
+  `admin bots adopt-loops <email|user id> [--team <slug>] [--dry-run]` makes each one a bot that
+  runs exactly as before (on the computer itself, all of the owner's keys, news only; its schedule,
+  computer, folder and prompt unchanged; its prompt AGENTS.md's first version, "was a loop"), with a
+  face and colour picked from its id. `--team` does the team's loops, as that person (an owner or
+  admin). A personal loop without a computer is skipped: it never runs. Running it again changes
+  nothing.
+
 ## The computer's side
 
 - `POST /v1/host/routines/:id/runs` (start) additionally returns `bot` (the settings above, without
