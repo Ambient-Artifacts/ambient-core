@@ -40,6 +40,8 @@ export interface BotTemplate {
   questions: TemplateQuestion[];
   /** Its AGENTS.md, GOAL.md (or null) and skills from the answers. */
   build: (a: Record<string, string>) => { agents: string; goal: string | null; skills: { path: string; content: string }[] };
+  /** How it talks and behaves: its SOUL.md to start with (docs/bots.md, "One folder for every bot"). */
+  soul: string;
 }
 
 const vienna = "Europe/Vienna";
@@ -104,6 +106,7 @@ description: Which docs and wiki pages a merged change touches. Use it after eve
 export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: "review_bot",
+    soul: "- Direct and friendly. Only what matters: bugs, risks, missing tests, things that contradict the brain.\n- No nitpicks a linter or formatter would catch; no praise padding.\n- One comment per real problem, with why it matters and a concrete fix.\n- In English on GitHub; short.",
     name: "Reviewer",
     face: "pebble",
     color: "sage",
@@ -160,6 +163,7 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   },
   {
     id: "builder",
+    soul: "- Brief status, no filler: what you did, what you checked (tests, build, the PR gate), what's left.\n- Say plainly when something didn't work and what you'll try next.\n- Pull request descriptions: why first, then what changed, then how you checked it.",
     name: "Builder",
     face: "cap",
     color: "sky",
@@ -202,6 +206,7 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   },
   {
     id: "wiki_keeper",
+    soul: "- Plain and factual: say what changed, where, and link the page; never pad or guess.\n- When a merge changes nothing worth writing down, say so in one line.\n- Keep the wiki's own voice and terms; don't rewrite what you didn't need to touch.",
     name: "Wiki keeper",
     face: "dome",
     color: "sand",
@@ -323,6 +328,7 @@ export async function createFromTemplate(
   const f = await d.routines.folderOf(actor, routine.id, true);
   for (const s of built.skills) await d.folder.write(f.owner, f.routineId, `skills/${s.path}`, s.content, o.by, `from the ${t.name} template`);
   if (built.goal) await d.folder.write(f.owner, f.routineId, "GOAL.md", built.goal, o.by, `from the ${t.name} template`);
+  if (t.soul.trim()) await d.folder.write(f.owner, f.routineId, "SOUL.md", t.soul, o.by, `from the ${t.name} template`);
   if (d.github && repoList.length) await d.github.setWatch(f.owner, f.routineId, repoList, t.github);
   if (d.learning) await d.learning.setLearn(f.owner, f.routineId, "auto");
   const have = new Set((await d.routines.secrets(actor, team).catch(() => [])).map((s) => s.name));

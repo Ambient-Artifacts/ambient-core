@@ -120,6 +120,12 @@ describe("a person's bots", () => {
     await settle();
   }, 30_000);
 
+  it("carry the bot's SOUL.md once it has one", async () => {
+    await call("PUT", `/v1/app/routines/${blog}/files/content?path=SOUL.md`, { content: "Warm and short." });
+    await settle();
+    expect(readFileSync(join(fresh(), "bots/blog-draft/SOUL.md"), "utf8")).toBe("Warm and short.\n");
+  }, 30_000);
+
   it("overwrite edits made in git, and leave the repo's own files under bots/ alone", async () => {
     const work = fresh();
     writeFileSync(join(work, "bots/blog-draft/AGENTS.md"), "Edited in GitHub.\n");

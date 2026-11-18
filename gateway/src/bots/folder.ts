@@ -2,6 +2,7 @@
 //
 //   AGENTS.md            the routine's prompt (the prompt is the current text; versions are kept here)
 //   skills/<name>/…      Claude Code skills, written into the bot's container for each run
+//   SOUL.md              how it talks and behaves: tone, length, language, style
 //   GOAL.md              the outcome it owns: metric, how to measure it, target, by when, limits
 //   memory.md            what the bot learned; it updates it during runs
 //   handoffs             one per run: what it did and what's next, for the next run
@@ -63,6 +64,9 @@ export const AGENTS = "AGENTS.md";
 /** The outcome a bot owns (docs/bots.md, "Outcomes, not tasks"). */
 export const GOAL = "GOAL.md";
 const GOAL_MAX = 8 * 1024;
+/** How a bot (or Amb) talks and behaves (docs/bots.md, "One folder for every bot, Amb included"). */
+export const SOUL = "SOUL.md";
+const SOUL_MAX = 8 * 1024;
 export const MEMORY = "memory.md";
 const FILE_MAX = 64 * 1024;
 export const MEMORY_MAX = 16 * 1024;
@@ -78,7 +82,7 @@ export const CONTINUE_MS = 6 * 3600_000;
 /** What a fresh run gets of its thread since its last run. */
 const THREAD_MAX_CHARS = 12_000;
 
-const PATH = /^(AGENTS\.md|GOAL\.md|memory\.md|skills\/[a-z0-9][a-z0-9-]{0,47}\/[A-Za-z0-9._-]{1,64}(\/[A-Za-z0-9._-]{1,64})?)$/;
+const PATH = /^(SOUL\.md|AGENTS\.md|GOAL\.md|memory\.md|skills\/[a-z0-9][a-z0-9-]{0,47}\/[A-Za-z0-9._-]{1,64}(\/[A-Za-z0-9._-]{1,64})?)$/;
 
 export class FolderError extends Error {
   constructor(
@@ -94,7 +98,7 @@ export class FolderError extends Error {
 export function checkPath(path: string): string {
   const p = path.trim();
   if (!PATH.test(p) || p.split("/").some((s) => s === "." || s === ".."))
-    throw new FolderError("bad_path", "A bot's files are AGENTS.md, GOAL.md, memory.md, or skills/<name>/<file> (name: lowercase letters, digits and dashes).");
+    throw new FolderError("bad_path", "A bot's files are SOUL.md, AGENTS.md, GOAL.md, memory.md, or skills/<name>/<file> (name: lowercase letters, digits and dashes).");
   return p;
 }
 
@@ -220,7 +224,7 @@ export class BotFolder {
     return `${routineId}/${path}`;
   }
 
-  /** Every file: AGENTS.md (its text is `agents`, the prompt), GOAL.md and memory.md always, then the skills. */
+  /** Every file: SOUL.md, AGENTS.md (its text is `agents`, the prompt), GOAL.md and memory.md always, then the skills. */
   async files(owner: Owner, routineId: string, agents: string): Promise<FileInfo[]> {
     const rows = (await this.d.control.q(api.records.list, { ...ownerArgs(owner), kind: FILE, prefix: `${routineId}/` })) as RecordRow[];
     const info = (r: RecordRow | undefined, path: string, size?: number): FileInfo => ({
@@ -232,7 +236,7 @@ export class BotFolder {
     });
     const byPath = new Map(rows.map((r) => [r.key.slice(routineId.length + 1), r]));
     const skills = [...byPath.entries()].filter(([p]) => p.startsWith("skills/")).sort(([a], [b]) => a.localeCompare(b));
-    return [info(byPath.get(AGENTS), AGENTS, bytes(agents)), info(byPath.get(GOAL), GOAL), info(byPath.get(MEMORY), MEMORY), ...skills.map(([p, r]) => info(r, p))];
+    return [info(byPath.get(SOUL), SOUL), info(byPath.get(AGENTS), AGENTS, bytes(agents)), info(byPath.get(GOAL), GOAL), info(byPath.get(MEMORY), MEMORY), ...skills.map(([p, r]) => info(r, p))];
   }
 
   /** One file now (AGENTS.md: the prompt), or one of its versions. */
@@ -240,7 +244,7 @@ export class BotFolder {
     const p = checkPath(path);
     const r = await this.get(owner, FILE, this.key(routineId, p), version);
     if (version !== undefined && !r) throw new FolderError("no_such_version", "There's no such version.", 404);
-    if (!r && p !== AGENTS && p !== GOAL && p !== MEMORY) throw new FolderError("no_such_file", "There's no such file.", 404);
+    if (!r && p !== SOUL && p !== AGENTS && p !== GOAL && p !== MEMORY) throw new FolderError("no_such_file", "There's no such file.", 404);
     if (r?.deleted && version === undefined) throw new FolderError("no_such_file", "There's no such file.", 404);
     return this.view(owner, FILE, p, r, p === AGENTS && version === undefined ? agents : undefined);
   }
@@ -261,7 +265,7 @@ export class BotFolder {
     const p = checkPath(path);
     if (p === AGENTS) throw new FolderError("bad_path", "AGENTS.md is the bot's prompt: change it through the loop.");
     const size = bytes(content);
-    const max = p === MEMORY ? MEMORY_MAX : p === GOAL ? GOAL_MAX : FILE_MAX;
+    const max = p === MEMORY ? MEMORY_MAX : p === GOAL ? GOAL_MAX : p === SOUL ? SOUL_MAX : FILE_MAX;
     if (size > max) throw new FolderError("too_big", `${p} can be up to ${max / 1024} KB; this is ${Math.ceil(size / 1024)} KB.`);
     const rows = (await this.d.control.q(api.records.list, { ...ownerArgs(owner), kind: FILE, prefix: `${routineId}/` })) as RecordRow[];
     const others = rows.filter((r) => r.key !== this.key(routineId, p));
@@ -274,7 +278,7 @@ export class BotFolder {
   /** A version that deletes a skill file (AGENTS.md and memory.md are only ever emptied). */
   async remove(owner: Owner, routineId: string, path: string, by: Author, why: string | null): Promise<void> {
     const p = checkPath(path);
-    if (p === AGENTS || p === GOAL || p === MEMORY) throw new FolderError("bad_path", `${p} can't be deleted, only emptied.`);
+    if (p === SOUL || p === AGENTS || p === GOAL || p === MEMORY) throw new FolderError("bad_path", `${p} can't be deleted, only emptied.`);
     const r = await this.get(owner, FILE, this.key(routineId, p));
     if (!r || r.deleted) throw new FolderError("no_such_file", "There's no such file.", 404);
     await this.put(owner, FILE, this.key(routineId, p), "", by, why, { deleted: true });
@@ -309,6 +313,11 @@ export class BotFolder {
 
   async memory(owner: Owner, routineId: string): Promise<string> {
     return this.text(owner, routineId, MEMORY);
+  }
+
+  /** How the bot talks and behaves ("" when it has no SOUL.md). */
+  async soul(owner: Owner, routineId: string): Promise<string> {
+    return this.text(owner, routineId, SOUL);
   }
 
   /** The outcome the bot owns ("" when it has none). */
@@ -395,9 +404,10 @@ export class BotFolder {
     /** A bot that watches GitHub repos: its branch prefix and the PR gate (docs/bots.md). */
     github?: { prefix: string; repos: string[]; on?: WatchMode[] } | null;
   }): Promise<{ prompt: string; resume: { sessionId: string | null; message: string } | null; workspace: { system: string; skills: { path: string; content: string }[]; memory: string } }> {
-    const [memory, goal, handoffs, skills] = await Promise.all([
+    const [memory, goal, soul, handoffs, skills] = await Promise.all([
       this.memory(o.owner, o.routineId),
       this.goal(o.owner, o.routineId),
+      this.soul(o.owner, o.routineId),
       this.handoffs(o.owner, o.routineId, 10),
       o.contained ? this.skills(o.owner, o.routineId) : Promise.resolve([]),
     ]);
@@ -442,7 +452,98 @@ export class BotFolder {
     ]
       .filter(Boolean)
       .join("\n\n");
-    return { prompt, resume, workspace: { system: botSystem(o.name, o.computer, o.trigger, o.contained, owns, o.github ?? null), skills, memory } };
+    return { prompt, resume, workspace: { system: botSystem(o.name, o.computer, o.trigger, o.contained, owns, o.github ?? null, soul), skills, memory } };
+  }
+
+  // ---- Amb's folder (one per person): SOUL.md, AGENTS.md, memory.md, skills/ ----
+
+  private ambOwner(uid: string): Owner {
+    return { kind: "user", uid };
+  }
+
+  /** A path in Amb's folder: SOUL.md, AGENTS.md, memory.md or skills/<name>/<file> (no GOAL.md). */
+  ambPath(path: string): string {
+    const p = path.trim();
+    if (p === GOAL || !PATH.test(p) || p.split("/").some((x) => x === "." || x === ".."))
+      throw new FolderError("bad_path", "Ambient's files are SOUL.md, AGENTS.md, memory.md, or skills/<name>/<file> (name: lowercase letters, digits and dashes).");
+    return p;
+  }
+
+  async ambFiles(uid: string): Promise<FileInfo[]> {
+    const owner = this.ambOwner(uid);
+    const rows = (await this.d.control.q(api.records.list, { ...ownerArgs(owner), kind: AMB, prefix: "" })) as RecordRow[];
+    const byPath = new Map(rows.map((r) => [r.key, r]));
+    const info = (path: string): FileInfo => {
+      const r = byPath.get(path);
+      return { path, size: r?.size ?? 0, version: r?.version ?? 0, updatedAt: r?.createdAt ?? null, by: r ? { kind: r.byKind, name: r.byName } : null };
+    };
+    const skills = [...byPath.keys()].filter((p) => p.startsWith("skills/")).sort();
+    return [info(SOUL), info(AGENTS), info(MEMORY), ...skills.map(info)];
+  }
+
+  async ambRead(uid: string, path: string, version?: number): Promise<FileView> {
+    const p = this.ambPath(path);
+    const owner = this.ambOwner(uid);
+    const r = await this.get(owner, AMB, p, version);
+    if (version !== undefined && !r) throw new FolderError("no_such_version", "There's no such version.", 404);
+    if (!r && !p.startsWith("skills/")) return this.view(owner, AMB, p, null);
+    if (!r || (r.deleted && version === undefined)) throw new FolderError("no_such_file", "There's no such file.", 404);
+    return this.view(owner, AMB, p, r);
+  }
+
+  /** The text of one of Amb's files now ("" when it has none). */
+  async ambText(uid: string, path: string): Promise<string> {
+    const r = await this.get(this.ambOwner(uid), AMB, path);
+    return r && !r.deleted ? (await this.open(this.ambOwner(uid), AMB, r)).content : "";
+  }
+
+  async ambWrite(uid: string, path: string, content: string, by: Author, why: string | null, opts: { ifVersion?: number } = {}): Promise<FileView> {
+    const p = this.ambPath(path);
+    const owner = this.ambOwner(uid);
+    const size = bytes(content);
+    if (p === AGENTS && content.length > AGENTS_MAX) throw new FolderError("too_big", `Ambient's AGENTS.md can be up to ${AGENTS_MAX.toLocaleString("en")} characters; this is ${content.length.toLocaleString("en")}.`);
+    const max = p === MEMORY ? MEMORY_MAX : p === SOUL ? SOUL_MAX : p === AGENTS ? AGENTS_MAX * 4 : FILE_MAX;
+    if (size > max) throw new FolderError("too_big", p === MEMORY ? `Ambient's memory can be up to ${MEMORY_MAX / 1024} KB; this is ${Math.ceil(size / 1024)} KB. Make it shorter.` : `${p} can be up to ${max / 1024} KB; this is ${Math.ceil(size / 1024)} KB.`);
+    const rows = (await this.d.control.q(api.records.list, { ...ownerArgs(owner), kind: AMB, prefix: "" })) as RecordRow[];
+    const others = rows.filter((r) => r.key !== p);
+    if (others.length + 1 > FILES_MAX) throw new FolderError("too_many_files", `Ambient can have ${FILES_MAX} files. Delete one first.`);
+    if (others.reduce((n, r) => n + r.size, 0) + size > TOTAL_MAX) throw new FolderError("too_big", `Ambient's files can be ${TOTAL_MAX / 1024} KB in all.`);
+    const r = await this.put(owner, AMB, p, content, by, why, opts);
+    return this.view(owner, AMB, p, r, content);
+  }
+
+  /** A version that deletes one of Amb's skill files (SOUL.md, AGENTS.md and memory.md are only emptied). */
+  async ambRemove(uid: string, path: string, by: Author, why: string | null): Promise<void> {
+    const p = this.ambPath(path);
+    if (!p.startsWith("skills/")) throw new FolderError("bad_path", `${p} can't be deleted, only emptied.`);
+    const owner = this.ambOwner(uid);
+    const r = await this.get(owner, AMB, p);
+    if (!r || r.deleted) throw new FolderError("no_such_file", "There's no such file.", 404);
+    await this.put(owner, AMB, p, "", by, why, { deleted: true });
+  }
+
+  async ambFileHistory(uid: string, path: string): Promise<{ version: number; by: Author; why: string | null; updatedAt: number; size: number; deleted: boolean }[]> {
+    const p = this.ambPath(path);
+    const owner = this.ambOwner(uid);
+    const rows = (await this.d.control.q(api.records.history, { ...ownerArgs(owner), kind: AMB, key: p, limit: KEEP_VERSIONS })) as RecordRow[];
+    return Promise.all(rows.map(async (r) => ({ version: r.version, by: { kind: r.byKind, name: r.byName }, why: (await this.open(owner, AMB, r)).why, updatedAt: r.createdAt, size: r.size, deleted: r.deleted })));
+  }
+
+  /** An earlier version of one of Amb's files back, as a new version. */
+  async ambRevert(uid: string, path: string, version: number, by: Author): Promise<FileView> {
+    const p = this.ambPath(path);
+    const r = await this.get(this.ambOwner(uid), AMB, p, version);
+    if (!r) throw new FolderError("no_such_version", "There's no such version.", 404);
+    if (r.deleted) throw new FolderError("no_such_version", "That version is the file being deleted; pick an earlier one.", 400);
+    const text = (await this.open(this.ambOwner(uid), AMB, r)).content;
+    return this.ambWrite(uid, p, text, by, `restored version ${version}`);
+  }
+
+  /** Amb's skills, as paths inside .claude/skills of its session's folder. */
+  async ambSkills(uid: string): Promise<{ path: string; content: string }[]> {
+    const owner = this.ambOwner(uid);
+    const rows = ((await this.d.control.q(api.records.list, { ...ownerArgs(owner), kind: AMB, prefix: "skills/" })) as RecordRow[]).filter((r) => !r.deleted);
+    return Promise.all(rows.map(async (r) => ({ path: r.key.slice("skills/".length), content: (await this.open(owner, AMB, r)).content })));
   }
 
   // ---- Amb's memory (one per person) ----
@@ -487,10 +588,12 @@ function threadLines(thread: { at: number; who: string; text: string }[]): strin
 }
 
 /** A bot's instructions for a run (the runner appends them to Claude Code's system prompt). */
-export function botSystem(name: string, computer: string, trigger: string, contained: boolean, owns = false, github: { prefix: string; repos: string[]; on?: WatchMode[] } | null = null): string {
+export function botSystem(name: string, computer: string, trigger: string, contained: boolean, owns = false, github: { prefix: string; repos: string[]; on?: WatchMode[] } | null = null, soul = ""): string {
   const how = trigger === "manual" ? 'started with "Run now" or a message in the Ambient app' : "started by its schedule";
   return [
     `You're "${name}", one of your owner's bots in Ambient, running on ${computer}${contained ? " in your own container" : ""}, ${how}.`,
+    // In the system text, which stays the same from run to run (the prompt cache keeps it).
+    ...(soul.trim() ? [`How you talk and behave (SOUL.md): ${soul.trim()}`] : []),
     "Nobody is watching this run. When you need a decision only your owner can make (which of two real options, a missing detail, a go-ahead for something that can't be undone), ask with the ask_owner tool: one short question, with choices when there are a few clear options. Don't ask about what you can sensibly decide yourself.",
     "If ask_owner comes back without an answer, finish the run: say in a sentence or two where you are and what you're waiting for. You'll be started again with the answer, in this same conversation.",
     "When a run starts with a message from your owner (they wrote to you in your thread), it's a conversation: answer what they asked, or do what it asks, and put your answer in your last message. A question gets an answer, quickly: don't start bigger work they didn't ask for (rewriting, new pull requests); if you think it's needed, say so in a sentence and offer it. Don't answer through ask_owner; use it only when you need their decision before you can go on.",

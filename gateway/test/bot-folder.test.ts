@@ -46,8 +46,8 @@ afterAll(() => s.close());
 describe("a bot's files", () => {
   it("lists AGENTS.md (the prompt) and memory.md from the start", async () => {
     const list = (await call("GET", `/v1/app/routines/${bot}/files`)).json.files as { path: string; version: number; size: number }[];
-    expect(list.map((f) => f.path)).toEqual(["AGENTS.md", "GOAL.md", "memory.md"]);
-    expect(list[0]).toMatchObject({ version: 0, size: "Write the weekly post.".length });
+    expect(list.map((f) => f.path)).toEqual(["SOUL.md", "AGENTS.md", "GOAL.md", "memory.md"]);
+    expect(list[1]).toMatchObject({ version: 0, size: "Write the weekly post.".length });
     const agents = (await call("GET", `/v1/app/routines/${bot}/files/content?path=AGENTS.md`)).json;
     expect(agents.content).toBe("Write the weekly post.");
   });
@@ -86,7 +86,7 @@ describe("a bot's files", () => {
     await call("PUT", `/v1/app/routines/${bot}/files/content?path=${enc("skills/old/SKILL.md")}`, { content: "x" });
     expect((await call("DELETE", `/v1/app/routines/${bot}/files/content?path=${enc("skills/old/SKILL.md")}`)).status).toBe(204);
     const list = (await call("GET", `/v1/app/routines/${bot}/files`)).json.files as { path: string }[];
-    expect(list.map((f) => f.path)).toEqual(["AGENTS.md", "GOAL.md", "memory.md", "skills/tone/SKILL.md"]);
+    expect(list.map((f) => f.path)).toEqual(["SOUL.md", "AGENTS.md", "GOAL.md", "memory.md", "skills/tone/SKILL.md"]);
   });
 
   it("is only for who may see the bot, and written only by who may change it", async () => {
@@ -228,9 +228,10 @@ describe("Amb's memory and its tools", () => {
     const pat = String((await call("POST", "/v1/app/pats", { label: "Claude" })).json.token);
     const client = await mcpClient(`${s.origin}/mcp`, pat);
     const names = (await client.listTools()).tools.map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["search_history", "amb_memory", "update_amb_memory", "bot_files", "read_bot_file", "write_bot_file"]));
-    expect(text(await client.callTool({ name: "amb_memory", arguments: {} }))).toBe("Empty so far.");
-    expect(text(await client.callTool({ name: "update_amb_memory", arguments: { content: "- Prefers short answers.", why: "she said so" } }))).toContain("version 1");
+    expect(names).toEqual(expect.arrayContaining(["search_history", "read_amb_file", "write_amb_file", "bot_files", "read_bot_file", "write_bot_file"]));
+    expect(names).not.toContain("amb_memory");
+    expect(text(await client.callTool({ name: "read_amb_file", arguments: { path: "memory.md" } }))).toBe("memory.md: empty so far.");
+    expect(text(await client.callTool({ name: "write_amb_file", arguments: { path: "memory.md", content: "- Prefers short answers.", why: "she said so" } }))).toContain("version 1");
     const mem = (await call("GET", "/v1/app/ambient/memory")).json;
     expect(mem).toMatchObject({ content: "- Prefers short answers.", version: 1, why: "she said so", by: { kind: "amb" } });
     await call("PUT", "/v1/app/ambient/memory", { content: "- Prefers short answers.\n- Works from Vienna." });

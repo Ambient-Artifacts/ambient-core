@@ -239,6 +239,10 @@ done
     p.stdout?.on("data", (d) => (out += d));
     p.stderr?.on("data", (d) => (out += d));
     await new Promise((r) => setTimeout(r, 300));
+    // Amb's own folder (docs/bots.md, "One folder for every bot"): its SOUL.md in its instructions,
+    // its skills in the person's folder as Claude Code project skills.
+    await appCall(s, lena.access_token, "PUT", `/v1/app/ambient/files/content?path=${encodeURIComponent("skills/brief/SKILL.md")}`, { content: "Morning briefs: three lines." });
+    await appCall(s, lena.access_token, "PUT", "/v1/app/ambient/files/content?path=SOUL.md", { content: "Short, Poke-style." });
 
     for (const [text, want] of [
       ["First", "reply 1"],
@@ -248,6 +252,10 @@ done
       const c = await settled();
       expect(c.messages.at(-1)?.text, out).toBe(want);
     }
+    const folder = join(dir, "ambient", lena.user.uid);
+    expect(readFileSync(join(folder, ".claude", "skills", "brief", "SKILL.md"), "utf8")).toBe("Morning briefs: three lines.");
+    expect(readFileSync(join(folder, ".claude", "skills", ".ambient-managed"), "utf8")).toBe("brief");
+    expect(readFileSync(join(folder, "args.txt"), "utf8")).toContain("How you talk (your SOUL.md, Lena Vogel's to shape): Short, Poke-style.");
     // A file comes along: saved in the person's folder, named in the message.
     await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Read this", attachments: [{ name: "notes.md", type: "text/markdown", data: Buffer.from("# Hi").toString("base64") }] });
     await settled();

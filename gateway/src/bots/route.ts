@@ -17,7 +17,7 @@ import type { BotFiles } from "./files.ts";
 import type { HistorySearch } from "./history.ts";
 import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
 import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
-import { LEARN, type BotLearning } from "./learning.ts";
+import { LEARN, lessonsOf, type BotLearning } from "./learning.ts";
 import { NOTIFY, type AmbSettings } from "./amb-settings.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "./bot-templates.ts";
 
@@ -564,6 +564,106 @@ export function botAppRoutes(
     try {
       const old = await folder.ambMemoryVersion(a.uid, body.data.version);
       res.json(await folder.writeAmbMemory(a.uid, old.content, await userBy(a.uid), `restored version ${body.data.version}`));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // ---- Amb's own folder, like a bot's (docs/bots.md, "One folder for every bot, Amb included") ----
+
+  /** The person, when bots are on for them (Amb's folder is theirs alone). */
+  const amb = async (res: Response): Promise<Actor | undefined> => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) {
+      notEnabled(res);
+      return undefined;
+    }
+    return a;
+  };
+
+  r.get("/v1/app/ambient/files", d.auth, async (_req, res) => {
+    const a = await amb(res);
+    if (!a) return;
+    try {
+      res.json({ files: await folder.ambFiles(a.uid) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/ambient/files/content", d.auth, async (req, res) => {
+    const a = await amb(res);
+    if (!a) return;
+    try {
+      res.json(await folder.ambRead(a.uid, pathOf(req), versionOf(req.query.version)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.put("/v1/app/ambient/files/content", d.auth, express.json({ limit: "1mb" }), async (req, res) => {
+    const a = await amb(res);
+    if (!a) return;
+    const body = Write.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Send the file's content (and optionally why)." });
+      return;
+    }
+    try {
+      res.json(await folder.ambWrite(a.uid, pathOf(req), body.data.content, await userBy(a.uid), body.data.why ?? null));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/ambient/files/content", d.auth, async (req, res) => {
+    const a = await amb(res);
+    if (!a) return;
+    try {
+      await folder.ambRemove(a.uid, pathOf(req), await userBy(a.uid), null);
+      res.status(204).end();
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/ambient/files/history", d.auth, async (req, res) => {
+    const a = await amb(res);
+    if (!a) return;
+    try {
+      res.json({ versions: await folder.ambFileHistory(a.uid, pathOf(req)) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/ambient/files/revert", d.auth, d.json, async (req, res) => {
+    const a = await amb(res);
+    if (!a) return;
+    const body = z.object({ path: z.string().max(200), version: z.number().int().min(1) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Say which file and which version." });
+      return;
+    }
+    try {
+      res.json(await folder.ambRevert(a.uid, body.data.path, body.data.version, await userBy(a.uid)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // What Amb learned about the person, and what changed in its folder lately.
+  r.get("/v1/app/ambient/learning", d.auth, async (_req, res) => {
+    const a = await amb(res);
+    if (!a) return;
+    try {
+      const memory = await folder.ambText(a.uid, "memory.md");
+      const files = await folder.ambFiles(a.uid);
+      const changes: { path: string; version: number; by: { kind: string; name: string | null }; why: string | null; at: number }[] = [];
+      for (const f of files.filter((x) => x.version > 0)) {
+        for (const v of (await folder.ambFileHistory(a.uid, f.path).catch(() => [])).slice(0, 10)) changes.push({ path: f.path, version: v.version, by: v.by, why: v.why, at: v.updatedAt });
+      }
+      res.json({ lessons: lessonsOf(memory), changes: changes.sort((x, y) => y.at - x.at).slice(0, 20) });
     } catch (err) {
       fail(res, err);
     }

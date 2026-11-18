@@ -101,7 +101,7 @@ describe("a bot from a template", () => {
     expect(out.routine.prompt).toContain("Look especially closely at: migrations.");
     expect(out.needs).toEqual({ secrets: ["GH_TOKEN"], webhook: true });
     const files = ((await call("GET", `/v1/app/routines/${reviewer}/files`)).json.files as { path: string; version: number }[]).map((f) => f.path);
-    expect(files).toEqual(["AGENTS.md", "GOAL.md", "memory.md", "skills/brain-check/SKILL.md", "skills/review-checklist/SKILL.md"]);
+    expect(files).toEqual(["SOUL.md", "AGENTS.md", "GOAL.md", "memory.md", "skills/brain-check/SKILL.md", "skills/review-checklist/SKILL.md"]);
     expect((await call("GET", `/v1/app/routines/${reviewer}/github`)).json).toMatchObject({ repos: [REPO], on: ["all_prs"], branchPrefix: "ambient/reviewer/" });
     expect((await learningOf(reviewer)).learn).toBe("auto");
   });

@@ -20,7 +20,7 @@ import type { Actor } from "../routines/service.ts";
 import type { AmbientChat } from "./ambient.ts";
 import type { DecisionService } from "./decisions.ts";
 import type { BotFiles } from "./files.ts";
-import { AGENTS, GOAL, MEMORY, type BotFolder } from "./folder.ts";
+import { AGENTS, GOAL, MEMORY, SOUL, type BotFolder } from "./folder.ts";
 import type { GitHubSignal } from "./github.ts";
 import { NOTHING } from "./heartbeat.ts";
 
@@ -191,12 +191,12 @@ export class BotLearning {
       turnMs?: number;
     },
   ) {
-    // While Amb improves a bot on its own: AGENTS.md and GOAL.md only as a proposal; with "ask",
+    // While Amb improves a bot on its own: AGENTS.md, GOAL.md and SOUL.md only as a proposal; with "ask",
     // every file only as a proposal.
     d.files.guard = (_actor, id, path, by) => {
       const mode = by.kind === "amb" ? this.reviewing.get(id) : undefined;
       if (!mode) return null;
-      if (path === AGENTS || path === GOAL) return `While improving a bot on its own, Ambient doesn't change its ${path}: propose the change with propose_bot_change, and the user applies it.`;
+      if (path === AGENTS || path === GOAL || path === SOUL) return `While improving a bot on its own, Ambient doesn't change its ${path}: propose the change with propose_bot_change, and the user applies it.`;
       if (mode === "ask") return "This bot's owner wants to see each improvement first: propose it with propose_bot_change (the whole new file), don't write it.";
       return null;
     };
@@ -338,7 +338,7 @@ export class BotLearning {
         ? "If it should do better next time, improve it yourself: a lesson in its memory.md, or a skill for something it does repeatedly (write_bot_file, the whole file, with a short why)."
         : "Its owner wants to see each improvement first: propose every change with propose_bot_change (memory.md and skills too, the whole new file), don't write files.",
       `Write each lesson in memory.md as one line: "- <source> (${today}): <the lesson>", e.g. "- PR #41 (${today}): migrations go in their own pull request." Merge it with a lesson that says the same, and drop lessons that are no longer true; keep the file short.`,
-      "Changes to its AGENTS.md, its GOAL.md or its settings (schedule, secrets, isolation, model, runtime, what it publishes, deletes or sends) you only propose, with propose_bot_change.",
+      "Changes to its AGENTS.md, its GOAL.md, its SOUL.md (how it talks) or its settings (schedule, secrets, isolation, model, runtime, what it publishes, deletes or sends) you only propose, with propose_bot_change.",
       `Reply with one sentence on what you changed or proposed, or ${NOTHING}.`,
     ].join("\n\n");
     this.reviewing.set(routineId, learn);
