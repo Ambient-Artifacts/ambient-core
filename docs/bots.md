@@ -605,6 +605,26 @@ The team server takes the folder as `PUT /v1/bots` (purpose `bots` in the gatewa
 bot of the team at once; it answers `{ "commit", "folder", "files", "repo": { "url", "mode",
 "status", "lastError", "lastPushAt" } | null }`, or 409 `read_only`.
 
+## Messages while a bot works
+
+A message to a bot that's working goes into the run that's going, not into a second run after
+it (runner 0.9.2, Claude Code bots):
+
+- The run keeps Claude Code's input open (`--input-format stream-json`) and asks every 2 seconds
+  for what came into its thread since it started: `GET /v1/bot/inbox[?after=<cursor>]` with its
+  run token → `{ "messages": [{ "text", "who", "at" }], "cursor" }`. The owner's, Amb's and
+  GitHub's messages count; answers to the run's own questions come back through `ask_owner`.
+  What's handed over is taken: its pending message is called off, so no run starts for it later.
+- The runner writes each into the session ("<who> wrote to you in the Ambient app: …"); Claude
+  Code takes it in at its next step, in the same turn (one answer to both).
+- After a turn, the run waits 3 seconds for one more message, then closes. An answer to a turn
+  that's followed by another goes to the thread at once: `POST /v1/bot/reply` `{ "text" }`; the
+  last one is the run's result as before.
+- Each run logs where its time went: `Timing: api …s, spawn …s, ready …s, text …s, result …s,
+  end …s; tokens in …, cache read …, cache write …, out …`.
+
+Codex bots keep the old way for now (a message starts the next run).
+
 ## History: nothing is forgotten
 
 Amb's chat and every bot's thread are kept in full (sealed), no longer cut at the newest 200 or 300

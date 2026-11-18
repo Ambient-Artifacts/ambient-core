@@ -91,7 +91,7 @@ describe("a computer's model", () => {
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 echo "$@" > args.txt
-cat > /dev/null
+if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > /dev/null; else cat > /dev/null; fi
 echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"m1"}'
 `,
     );
@@ -107,6 +107,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","sessi
       AMBIENT_STATE_DIR: join(dir, "state"),
       AMBIENT_UNIT_DIR: dir,
       AMBIENT_CLAUDE_ENV: join(dir, "claude.env"),
+      AMBIENT_CONFIG_DIR: join(dir, "etc"),
     };
     const runner = (args: string[]) =>
       new Promise<number | null>((resolve) => {

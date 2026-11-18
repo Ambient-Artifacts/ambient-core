@@ -22,10 +22,11 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.9.1";
+const VERSION = "0.9.2";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
-const CONFIG_DIR = "/etc/ambient-runner";
+// Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
+const CONFIG_DIR = process.env.AMBIENT_CONFIG_DIR || "/etc/ambient-runner";
 const CONFIG = join(CONFIG_DIR, "runner.env");
 /** Optional, written by whoever runs the computer: variables every run gets (a team server's ANTHROPIC_API_KEY). */
 const EXTRA = join(CONFIG_DIR, "extra.env");
@@ -41,6 +42,11 @@ const UNIT_DIR = process.env.AMBIENT_UNIT_DIR || "/etc/systemd/system";
 const PREFIX = "ambient-routine-";
 /** A run is stopped after this long (systemd TimeoutStartSec). */
 const RUN_LIMIT = "3h";
+/** How often a bot's run asks for messages that came in while it works, and how many it takes in. */
+const INBOX_EVERY_MS = Number(process.env.AMBIENT_INBOX_EVERY_S || 2) * 1000;
+const INBOX_MAX = 20;
+/** How long a bot's session waits after a turn for one more message before it closes. */
+const STAY_MS = Number(process.env.AMBIENT_BOT_STAY_S || 3) * 1000;
 // Ed25519 public keys (SPKI, base64) whose signature an update must carry. The runner replaces
 // itself as root, so the gateway's word (its hash) isn't enough: whoever controlled the gateway
 // could otherwise run code as root on every connected computer. Updates are signed where the
@@ -915,11 +921,13 @@ function systemPrompt(routine, trigger, bot) {
 const ADAPTERS = {
   "claude-code": {
     label: "Claude Code",
+    /** Takes more messages while it works (stream-json input): a bot's run with a run token. */
+    streams: true,
     /** The command line after the binary, and what goes to stdin. */
-    start(cfg, routine, runInfo, bot, resume, mcpConfig, system) {
+    start(cfg, routine, runInfo, bot, resume, mcpConfig, system, opts = {}) {
       // `system`: the bot's instructions for this run from the gateway (runner 0.8.0 on); older
       // gateways send none, and the runner's own text stays.
-      const args = ["-p", "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
+      const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
       if (mcpConfig) args.push("--mcp-config", mcpConfig, "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history");
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
@@ -943,9 +951,11 @@ const ADAPTERS = {
             costUsd: typeof event.total_cost_usd === "number" ? event.total_cost_usd : undefined,
             turns: typeof event.num_turns === "number" ? event.num_turns : undefined,
             session: typeof event.session_id === "string" ? event.session_id : undefined,
+            usage: event.usage ? { input: event.usage.input_tokens, cacheRead: event.usage.cache_read_input_tokens, cacheWrite: event.usage.cache_creation_input_tokens, output: event.usage.output_tokens } : undefined,
           },
         ];
       }
+      if (event.type === "system" && event.subtype === "init") return [{ type: "ready" }];
       if (event.type !== "assistant") return [];
       const out = [];
       for (const c of event.message?.content ?? []) {
@@ -1323,9 +1333,16 @@ function readOut(dir, name) {
 async function run(id) {
   const cfg = config();
   if (!/^[a-z0-9]{8,64}$/.test(id ?? "")) die("usage: ambient-runner run <routine-id>", 2);
+  // Where a run's time goes (docs/bots.md, "Messages while a bot works"): logged at its end.
+  const t0 = Date.now();
+  const marks = {};
+  const mark = (name) => {
+    if (marks[name] === undefined) marks[name] = Date.now() - t0;
+  };
   let start;
   try {
     start = await call(cfg, "POST", `/v1/host/routines/${id}/runs`, undefined, { retries: 4 });
+    mark("api");
   } catch (err) {
     if (err.status === 404) {
       log("This routine no longer exists; the next sync removes its timer.");
@@ -1462,7 +1479,9 @@ async function run(id) {
   // Codex's own run settings: its model (a bot's own OpenAI model), never Claude Code's flags.
   const runCfg = codex ? cfg : { ...cfg, claudeArgs: withModel(cfg.claudeArgs, bot?.model ?? readState().model) };
   const mcpArg = codex ? mcpServer : mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile);
-  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, resume, mcpArg, system, { contained, outDir: contained ? null : outDir });
+  // A bot's Claude Code run stays open for messages that come in while it works (stream-json in).
+  const streaming = Boolean(adapter.streams && bot && runToken);
+  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, resume, mcpArg, system, { contained, outDir: contained ? null : outDir, streaming });
   const codexEnv = codex ? { ...openaiKey, ...(mcpServer ? { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } : {}) } : {};
   let child;
   let containerName = null;
@@ -1517,7 +1536,78 @@ async function run(id) {
       stdio: ["pipe", "pipe", "pipe"],
     });
   }
-  child.stdin.end(stdin);
+  mark("spawn");
+
+  // ---- messages while it works ----
+  // Every couple of seconds the run asks for what came into its thread (its run token) and writes
+  // it into the session: Claude Code takes it in at its next step, in the same turn. After a turn
+  // ends the run waits a moment for more; with nothing new it closes, and the session ends. An
+  // answer to a message taken in after a turn ended goes to the thread at once (POST /v1/bot/reply).
+  const userLine = (text) => `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`;
+  const results = [];
+  const posted = new Set();
+  let closing = false;
+  let inboxCursor;
+  let tookIn = 0;
+  let wroteSinceResult = false;
+  const takeInbox = async () => {
+    try {
+      const res = await fetch(`${cfg.server}/v1/bot/inbox${inboxCursor !== undefined ? `?after=${inboxCursor}` : ""}`, {
+        headers: { authorization: `Bearer ${runToken}`, "user-agent": `ambient-runner/${VERSION}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return [];
+      const j = await res.json().catch(() => ({}));
+      if (typeof j.cursor === "number") inboxCursor = j.cursor;
+      return Array.isArray(j.messages) ? j.messages : [];
+    } catch {
+      return [];
+    }
+  };
+  const deliver = (msgs) => {
+    for (const m of msgs) {
+      if (closing || tookIn >= INBOX_MAX) return;
+      tookIn++;
+      wroteSinceResult = true;
+      child.stdin.write(userLine(`${String(m.who ?? "Your owner")} wrote to you in the Ambient app: ${String(m.text ?? "")}`));
+      log(`Took in a message from ${m.who ?? "the owner"} while working`);
+    }
+  };
+  const reply = async (r) => {
+    if (posted.has(r) || !r.text?.trim()) return;
+    posted.add(r);
+    await fetch(`${cfg.server}/v1/bot/reply`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${runToken}`, "content-type": "application/json", "user-agent": `ambient-runner/${VERSION}` },
+      body: JSON.stringify({ text: r.text.slice(0, 20_000) }),
+      signal: AbortSignal.timeout(15_000),
+    }).catch(() => {});
+  };
+  const close = () => {
+    if (closing) return;
+    closing = true;
+    clearInterval(inboxTimer);
+    child.stdin.end();
+  };
+  // A turn ended: more to answer (a message came in meanwhile, or one is waiting), or done.
+  const turnEnded = async (r) => {
+    wroteSinceResult = false;
+    await new Promise((res) => setTimeout(res, STAY_MS));
+    if (closing) return;
+    if (!wroteSinceResult) deliver(await takeInbox());
+    if (wroteSinceResult) void reply(r);
+    else close();
+  };
+  let inboxTimer;
+  // A session that ended on its own (or failed) must not take the run down when we write to it.
+  child.stdin.on("error", () => {});
+  if (streaming) {
+    child.stdin.write(userLine(stdin));
+    inboxTimer = setInterval(() => {
+      if (!closing) void takeInbox().then(deliver);
+    }, INBOX_EVERY_MS);
+    inboxTimer.unref();
+  } else child.stdin.end(stdin);
 
   let result = null;
   let stderr = "";
@@ -1541,10 +1631,18 @@ async function run(id) {
   const ctx = {};
   createInterface({ input: child.stdout }).on("line", (line) => {
     for (const e of adapter.events(line, ctx)) {
-      if (e.type === "result") {
-        result = e;
+      if (e.type === "ready") {
+        mark("ready");
         continue;
       }
+      if (e.type === "result") {
+        mark("result");
+        result = e;
+        results.push(e);
+        if (streaming) void turnEnded(e);
+        continue;
+      }
+      if (e.type === "text") mark("text");
       journalLine(e);
       if (e.type === "tool") {
         progressLines.push(`· ${e.name}${e.detail ? `: ${e.detail.slice(0, 120)}` : ""}`);
@@ -1579,6 +1677,15 @@ async function run(id) {
     child.on("close", (c) => resolve(c ?? 1));
   });
   clearInterval(progressTimer);
+  closing = true;
+  clearInterval(inboxTimer);
+  // Answers to messages taken in that didn't reach the thread yet (all but the last: that's the result).
+  if (streaming) for (const r of results.slice(0, -1)) await reply(r);
+  mark("end");
+  const u = result?.usage;
+  log(
+    `Timing: ${["api", "spawn", "ready", "text", "result", "end"].filter((k) => marks[k] !== undefined).map((k) => `${k} ${(marks[k] / 1000).toFixed(1)}s`).join(", ")}${u ? `; tokens in ${u.input ?? 0}, cache read ${u.cacheRead ?? 0}, cache write ${u.cacheWrite ?? 0}, out ${u.output ?? 0}` : ""}${tookIn ? `; took in ${tookIn} message(s) while working` : ""}`,
+  );
   // What the bot left for its next run, read before the run's folder goes.
   const files = outDir ? { memory: readOut(outDir, "memory.md"), handoff: readOut(outDir, "handoff.md") } : {};
   if (codexAuth) keepCodexAuth(codexAuth, as);

@@ -611,6 +611,32 @@ export function botRunRouter(d: { bots: BotService; history?: HistorySearch }): 
     }
   });
 
+  // Messages that came in while the run works, and its answers to them (docs/bots.md).
+  r.get("/v1/bot/inbox", async (req, res) => {
+    if (slowDown(req, res)) return;
+    const after = Number(typeof req.query.after === "string" ? req.query.after : NaN);
+    try {
+      res.json(await d.bots.inbox(req.headers.authorization, Number.isFinite(after) ? after : undefined));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/bot/reply", json, async (req, res) => {
+    if (slowDown(req, res)) return;
+    const body = z.object({ text: z.string().trim().min(1).max(20_000) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Send the answer's text." });
+      return;
+    }
+    try {
+      await d.bots.runReply(req.headers.authorization, body.data.text);
+      res.status(204).end();
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
   r.get("/v1/bot/questions/:id", async (req, res) => {
     if (slowDown(req, res)) return;
     try {

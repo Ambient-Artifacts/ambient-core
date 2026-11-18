@@ -232,6 +232,55 @@ export const questionAnswer = mutation({
   },
 });
 
+/**
+ * What came into a bot's thread while its run is going (docs/bots.md, "Messages while a bot
+ * works"): its owner's messages, Amb's, GitHub's, after `after` (default: when the run started).
+ * The run takes them into its session, so they don't start another run: a pending message among
+ * them is called off. Answers to this run's own questions come back through ask_owner instead.
+ */
+export const claimInbox = mutation({
+  args: { ...secretArg, runTokenHash: v.string(), after: v.optional(v.number()) },
+  handler: async (ctx, { secret, runTokenHash, after }) => {
+    assertService(secret);
+    const found = await runByToken(ctx, runTokenHash);
+    if (!found) return { ok: false as const, error: "run_over" };
+    const { run, r } = found;
+    const since = after ?? run.startedAt;
+    const rows = await ctx.db
+      .query("botMessages")
+      .withIndex("by_routine", (q) => q.eq("routineId", r._id).gt("createdAt", since))
+      .take(50);
+    // This run's own questions (asked since it started) and the answers they got.
+    const asked = await ctx.db
+      .query("botMessages")
+      .withIndex("by_routine", (q) => q.eq("routineId", r._id).gte("createdAt", run.startedAt))
+      .take(200);
+    const ownAnswers = new Set(asked.filter((m) => m.kind === "question" && m.runId === run._id && m.answerId).map((m) => String(m.answerId)));
+    const out = rows.filter((m) => m.role !== "bot" && !ownAnswers.has(String(m._id)));
+    if (out.length && (r.pendingMessageId === undefined || out.some((m) => m._id === r.pendingMessageId))) {
+      await ctx.db.patch(r._id, { pendingMessageId: undefined, runRequestedAt: undefined, runRequestedBy: undefined });
+    }
+    return {
+      ok: true as const,
+      owner: { teamId: r.teamId ?? null, createdBy: r.userId },
+      cursor: rows.length ? rows[rows.length - 1]!.createdAt : since,
+      messages: out.map((m) => ({ id: m._id, role: m.role, kind: m.kind, iv: m.iv, ct: m.ct, authorName: m.authorName ?? null, createdAt: m.createdAt })),
+    };
+  },
+});
+
+/** A bot's answer in the middle of a run (it took a message in and answered it): into its thread. */
+export const runReply = mutation({
+  args: { ...secretArg, runTokenHash: v.string(), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, runTokenHash, iv, ct, now }) => {
+    assertService(secret);
+    const found = await runByToken(ctx, runTokenHash);
+    if (!found) return { ok: false as const, error: "run_over" };
+    const id = await ctx.db.insert("botMessages", { routineId: found.r._id, teamId: found.r.teamId, role: "bot", kind: "result", iv, ct, runId: found.run._id, createdAt: now });
+    return { ok: true as const, id };
+  },
+});
+
 // ---- Ambient, the master bot ----
 
 /** The chat as the app shows it: since the person last started a new chat. */

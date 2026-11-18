@@ -224,6 +224,7 @@ done
     chmodSync(join(bin, "claude"), 0o755);
     p = spawn(process.execPath, [RUNNER, "ambient"], {
       env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner",
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
         HOME: dir,

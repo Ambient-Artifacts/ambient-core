@@ -226,4 +226,33 @@ export class BotService {
     const body = await openMessage(this.d.routines.keys, owner, out.answer.iv, out.answer.ct);
     return { answer: body.text, author: out.answer.authorName };
   }
+
+  /**
+   * What came into the bot's thread while its run is going (docs/bots.md, "Messages while a bot
+   * works"): the run takes them into its session instead of a second run starting afterwards.
+   * `cursor`: pass it back as `after` next time.
+   */
+  async inbox(authorization: string | undefined, after?: number): Promise<{ messages: { text: string; who: string; at: number }[]; cursor: number }> {
+    const runTokenHash = this.tokenHash(authorization);
+    const out = await this.d.routines.control.m(api.bots.claimInbox, { runTokenHash, ...(after !== undefined ? { after } : {}) });
+    if (!out.ok) throw refused("run_over", "This run is over.", 409);
+    const owner = this.ownerOf({ teamId: out.owner.teamId ? String(out.owner.teamId) : null, createdBy: String(out.owner.createdBy) });
+    const messages = [];
+    for (const m of out.messages) {
+      const body = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => null);
+      if (body?.text) messages.push({ text: body.text, who: m.authorName ?? (m.role === "ambient" ? "Ambient" : "Your owner"), at: m.createdAt });
+    }
+    return { messages, cursor: out.cursor };
+  }
+
+  /** The run answered a message it took in: into the thread now, not only at the end of the run. */
+  async runReply(authorization: string | undefined, text: string): Promise<void> {
+    const runTokenHash = this.tokenHash(authorization);
+    const who = await this.d.routines.control.q(api.bots.runOwner, { runTokenHash });
+    if (!who) throw refused("run_over", "This run is over.", 409);
+    const owner = this.ownerOf({ teamId: who.teamId ? String(who.teamId) : null, createdBy: String(who.createdBy) });
+    const sealed = await sealMessage(this.d.routines.keys, owner, { text: text.trim().slice(0, MESSAGE_MAX) });
+    const out = await this.d.routines.control.m(api.bots.runReply, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
+    if (!out.ok) throw refused("run_over", "This run is over.", 409);
+  }
 }
