@@ -4,7 +4,7 @@
 // only its owners and admins change them (with `team:write`). Secret values go in, never out.
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { BOT_FACES, BOT_ISOLATIONS, BOT_REPORTS, WEEKDAYS } from "@brain/spec";
+import { BOT_COLORS, BOT_FACES, BOT_ISOLATIONS, BOT_LOOKS, BOT_REPORTS, BOT_SHAPES, BOT_WEAR, WEEKDAYS } from "@brain/spec";
 import type { BotService, ThreadMessage } from "../bots/service.ts";
 import type { AdminService, CommandResult } from "../bots/admin.ts";
 import type { Decision, DecisionService } from "../bots/decisions.ts";
@@ -67,12 +67,14 @@ function claudeLink(c: { id: string }): string {
   return `ambient://computer/${c.id}/claude`;
 }
 
-const STATE_WORDS: Record<string, string> = { working: "working", needs_you: "needs the user", stuck: "stuck (last run failed)", done: "done (last run went fine)", asleep: "asleep" };
+const STATE_WORDS: Record<string, string> = { working: "working", needs_you: "needs the user", stuck: "stuck (last run failed)", done: "done (its last run has news nobody has read yet)", asleep: "asleep (not working)" };
+/** The looks for jobs, as the tool descriptions list them. */
+const LOOKS_LINE = Object.entries(BOT_LOOKS).map(([job, wear]) => `${job}: ${wear.join(" + ")}`).join("; ");
 
 function botLine(r: Routine): string | null {
   if (!r.bot) return null;
   const b = r.bot;
-  const parts = [`Bot: ${STATE_WORDS[b.state] ?? b.state}`, `${b.face} face`, b.runtime === "codex" ? "runs on Codex" : "runs on Claude Code", b.isolation === "container" ? "own container" : "runs on the computer itself", `secrets: ${b.secrets === null ? "all of its owner's" : b.secrets.join(", ") || "none"}`, `reports ${b.report === "news" ? "news only" : "every run"}`];
+  const parts = [`Bot: ${STATE_WORDS[b.state] ?? b.state}`, `a ${b.color} ${b.face}${b.wear.length ? ` wearing ${b.wear.join(", ")}` : ""}`, b.runtime === "codex" ? "runs on Codex" : "runs on Claude Code", b.isolation === "container" ? "own container" : "runs on the computer itself", `secrets: ${b.secrets === null ? "all of its owner's" : b.secrets.join(", ") || "none"}`, `reports ${b.report === "news" ? "news only" : "every run"}`];
   const q = b.openQuestion ? `\n  Asked ${new Date(b.openQuestion.askedAt).toISOString().slice(0, 16).replace("T", " ")} UTC: ${b.openQuestion.text}${b.openQuestion.choices ? ` (choices: ${b.openQuestion.choices.join(" / ")})` : ""}` : "";
   return `  ${parts.join(" · ")}${q}`;
 }
@@ -142,7 +144,9 @@ const ModelArg = z.object({
 
 const BotArg = z
   .object({
-    face: z.enum(BOT_FACES).optional().describe("The shape of its head; its colour is always its state."),
+    face: z.enum(BOT_FACES).optional().describe(`Its shape, a piece of Yosemite: ${BOT_SHAPES.join(", ")}. Its face and motion show how it's doing; the shape and colour never change with that.`),
+    color: z.enum(BOT_COLORS).optional().describe("Its colour for life; without one it gets one picked by its name."),
+    wear: z.array(z.enum(BOT_WEAR)).max(3).optional().describe(`What it wears, to show its job (up to 3; [] for nothing). Looks by job: ${LOOKS_LINE}.`),
     runtime: z.enum(["claude-code", "codex"]).optional().describe('What runs it: "claude-code" (default) or "codex" (OpenAI\'s Codex, signed in with the computer\'s ChatGPT plan or an OpenAI key). Switching drops a model of the other runtime.'),
     isolation: z.enum(BOT_ISOLATIONS).optional().describe('"container" (default): its own container and workspace with only its granted secrets; "host": on the computer itself, like a loop.'),
     secrets: z.array(z.string().max(64)).max(30).nullable().optional().describe("The names of the secrets its runs get (see list_routines); null: all of its owner's."),
@@ -529,12 +533,16 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     {
       title: "Read a bot's thread",
       description: "What a bot reported, what it asked (and whether it was answered) and what people wrote to it, newest last. Bots are routines with a face; list_routines shows which are bots and their state.",
-      inputSchema: { id: z.string().max(64), limit: z.number().int().min(1).max(100).optional().describe("How many of the newest messages; default 20.") },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        id: z.string().max(64),
+        limit: z.number().int().min(1).max(100).optional().describe("How many of the newest messages; default 20."),
+        mark_read: z.boolean().optional().describe("The user is reading it with you: what it said stops being news, so a done bot falls asleep until its next run (as when they open it in the app). Leave it out when you only look."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id, limit }) =>
+    async ({ id, limit, mark_read }) =>
       guard(async () => {
-        const t = await bots.thread(actor, id, limit ?? 20);
+        const t = await bots.thread(actor, id, limit ?? 20, { markSeen: mark_read === true });
         const open = t.openQuestion ? `\n\nOpen question: ${t.openQuestion.text}${t.openQuestion.choices ? ` (choices: ${t.openQuestion.choices.join(" / ")})` : ""}` : "";
         return result(`${t.messages.map(threadLine).join("\n") || "Nothing in the thread yet."}${open}`, t);
       }),

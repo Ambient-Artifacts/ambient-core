@@ -5,7 +5,7 @@
 // with the same two shapes; nothing that decides what to say knows which one it's talking to.
 import type { Notifier, PushMessage } from "../push.ts";
 
-export type Speaker = { kind: "ambient" } | { kind: "bot"; botId: string; name: string; face: string; team: string | null };
+export type Speaker = { kind: "ambient" } | { kind: "bot"; botId: string; name: string; face: string; color?: string; wear?: string[]; team: string | null };
 
 export interface Outgoing {
   speaker: Speaker;

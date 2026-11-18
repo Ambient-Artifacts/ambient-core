@@ -45,6 +45,21 @@ export const thread = query({
   },
 });
 
+/**
+ * Someone read a bot's thread: what its last run said isn't news any more, so the bot goes from
+ * "done" to asleep until its next run (docs/bots.md, "Faces").
+ */
+export const seen = mutation({
+  args: { ...secretArg, ...access, id: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, teamIds, id, now }) => {
+    assertService(secret);
+    const r = await routineFor(ctx, uid, teamIds, id);
+    if (!r?.bot) return { ok: false as const };
+    if ((r.seenAt ?? 0) < now) await ctx.db.patch(r._id, { seenAt: now });
+    return { ok: true as const };
+  },
+});
+
 /** For the list: each bot's open question and the newest thing it said. */
 export const latest = query({
   args: { ...secretArg, ...access, ids: v.array(v.string()) },
@@ -102,6 +117,8 @@ export const post = mutation({
     if (question && kind === "answer") await ctx.db.patch(question._id, { answeredAt: now, answerId: messageId });
     await ctx.db.patch(r._id, {
       openQuestionId: undefined,
+      // Writing to it means its thread was read.
+      seenAt: now,
       pendingMessageId: messageId,
       runRequestedAt: now,
       runRequestedBy: user?.name,
@@ -174,7 +191,7 @@ export const runOwner = query({
     assertService(secret);
     const found = await runByToken(ctx, runTokenHash);
     return found
-      ? { routineId: found.r._id, name: found.r.name, face: found.r.bot?.face ?? "classic", createdBy: found.r.userId, teamId: found.r.teamId ?? null, delegate: found.r.bot?.delegate ?? "brain" }
+      ? { routineId: found.r._id, name: found.r.name, face: found.r.bot?.face ?? "classic", color: found.r.bot?.color ?? null, wear: found.r.bot?.wear ?? null, createdBy: found.r.userId, teamId: found.r.teamId ?? null, delegate: found.r.bot?.delegate ?? "brain" }
       : null;
   },
 });

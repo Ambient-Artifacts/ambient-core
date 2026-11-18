@@ -43,7 +43,7 @@ export function saysYes(text: string): boolean {
 export interface Decision {
   id: string;
   status: "open" | "answered" | "expired";
-  from: { kind: "bot"; id: string; name: string; face: string } | { kind: "ambient" };
+  from: { kind: "bot"; id: string; name: string; face: string; color?: string; wear?: string[] } | { kind: "ambient" };
   question: string;
   options: string[];
   recommendation: { option: string; why: string } | null;
@@ -74,7 +74,7 @@ interface Sealed {
   q: string;
   o: string[];
   r?: { option: string; why: string };
-  bot?: { id: string; name: string; face: string };
+  bot?: { id: string; name: string; face: string; color?: string; wear?: string[] };
   a?: ProposedChange;
 }
 
@@ -177,7 +177,7 @@ export class DecisionService {
    * A bot asked its owner something (the run waits a few minutes). Ambient looks first, by the
    * bot's `delegate`; what it doesn't answer becomes a decision for the person. Never throws.
    */
-  async onBotQuestion(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string }; question: string; choices: string[]; delegate: "never" | "brain" | "most"; team: string | null }): Promise<void> {
+  async onBotQuestion(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; delegate: "never" | "brain" | "most"; team: string | null }): Promise<void> {
     try {
       const name = (await this.d.actorFor(q.uid).catch(() => null)) ? await this.d.ambient.nameOf(q.uid) : "them";
       let suggestion: { option: string; why: string } | null = null;
@@ -215,15 +215,15 @@ export class DecisionService {
   }
 
   /** To the person: a decision in Ambient's chat, and a push (the app channel). */
-  private async escalate(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string }; question: string; choices: string[]; team: string | null }, suggestion: { option: string; why: string } | null) {
-    const body: Sealed = { q: q.question, o: q.choices, ...(suggestion ? { r: suggestion } : {}), bot: { id: q.routineId, name: q.bot.name, face: q.bot.face } };
+  private async escalate(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; team: string | null }, suggestion: { option: string; why: string } | null) {
+    const body: Sealed = { q: q.question, o: q.choices, ...(suggestion ? { r: suggestion } : {}), bot: { id: q.routineId, name: q.bot.name, face: q.bot.face, ...(q.bot.color ? { color: q.bot.color } : {}), ...(q.bot.wear ? { wear: q.bot.wear } : {}) } };
     const sealed = await this.d.keys.seal(this.owner(q.uid), PURPOSE, JSON.stringify(body));
     const row = (await this.d.control.m(api.bots.createDecision, { uid: q.uid as never, routineId: q.routineId, questionId: q.questionId, iv: sealed.iv, ct: sealed.ciphertext, urgent: true, now: this.now() })) as unknown as DecisionRow;
     const text = `${q.bot.name} asks: ${q.question}${suggestion ? `\n\nI'd go with “${suggestion.option}”${suggestion.why ? `: ${suggestion.why}` : "."}` : ""}`;
     await this.d.ambient.say(q.uid, text, String(row.id));
     for (const channel of this.d.channels) {
       void channel
-        .deliver({ speaker: { kind: "bot", botId: q.routineId, name: q.bot.name, face: q.bot.face, team: q.team }, to: q.uid, kind: "question", text: q.question, ...(q.choices.length ? { choices: q.choices } : {}) })
+        .deliver({ speaker: { kind: "bot", botId: q.routineId, name: q.bot.name, face: q.bot.face, color: q.bot.color, wear: q.bot.wear, team: q.team }, to: q.uid, kind: "question", text: q.question, ...(q.choices.length ? { choices: q.choices } : {}) })
         .catch(() => undefined);
     }
   }

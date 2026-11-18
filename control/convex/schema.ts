@@ -19,6 +19,10 @@ export const routineSchedule = v.object({
 /** See BotSettings in @brain/spec (the gateway validates before writing). */
 export const botSettings = v.object({
   face: v.string(),
+  /** Its colour for life (BOT_COLORS); absent: picked by its name. */
+  color: v.optional(v.string()),
+  /** What it wears (BOT_WEAR); absent: nothing. */
+  wear: v.optional(v.array(v.string())),
   runtime: v.string(),
   isolation: v.union(v.literal("container"), v.literal("host")),
   /** Absent: every secret of its owner's (a loop from before bots). */
@@ -457,6 +461,8 @@ export default defineSchema({
     lastSessionId: v.optional(v.string()),
     /** Hash of the last result that reached the thread (report "news" skips a repeat). */
     lastResultHash: v.optional(v.string()),
+    /** When someone last read the bot's thread: a result after it is news ("done"), docs/bots.md. */
+    seenAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

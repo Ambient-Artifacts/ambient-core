@@ -1,6 +1,7 @@
 // Bots end to end (docs/bots.md): the gate, a bot's settings and state, its thread, a run that asks
 // its owner and gets the answer (live, or in the next run that resumes the session), Ambient's chat
 // against a fake Anthropic, the MCP tools, and the real runner script with a stand-in claude.
+import { BOT_COLORS } from "@brain/spec";
 import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +15,7 @@ const RUNNER = join(import.meta.dirname, "..", "..", "runner", "ambient-runner.m
 const daily = { every: "day", time: "09:00", timezone: "Europe/Vienna" };
 const info = { hostname: "srv-test", os: "Linux 6.8", runner: "0.6.0", claude: "2.1.300 (Claude Code)" };
 
-type Bot = { state: string; face: string; isolation: string; secrets: string[] | null; report: string; openQuestion: { id: string; text: string; choices: string[] | null } | null; lastMessage: { text: string } | null };
+type Bot = { state: string; face: string; color: string; wear: string[]; isolation: string; secrets: string[] | null; report: string; openQuestion: { id: string; text: string; choices: string[] | null } | null; lastMessage: { text: string } | null };
 type R = { id: string; name: string; enabled: boolean; runRequested: boolean; bot: Bot | null };
 type Msg = { role: string; kind: string; text: string; choices: string[] | null; author: string | null; answered: boolean | null };
 
@@ -118,7 +119,9 @@ describe("a bot", () => {
     expect(made.status, JSON.stringify(made.json)).toBe(200);
     const r = made.json.routine as R;
     id = r.id;
-    expect(r.bot).toMatchObject({ face: "round", isolation: "container", secrets: ["GH_TOKEN"], report: "news", state: "asleep", openQuestion: null, lastMessage: null });
+    // "round" is a face from before the shapes: it's drawn as the pebble, with a colour picked by its name.
+    expect(r.bot).toMatchObject({ face: "pebble", wear: [], isolation: "container", secrets: ["GH_TOKEN"], report: "news", state: "asleep", openQuestion: null, lastMessage: null });
+    expect(BOT_COLORS).toContain(r.bot!.color);
     expect((await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: daily, bot: { runtime: "copilot" } })).status).toBe(400);
   });
 
@@ -152,6 +155,8 @@ describe("a bot", () => {
 
   it("reports into its thread, sealed in Convex", async () => {
     await hostCall(host, "POST", `/v1/host/runs/${runId}`, { status: "succeeded", summary: "Opened PR #41 with the release notes.", sessionId: "sess-1" });
+    // News nobody has read: done, until the thread is opened.
+    expect((await one(id)).bot).toMatchObject({ state: "done", lastMessage: { text: "Opened PR #41 with the release notes." } });
     const t = await thread(id);
     expect(t.messages.map((m) => [m.kind, m.text])).toEqual([
       ["question", "Which repo?"],
@@ -160,8 +165,8 @@ describe("a bot", () => {
     ]);
     expect(t.messages[0]!.answered).toBe(true);
     expect(t.openQuestion).toBeNull();
-    const r = await one(id);
-    expect(r.bot).toMatchObject({ state: "done", lastMessage: { text: "Opened PR #41 with the release notes." } });
+    // Read in the app: not news anymore, asleep until the next run.
+    expect((await one(id)).bot?.state).toBe("asleep");
     const raw = JSON.stringify(await s.t.run(async (ctx) => ctx.db.query("botMessages").collect()));
     expect(raw).not.toContain("ambient-core");
     expect(raw).not.toContain("PR #41");
@@ -179,6 +184,8 @@ describe("a bot", () => {
     // The same result again isn't news.
     await hostCall(host, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Opened PR #41 with the release notes.", sessionId: "sess-1" });
     expect((await thread(id)).messages.filter((m) => m.kind === "result")).toHaveLength(1);
+    // A run with nothing new to say leaves it asleep, not done.
+    expect((await one(id)).bot?.state).toBe("asleep");
   });
 
   it("is stuck after a failure, and starts afresh when the session is gone", async () => {
@@ -199,7 +206,7 @@ describe("a bot", () => {
 
   it("changes settings and becomes a plain loop again", async () => {
     const changed = (await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${id}`, { bot: { report: "every_run", secrets: null } })).json.routine as R;
-    expect(changed.bot).toMatchObject({ face: "round", report: "every_run", secrets: null });
+    expect(changed.bot).toMatchObject({ face: "pebble", report: "every_run", secrets: null });
     const plain = (await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${id}`, { bot: null })).json.routine as R;
     expect(plain.bot).toBeNull();
     expect((await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/thread`)).status).toBe(404);
@@ -262,16 +269,27 @@ describe("bots over MCP", () => {
     const made = await client.callTool({ name: "create_routine", arguments: { name: "Dev", prompt: "Fix the flaky test.", schedule: daily, computer: computerId, bot: { face: "tall" } } });
     expect(made.isError, text(made)).toBeFalsy();
     const r = (made.structuredContent as { routine: R }).routine;
-    expect(r).toMatchObject({ enabled: false, bot: { face: "tall", isolation: "container" } });
+    expect(r).toMatchObject({ enabled: false, bot: { face: "cap", isolation: "container" } });
     expect(text(made)).toContain("Bot: asleep");
     await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${r.id}`, { enabled: true });
-    const face = await client.callTool({ name: "update_routine", arguments: { id: r.id, bot: { face: "wide" } } });
+    const face = await client.callTool({ name: "update_routine", arguments: { id: r.id, bot: { face: "drop", color: "rose", wear: ["nerd", "hoodie"] } } });
     expect(((face.structuredContent as { routine: R }).routine).enabled).toBe(true);
+    expect(((face.structuredContent as { routine: R }).routine).bot).toMatchObject({ face: "drop", color: "rose", wear: ["nerd", "hoodie"] });
+    expect(text(face)).toContain("a rose drop wearing nerd, hoodie");
+    expect((await client.callTool({ name: "update_routine", arguments: { id: r.id, bot: { wear: ["cape"] } } })).isError).toBe(true);
     const grant = await client.callTool({ name: "update_routine", arguments: { id: r.id, bot: { secrets: ["STRIPE_KEY"] } } });
     expect(((grant.structuredContent as { routine: R }).routine).enabled).toBe(false);
     const sent = await client.callTool({ name: "message_bot", arguments: { id: r.id, text: "Start with the parser tests." } });
     expect(text(sent)).toContain('"Dev" starts a run with it');
     expect(text(await client.callTool({ name: "bot_thread", arguments: { id: r.id } }))).toContain("wrote: Start with the parser tests.");
+    // Reading over MCP marks it read only when asked to (Amb looking in doesn't take the news away).
+    await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${r.id}`, { enabled: true });
+    const runner = await hostCall(host, "POST", `/v1/host/routines/${r.id}/runs`);
+    await hostCall(host, "POST", `/v1/host/runs/${(runner.json.run as { id: string }).id}`, { status: "succeeded", summary: "Parser tests pass again." });
+    await client.callTool({ name: "bot_thread", arguments: { id: r.id } });
+    expect((await one(r.id)).bot?.state).toBe("done");
+    await client.callTool({ name: "bot_thread", arguments: { id: r.id, mark_read: true } });
+    expect((await one(r.id)).bot?.state).toBe("asleep");
     await client.close();
 
     const benPat = String((await appCall(s, ben.access_token, "POST", "/v1/app/pats", { label: "Claude" })).json.token);

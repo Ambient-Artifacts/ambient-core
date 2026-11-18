@@ -43,6 +43,7 @@ function routineShape(r: Doc<"routines">) {
     lastRun: r.lastRun ?? null,
     bot: r.bot ?? null,
     openQuestionId: r.openQuestionId ?? null,
+    seenAt: r.seenAt ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };

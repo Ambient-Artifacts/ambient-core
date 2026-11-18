@@ -162,7 +162,7 @@ export function botAppRoutes(
     const asked = Number(typeof req.query.limit === "string" ? req.query.limit : NaN);
     const limit = Number.isInteger(asked) ? Math.min(Math.max(asked, 1), 100) : 50;
     try {
-      res.json(await d.bots.thread(await actor(res), id(req), limit));
+      res.json(await d.bots.thread(await actor(res), id(req), limit, { markSeen: true }));
     } catch (err) {
       fail(res, err);
     }
