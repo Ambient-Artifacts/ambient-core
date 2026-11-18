@@ -3,7 +3,7 @@
 // optional GOAL.md), how it works on GitHub, the secrets it needs, and two or three questions;
 // the answers fill it in. The bot it makes learns on its own from the start (learning.ts).
 import { z } from "zod";
-import type { BotFace, BotInput, RoutineSchedule } from "@brain/spec";
+import type { BotColor, BotFace, BotInput, BotWear, RoutineSchedule } from "@brain/spec";
 import { RoutineError, type Actor, type Routine, type RoutineService } from "../routines/service.ts";
 import type { Author, BotFolder } from "./folder.ts";
 import type { GitHubEvents, WatchMode } from "./github.ts";
@@ -26,6 +26,9 @@ export interface BotTemplate {
   id: string;
   name: string;
   face: BotFace;
+  /** Its colour and what it wears for the job (docs/bots.md, "Faces"). */
+  color: BotColor;
+  wear: BotWear[];
   description: string;
   /** "auto": Codex when the computer has a Codex sign-in (a second model's eyes), else Claude Code. */
   runtime: "claude-code" | "auto";
@@ -102,7 +105,9 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: "review_bot",
     name: "Reviewer",
-    face: "round",
+    face: "pebble",
+    color: "sage",
+    wear: ["nerd"],
     description: "Reviews every pull request in your repos: comments on real problems only, checks the change against your team's decisions, never merges.",
     runtime: "auto",
     github: ["all_prs"],
@@ -156,7 +161,9 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: "builder",
     name: "Builder",
-    face: "classic",
+    face: "cap",
+    color: "sky",
+    wear: ["hoodie"],
     description: "Builds features and fixes bugs from your messages or labelled issues, in draft pull requests it keeps fixing until nothing's open.",
     runtime: "claude-code",
     github: ["own_prs"],
@@ -196,7 +203,9 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: "wiki_keeper",
     name: "Wiki keeper",
-    face: "tall",
+    face: "dome",
+    color: "sand",
+    wear: ["glasses"],
     description: "After every merge, brings the docs and your team's product pages in step with what changed, and tells you what it updated.",
     runtime: "claude-code",
     github: ["merges", "own_prs"],
@@ -297,7 +306,7 @@ export async function createFromTemplate(
   const target = team ? computers.find((c) => c.team?.slug === team) : input.computer ? computers.find((c) => c.id === input.computer || c.name.toLowerCase() === input.computer!.toLowerCase()) : computers.filter((c) => !c.team && c.ready).length === 1 ? computers.find((c) => !c.team && c.ready) : undefined;
   const codex = target?.openaiAccount && (target.openaiAccount.signedIn === "chatgpt" || target.openaiAccount.signedIn === "api_key" || (target.openaiAccount.use === "key" && target.openaiAccount.key));
   const runtime = t.runtime === "auto" && codex ? "codex" : "claude-code";
-  const bot: BotInput = { face: t.face, runtime, isolation: "container", secrets: t.secrets.map((s) => s.name), report: t.report, delegate: t.delegate } as BotInput;
+  const bot: BotInput = { face: t.face, color: t.color, wear: t.wear, runtime, isolation: "container", secrets: t.secrets.map((s) => s.name), report: t.report, delegate: t.delegate } as BotInput;
   const routine = await d.routines.create(
     actor,
     {

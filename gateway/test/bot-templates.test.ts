@@ -96,7 +96,7 @@ describe("a bot from a template", () => {
       needs: { secrets: string[]; webhook: boolean };
     };
     reviewer = out.routine.id;
-    expect(out.routine).toMatchObject({ name: "Reviewer", enabled: true, bot: { runtime: "claude-code", face: "round", secrets: ["GH_TOKEN"] } });
+    expect(out.routine).toMatchObject({ name: "Reviewer", enabled: true, bot: { runtime: "claude-code", face: "pebble", color: "sage", wear: ["nerd"], secrets: ["GH_TOKEN"] } });
     expect(out.routine.prompt).toContain("Comment only on what must change");
     expect(out.routine.prompt).toContain("Look especially closely at: migrations.");
     expect(out.needs).toEqual({ secrets: ["GH_TOKEN"], webhook: true });

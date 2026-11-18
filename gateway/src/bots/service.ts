@@ -6,6 +6,7 @@
 //
 // Who may do what is the loops' rule: whoever sees a bot reads its thread, whoever may change it
 // writes to it. Only accounts and teams in BRAIN_BOTS have bots at all.
+import { botLook } from "@brain/spec";
 import { api } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Channel, Inbound } from "../channels/channel.ts";
@@ -63,7 +64,7 @@ export class BotService {
       /** Starts a bot's run on its computer at once (its long poll) instead of at the next check. */
       startNow?: (hostId: string, routineId: string) => boolean;
       /** A bot's question goes to Ambient first (DecisionService); without it, straight to the channels. */
-      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string }; question: string; choices: string[]; delegate: "never" | "brain" | "most"; team: string | null }) => void;
+      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; delegate: "never" | "brain" | "most"; team: string | null }) => void;
       now?: () => number;
     },
   ) {}
@@ -112,11 +113,15 @@ export class BotService {
     };
   }
 
-  /** A bot's thread, newest last, and its open question. */
-  async thread(actor: Actor, id: string, limit = 50): Promise<{ messages: ThreadMessage[]; openQuestion: ThreadMessage | null; routine: Routine }> {
+  /**
+   * A bot's thread, newest last, and its open question. With `markSeen` (the app showing it, or
+   * the user reading it with their AI) what it said stops being news: it goes from done to asleep.
+   */
+  async thread(actor: Actor, id: string, limit = 50, opts: { markSeen?: boolean } = {}): Promise<{ messages: ThreadMessage[]; openQuestion: ThreadMessage | null; routine: Routine }> {
     const r = await this.bot(actor, id);
     const out = await this.d.routines.control.q(api.bots.thread, { ...this.access(actor), id, limit });
     if (!out) throw refused("no_such_bot", "There's no such bot.", 404);
+    if (opts.markSeen) await this.d.routines.control.m(api.bots.seen, { ...this.access(actor), id, now: this.now() });
     const owner = this.ownerOf(r);
     // The bot as the list shows it (its state while the app polls the thread).
     const routine = await this.d.routines.get(actor, id);
@@ -193,7 +198,7 @@ export class BotService {
         uid: String(out.notify),
         routineId: String(out.routineId),
         questionId: String(out.questionId),
-        bot: { name: who.name, face: who.face },
+        bot: { name: who.name, ...botLook(who.name, { face: who.face, color: who.color ?? undefined, wear: who.wear ?? undefined }) },
         question: text,
         choices: picks,
         delegate: (who as { delegate?: "never" | "brain" | "most" }).delegate ?? "brain",
@@ -202,7 +207,7 @@ export class BotService {
     } else {
       for (const channel of this.d.channels) {
         void channel
-          .deliver({ speaker: { kind: "bot", botId: String(out.routineId), name: who.name, face: who.face, team: out.team }, to: String(out.notify), kind: "question", text, ...(picks.length ? { choices: picks } : {}) })
+          .deliver({ speaker: { kind: "bot", botId: String(out.routineId), name: who.name, ...botLook(who.name, { face: who.face, color: who.color ?? undefined, wear: who.wear ?? undefined }), team: out.team }, to: String(out.notify), kind: "question", text, ...(picks.length ? { choices: picks } : {}) })
           .catch((err: Error) => console.warn(`[bots] ${channel.kind} couldn't deliver a question: ${err.message}`));
       }
     }

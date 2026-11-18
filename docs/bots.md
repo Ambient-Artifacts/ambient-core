@@ -14,21 +14,37 @@ events in Ambient's own shape, and a channel interface with the app as its first
 
 | Field | Values | Meaning |
 |---|---|---|
-| `face` | `classic`, `round`, `tall`, `wide` | The shape of its head. The colour is always its state. |
+| `face` | `dome`, `pebble`, `cap`, `ridge`, `cloud`, `drop` | Its shape, a piece of Yosemite peeking up from its disc (Half Dome, a pebble, El Capitan, a ridge, a cloud, a drop from the falls). The faces from before (`classic`, `round`, `tall`, `wide`) are still accepted and drawn as one of these (see "Faces"). |
+| `color` | `sky`, `sage`, `sand`, `clay`, `lake`, `rose`, `moss`, `stone` | Its colour for life, one of Ambient's pastels. Absent: one picked by its name. |
+| `wear` | up to 3 of `hoodie`, `nerd`, `glasses`, `headset`, `cap`, `beret`, `tie`, `bowtie`, `monocle`, `ranger`, `headlamp`, `beanie` | What it wears for its job (see "Faces"). Absent: nothing. |
 | `runtime` | `claude-code`, `codex` | What runs it: Claude Code, or OpenAI's Codex (see "Codex next to Claude Code"). Others come as runner adapters. |
 | `isolation` | `container`, `host` | `container`: its own Podman container and volume (its workspace, `HOME`), only its granted secrets. `host`: like a loop today, as the computer's routine user. |
 | `secrets` | names, or `null` | The secrets its runs get. `null` (loops from before): all of its owner's. |
 | `report` | `news`, `every_run` | `news`: the thread gets a run's result only when it failed, asked something or said something new; `every_run`: every result. |
 
-State, worked out by the gateway (never stored):
+State, worked out by the gateway (never stored). It shows only in the face and how it moves; the
+colour never changes:
 
-| State | When | Disc |
+| State | When | Face |
 |---|---|---|
-| `working` | a run is going | sand |
-| `needs_you` | it asked a question nobody answered yet | sky |
-| `stuck` | its last run failed | clay |
-| `done` | its last run went fine | sage |
-| `asleep` | paused, never ran, or no computer | stone |
+| `working` | a run is going | reads: its eyes scan a line, it nods, it blinks |
+| `needs_you` | it asked a question nobody answered yet | has a question: head tilted, one brow up, a "?" |
+| `stuck` | its last run failed | squeezed eyes, worried brows, a sweat drop |
+| `done` | its last run went fine and said something nobody has read yet | smiles, one bounce |
+| `asleep` | not working: between runs once its news was read, a run with nothing new, paused, never ran, or no computer | eyes shut, dozing |
+
+`done` is news: opening the bot's thread in the app (`GET .../thread`), writing to it, or
+`bot_thread` with `mark_read` sets the routine's `seenAt`, and from then on it's asleep until its
+next run says something new. A `news` run that had nothing new to say leaves it asleep.
+
+### Faces
+
+A bot is drawn from `face`, `color` and `wear` (`botLook` in `@brain/spec` maps the old faces:
+`round` → pebble, `tall` → cap, `wide` → ridge, `classic` → one picked by its name). Looks for
+jobs (`BOT_LOOKS`): Engineer hoodie; Bug fixer thick glasses and hoodie; Reviewer thick glasses;
+Researcher reading glasses; Writer beret; Support headset; Sales shirt and tie; Growth baseball
+cap; Finance monocle and bow tie; Monitoring ranger hat; Night jobs headlamp; Ops beanie. The
+drawing (shapes, expressions, motion, the glaze) is specified in the app (`BotFace.swift`).
 
 ## The app's API
 
@@ -48,7 +64,9 @@ plain loop):
 
 ```json
 "bot": {
-  "face": "classic",
+  "face": "pebble",
+  "color": "sage",
+  "wear": ["nerd", "hoodie"],
   "runtime": "claude-code",
   "isolation": "container",
   "secrets": ["GH_TOKEN"],
@@ -60,7 +78,7 @@ plain loop):
 ```
 
 `POST /v1/app/routines` and `PATCH /v1/app/routines/:id` take `bot` as input:
-`{ "face"?, "isolation"?, "secrets"?: [names] | null, "report"? }` (all optional; `runtime` may be
+`{ "face"?, "color"?, "wear"?: [..], "isolation"?, "secrets"?: [names] | null, "report"? }` (all optional; `runtime` may be
 sent and must be `claude-code`). Sending `bot` on a plain loop makes it a bot; `"bot": null` on
 PATCH makes it a plain loop again.
 
@@ -373,7 +391,7 @@ conversation, and an answer anywhere settles it everywhere.
 
 ```json
 { "id": "…", "status": "open" | "answered" | "expired",
-  "from": { "kind": "bot", "id": "<routine id>", "name": "Blog draft", "face": "tall" } | { "kind": "ambient" },
+  "from": { "kind": "bot", "id": "<routine id>", "name": "Blog draft", "face": "cap", "color": "rose", "wear": ["beret"] } | { "kind": "ambient" },
   "question": "Which topic for Monday?",
   "options": ["Wiki in git", "AI is multiplayer"],
   "recommendation": { "option": "AI is multiplayer", "why": "You wanted more variety (2026-10-16)." } | null,
@@ -788,9 +806,9 @@ its own from the start (`learn: "auto"`).
 
 | id | Name | Face | GitHub | Runtime | Schedule (besides GitHub's events) |
 |---|---|---|---|---|---|
-| `review_bot` | Reviewer | round | `all_prs` | Codex when the computer has a Codex sign-in (a second model's eyes), else Claude Code | weekdays 09:00: pull requests nobody reviewed for a day |
-| `builder` | Builder | classic | `own_prs` | Claude Code | weekdays 09:00: labelled issues |
-| `wiki_keeper` | Wiki keeper | tall | `merges`, `own_prs` | Claude Code | Fridays 15:00: the week's merges |
+| `review_bot` | Reviewer | sage pebble, thick glasses | `all_prs` | Codex when the computer has a Codex sign-in (a second model's eyes), else Claude Code | weekdays 09:00: pull requests nobody reviewed for a day |
+| `builder` | Builder | sky cap, hoodie | `own_prs` | Claude Code | weekdays 09:00: labelled issues |
+| `wiki_keeper` | Wiki keeper | sand dome, reading glasses | `merges`, `own_prs` | Claude Code | Fridays 15:00: the week's merges |
 
 Questions (`id`, kind, default):
 
@@ -806,7 +824,7 @@ and `brain-check` (search the brain for decisions and product pages the change t
 them, ask); the Builder `pr-gate`; the Wiki keeper `what-to-update`. Each needs `GH_TOKEN`; the
 template says which rights in words (no merge rights for any).
 
-- `GET /v1/app/bot-templates` → `{ "templates": [{ "id", "name", "face", "description", "runtime", "github": [..], "secrets": [{ "name", "why" }], "report", "delegate", "schedule", "questions": [{ "id", "label", "kind": "repos"|"choice"|"text", "options"?: [{ "id", "label" }], "default"?, "required", "hint"? }] }] }`
+- `GET /v1/app/bot-templates` → `{ "templates": [{ "id", "name", "face", "color", "wear", "description", "runtime", "github": [..], "secrets": [{ "name", "why" }], "report", "delegate", "schedule", "questions": [{ "id", "label", "kind": "repos"|"choice"|"text", "options"?: [{ "id", "label" }], "default"?, "required", "hint"? }] }] }`
 - `POST /v1/app/bots/from-template` with `{ "template", "answers": { "<question id>": "…" | ["owner/name"] }, "team"?, "computer"?, "name"?, "schedule"? }`
   → `{ "routine": Routine, "needs": { "secrets": ["GH_TOKEN"], "webhook": true } }`: made in the
   app it's on at once; `needs` says what's still missing (secrets not stored yet for that owner,

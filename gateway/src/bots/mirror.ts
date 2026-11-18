@@ -66,7 +66,7 @@ interface BotRow {
   promptCt: string;
   schedule: unknown;
   enabled: boolean;
-  bot: { face: string; runtime: string; isolation: string; secrets?: string[]; report: string; model?: unknown; delegate?: string };
+  bot: { face: string; color?: string; wear?: string[]; runtime: string; isolation: string; secrets?: string[]; report: string; model?: unknown; delegate?: string };
   createdAt: number;
 }
 
@@ -220,6 +220,8 @@ export class BotMirror {
       const settings = {
         name: b.name,
         face: b.bot.face,
+        ...(b.bot.color ? { color: b.bot.color } : {}),
+        ...(b.bot.wear?.length ? { wear: b.bot.wear } : {}),
         runtime: b.bot.runtime,
         isolation: b.bot.isolation,
         schedule: b.schedule,

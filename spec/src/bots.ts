@@ -4,9 +4,63 @@
 // another runtime (Codex, Copilot, an API model) is a runner adapter, not a redesign.
 import { z } from "zod";
 
-/** The head's shape; the colour is always the bot's state. */
-export const BOT_FACES = ["classic", "round", "tall", "wide"] as const;
+/**
+ * What a bot looks like (docs/bots.md, "Faces"): a piece of Yosemite peeking up from a disc in the
+ * bot's own colour, dressed for its job. The colour never changes; how it's doing shows only in its
+ * face and how it moves. Shapes: Half Dome, a pebble, El Capitan, a ridge, a cloud, a drop from
+ * the falls.
+ */
+export const BOT_SHAPES = ["dome", "pebble", "cap", "ridge", "cloud", "drop"] as const;
+export type BotShape = (typeof BOT_SHAPES)[number];
+/** Stored faces: the shapes, and the names from before them (classic, round, tall, wide). */
+export const BOT_FACES = [...BOT_SHAPES, "classic", "round", "tall", "wide"] as const;
 export type BotFace = (typeof BOT_FACES)[number];
+/** Ambient's pastels (design/color.md); a bot keeps its one for life. */
+export const BOT_COLORS = ["sky", "sage", "sand", "clay", "lake", "rose", "moss", "stone"] as const;
+export type BotColor = (typeof BOT_COLORS)[number];
+/** What a bot can wear: real things a person in that job would wear (a few at once). */
+export const BOT_WEAR = ["hoodie", "nerd", "glasses", "headset", "cap", "beret", "tie", "bowtie", "monocle", "ranger", "headlamp", "beanie"] as const;
+export type BotWear = (typeof BOT_WEAR)[number];
+/** A look for each kind of job, for whoever dresses a new bot (the app's picker, Claude over MCP). */
+export const BOT_LOOKS: Record<string, BotWear[]> = {
+  Engineer: ["hoodie"],
+  "Bug fixer": ["nerd", "hoodie"],
+  Reviewer: ["nerd"],
+  Researcher: ["glasses"],
+  Writer: ["beret"],
+  Support: ["headset"],
+  Sales: ["tie"],
+  Growth: ["cap"],
+  Finance: ["monocle", "bowtie"],
+  Monitoring: ["ranger"],
+  "Night jobs": ["headlamp"],
+  Ops: ["beanie"],
+};
+
+/** One of `list`, picked by `name`: stable for a name, spread across names (FNV-1a). */
+function pickBy<T>(name: string, list: readonly T[]): T {
+  let h = 2166136261;
+  for (let i = 0; i < name.length; i++) h = Math.imul(h ^ name.charCodeAt(i), 16777619);
+  return list[(h >>> 0) % list.length]!;
+}
+
+/**
+ * The look a bot is drawn with. A face from before the shapes maps onto one (round, tall and wide
+ * onto the pebble, El Cap and the ridge; classic, the old default, onto one picked by its name, so
+ * the first bots don't all look alike); no colour yet: one picked by its name.
+ */
+export interface BotLook {
+  face: BotShape;
+  color: BotColor;
+  wear: BotWear[];
+}
+export function botLook(name: string, s: { face: string; color?: string; wear?: string[] }): BotLook {
+  const legacy: Record<string, BotShape> = { round: "pebble", tall: "cap", wide: "ridge" };
+  const face = (BOT_SHAPES as readonly string[]).includes(s.face) ? (s.face as BotShape) : (legacy[s.face] ?? pickBy(name, BOT_SHAPES));
+  const color = (BOT_COLORS as readonly string[]).includes(s.color ?? "") ? (s.color as BotColor) : pickBy(`${name}·colour`, BOT_COLORS);
+  const wear = (s.wear ?? []).filter((w): w is BotWear => (BOT_WEAR as readonly string[]).includes(w));
+  return { face, color, wear };
+}
 
 /** What runs a bot; the runner has one adapter per runtime (docs/bots.md, "Codex next to Claude Code"). */
 export const BOT_RUNTIMES = ["claude-code", "codex"] as const;
@@ -57,6 +111,10 @@ const SecretNameList = z.array(z.string().regex(/^[A-Z_][A-Z0-9_]{0,63}$/)).max(
 /** What's stored with a routine that is a bot. `secrets` undefined: all of its owner's (loops from before). */
 export const BotSettings = z.object({
   face: z.enum(BOT_FACES),
+  /** Absent: one picked by its name (botLook). */
+  color: z.enum(BOT_COLORS).optional(),
+  /** What it wears; absent or empty: nothing. */
+  wear: z.array(z.enum(BOT_WEAR)).max(3).optional(),
   runtime: z.enum(BOT_RUNTIMES),
   isolation: z.enum(BOT_ISOLATIONS),
   secrets: SecretNameList.optional(),
@@ -71,6 +129,9 @@ export type BotSettings = z.infer<typeof BotSettings>;
 /** What the app and the MCP tools send; everything optional, defaults below. */
 export const BotInput = z.object({
   face: z.enum(BOT_FACES).optional(),
+  color: z.enum(BOT_COLORS).optional(),
+  /** [] takes everything off. */
+  wear: z.array(z.enum(BOT_WEAR)).max(3).optional(),
   runtime: z.enum(BOT_RUNTIMES).optional(),
   isolation: z.enum(BOT_ISOLATIONS).optional(),
   /** null: all of the owner's secrets. */
@@ -92,8 +153,12 @@ export function botSettings(input: BotInput, current?: BotSettings): BotSettings
   const runtime = input.runtime ?? base.runtime;
   const kept = base.model && modelRuntime(base.model.model) === runtime ? base.model : undefined;
   const model = input.model === null ? undefined : input.model ? storedModel(input.model) : kept;
+  const color = input.color ?? base.color;
+  const wear = input.wear ? [...new Set(input.wear)] : base.wear;
   return {
     face: input.face ?? base.face,
+    ...(color ? { color } : {}),
+    ...(wear?.length ? { wear } : {}),
     runtime,
     isolation: input.isolation ?? base.isolation,
     ...(secrets ? { secrets: [...new Set(secrets)].sort() } : {}),
@@ -103,12 +168,27 @@ export function botSettings(input: BotInput, current?: BotSettings): BotSettings
   };
 }
 
-/** A bot's state from what is stored: never kept itself, so it can't go stale. */
-export function botState(r: { enabled: boolean; ready: boolean; lastRunStatus: string | null; openQuestion: boolean }): BotState {
+/**
+ * A bot's state from what is stored: never kept itself, so it can't go stale. "done" is news: its
+ * last run went fine and reported something nobody has looked at yet (`news`; undefined counts as
+ * news). Once its thread has been read, or when a run had nothing new to say, it's asleep until
+ * the next run: between runs a bot isn't working.
+ */
+export function botState(r: { enabled: boolean; ready: boolean; lastRunStatus: string | null; openQuestion: boolean; news?: boolean }): BotState {
   if (r.lastRunStatus === "running") return "working";
   if (r.openQuestion) return "needs_you";
   if (!r.enabled || !r.ready || !r.lastRunStatus) return "asleep";
-  return r.lastRunStatus === "failed" ? "stuck" : "done";
+  if (r.lastRunStatus === "failed") return "stuck";
+  return r.news === false ? "asleep" : "done";
+}
+
+/**
+ * Whether a bot's last run left news nobody has read: its newest message is a result from that
+ * run, newer than when its thread was last read.
+ */
+export function unseenNews(last: { kind: string; at: number } | null, lastRunStartedAt: number | null, seenAt: number | null): boolean {
+  if (!last || last.kind !== "result") return false;
+  return last.at >= (lastRunStartedAt ?? 0) && last.at > (seenAt ?? 0);
 }
 
 /**
@@ -127,6 +207,8 @@ export interface BotSpecV1 {
   version: 1;
   name: string;
   face: BotFace;
+  color?: BotColor;
+  wear?: BotWear[];
   runtime: BotRuntime;
   /** AGENTS.md: what it does and how. */
   instructions: string;

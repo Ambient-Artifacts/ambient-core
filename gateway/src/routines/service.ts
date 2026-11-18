@@ -13,7 +13,7 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { BotInput, ModelChoice, RoutineSchedule, botSettings, modelRuntime, botState, describeSchedule, nextRun, onCalendar, storedModel, type BotSettings, type BotState } from "@brain/spec";
+import { BotInput, ModelChoice, RoutineSchedule, botLook, botSettings, modelRuntime, botState, describeSchedule, nextRun, onCalendar, storedModel, unseenNews, type BotColor, type BotSettings, type BotShape, type BotState, type BotWear } from "@brain/spec";
 import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix } from "../bots/messages.ts";
 import type { BotsAccess } from "../config.ts";
 import { api, type Control } from "../control.ts";
@@ -166,6 +166,8 @@ interface RoutineRow {
   lastRun: { status: string; startedAt: number; finishedAt?: number } | null;
   bot: BotSettings | null;
   openQuestionId: string | null;
+  /** When the bot's thread was last read (absent on rows from before it). */
+  seenAt?: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -283,7 +285,12 @@ export interface Routine {
 }
 
 export interface BotView {
-  face: BotSettings["face"];
+  /** Its shape (an older stored face is mapped onto one, botLook). */
+  face: BotShape;
+  /** Its colour for life. */
+  color: BotColor;
+  /** What it wears for its job. */
+  wear: BotWear[];
   runtime: BotSettings["runtime"];
   isolation: BotSettings["isolation"];
   /** The secrets its runs get; null: all of its owner's. */
@@ -528,15 +535,17 @@ export class RoutineService {
     const open = async (m: { iv: string; ct: string }) => openMessage(this.d.keys, owner, m.iv, m.ct, MESSAGE_PURPOSE).catch(() => ({ text: "", choices: undefined }));
     const q = latest?.question ? { m: latest.question, body: await open(latest.question) } : null;
     const last = latest?.last ? { m: latest.last, body: await open(latest.last) } : null;
+    const look = botLook(r.name, r.bot);
+    const news = unseenNews(last ? { kind: last.m.kind, at: last.m.createdAt } : null, r.lastRun?.startedAt ?? null, r.seenAt ?? null);
     return {
-      face: r.bot.face,
+      ...look,
       runtime: r.bot.runtime,
       isolation: r.bot.isolation,
       secrets: r.bot.secrets ?? null,
       report: r.bot.report,
       model: r.bot.model ? { model: r.bot.model.model, effort: r.bot.model.effort ?? null, fallback: r.bot.model.fallback ?? null } : null,
       delegate: r.bot.delegate ?? "brain",
-      state: botState({ enabled: r.enabled, ready, lastRunStatus: r.lastRun?.status ?? null, openQuestion: r.openQuestionId !== null }),
+      state: botState({ enabled: r.enabled, ready, lastRunStatus: r.lastRun?.status ?? null, openQuestion: r.openQuestionId !== null, news }),
       openQuestion: q ? { id: String(q.m.id), text: q.body.text, choices: q.body.choices ?? null, askedAt: q.m.createdAt } : null,
       lastMessage: last ? { text: last.body.text, kind: last.m.kind, at: last.m.createdAt, fix: claudeFix(last.m.kind, last.body.text, computer) } : null,
     };
