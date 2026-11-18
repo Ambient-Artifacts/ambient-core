@@ -4,7 +4,7 @@
 // bot's thread says so, where its owner talks to it.
 import { api } from "../control.ts";
 import type { Actor, RoutineService } from "../routines/service.ts";
-import { AGENTS, MEMORY, checkPath, type Author, type BotFolder, type FileInfo, type FileView, type Handoff } from "./folder.ts";
+import { AGENTS, FolderError, MEMORY, checkPath, type Author, type BotFolder, type FileInfo, type FileView, type Handoff } from "./folder.ts";
 import { sealMessage } from "./messages.ts";
 
 export class BotFiles {
@@ -15,6 +15,12 @@ export class BotFiles {
       now?: () => number;
     },
   ) {}
+
+  /**
+   * Refuses a change before it's made (the reviewer may not rewrite a bot's AGENTS.md: it
+   * proposes it instead; docs/bots.md, "Automations"). Returns why, or null to allow it.
+   */
+  guard?: (actor: Actor, id: string, path: string, by: Author) => string | null;
 
   private now(): number {
     return this.d.now?.() ?? Date.now();
@@ -44,6 +50,8 @@ export class BotFiles {
   /** A new version of a file; `by` says who (the person in the app, Amb through its tools). */
   async write(actor: Actor, id: string, path: string, content: string, by: Author, why: string | null, source: string): Promise<FileView> {
     const p = checkPath(path);
+    const refusal = this.guard?.(actor, id, p, by);
+    if (refusal) throw new FolderError("propose_instead", refusal, 409);
     const f = await this.d.routines.folderOf(actor, id, true);
     let view: FileView;
     if (p === AGENTS) {
@@ -67,7 +75,8 @@ export class BotFiles {
     return this.write(actor, id, path, text, by, `restored version ${version}`, source);
   }
 
-  private async note(actor: Actor, id: string, text: string): Promise<void> {
+  /** A note from Amb in a bot's thread (doesn't start a run). */
+  async note(actor: Actor, id: string, text: string): Promise<void> {
     const f = await this.d.routines.folderOf(actor, id, false);
     const sealed = await sealMessage(this.d.routines.keys, f.owner, { text });
     const access = { uid: actor.uid as never, teamIds: actor.teams.filter((t) => t.status === "active").map((t) => t.id) as never };
@@ -80,4 +89,6 @@ export interface Folders {
   files: BotFiles;
   folder: BotFolder;
   history: import("./history.ts").HistorySearch;
+  /** Amb's automations (set once Amb is up; docs/bots.md, "Automations"). */
+  automations?: import("./automations.ts").Automations;
 }

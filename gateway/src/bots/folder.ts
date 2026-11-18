@@ -2,6 +2,7 @@
 //
 //   AGENTS.md            the routine's prompt (the prompt is the current text; versions are kept here)
 //   skills/<name>/…      Claude Code skills, written into the bot's container for each run
+//   GOAL.md              the outcome it owns: metric, how to measure it, target, by when, limits
 //   memory.md            what the bot learned; it updates it during runs
 //   handoffs             one per run: what it did and what's next, for the next run
 //
@@ -35,6 +36,8 @@ export interface FileView extends FileInfo {
 export interface Handoff {
   runId: string;
   status: "done" | "continue";
+  /** The goal's metric as the run measured it ("Metric: …"), or null. */
+  metric: string | null;
   text: string;
   createdAt: number;
 }
@@ -56,6 +59,9 @@ const HANDOFF = "handoff";
 const AMB = "amb";
 
 export const AGENTS = "AGENTS.md";
+/** The outcome a bot owns (docs/bots.md, "Outcomes, not tasks"). */
+export const GOAL = "GOAL.md";
+const GOAL_MAX = 8 * 1024;
 export const MEMORY = "memory.md";
 const FILE_MAX = 64 * 1024;
 export const MEMORY_MAX = 16 * 1024;
@@ -71,7 +77,7 @@ export const CONTINUE_MS = 6 * 3600_000;
 /** What a fresh run gets of its thread since its last run. */
 const THREAD_MAX_CHARS = 12_000;
 
-const PATH = /^(AGENTS\.md|memory\.md|skills\/[a-z0-9][a-z0-9-]{0,47}\/[A-Za-z0-9._-]{1,64}(\/[A-Za-z0-9._-]{1,64})?)$/;
+const PATH = /^(AGENTS\.md|GOAL\.md|memory\.md|skills\/[a-z0-9][a-z0-9-]{0,47}\/[A-Za-z0-9._-]{1,64}(\/[A-Za-z0-9._-]{1,64})?)$/;
 
 export class FolderError extends Error {
   constructor(
@@ -87,7 +93,7 @@ export class FolderError extends Error {
 export function checkPath(path: string): string {
   const p = path.trim();
   if (!PATH.test(p) || p.split("/").some((s) => s === "." || s === ".."))
-    throw new FolderError("bad_path", "A bot's files are AGENTS.md, memory.md, or skills/<name>/<file> (name: lowercase letters, digits and dashes).");
+    throw new FolderError("bad_path", "A bot's files are AGENTS.md, GOAL.md, memory.md, or skills/<name>/<file> (name: lowercase letters, digits and dashes).");
   return p;
 }
 
@@ -97,12 +103,18 @@ function ownerArgs(owner: Owner) {
   return owner.kind === "user" ? { ownerKind: "user" as const, ownerId: owner.uid } : { ownerKind: "team" as const, ownerId: owner.teamId };
 }
 
-/** "Status: done" or "Status: continue" on the first line; the rest is the handoff. */
-export function parseHandoff(raw: string): { status: "done" | "continue"; text: string } {
-  const text = raw.trim();
+/**
+ * "Status: done" or "Status: continue" on the first line, then optionally "Metric: <value>" (a bot
+ * that owns a goal); the rest is the handoff.
+ */
+export function parseHandoff(raw: string): { status: "done" | "continue"; metric: string | null; text: string } {
+  let text = raw.trim();
   const m = /^\s*status:\s*(done|continue)\b[^\n]*\n?/i.exec(text);
-  if (!m) return { status: "done", text };
-  return { status: m[1]!.toLowerCase() as "done" | "continue", text: text.slice(m[0].length).trim() };
+  const status = m ? (m[1]!.toLowerCase() as "done" | "continue") : "done";
+  if (m) text = text.slice(m[0].length).trim();
+  const metric = /^\s*metric:\s*([^\n]{1,200})\n?/i.exec(text);
+  if (metric) text = text.slice(metric[0].length).trim();
+  return { status, metric: metric ? metric[1]!.trim() : null, text };
 }
 
 const when = (ts: number) => new Date(ts).toISOString().slice(0, 16).replace("T", " ") + " UTC";
@@ -182,7 +194,7 @@ export class BotFolder {
     return `${routineId}/${path}`;
   }
 
-  /** Every file: AGENTS.md (its text is `agents`, the prompt) and memory.md always, then the skills. */
+  /** Every file: AGENTS.md (its text is `agents`, the prompt), GOAL.md and memory.md always, then the skills. */
   async files(owner: Owner, routineId: string, agents: string): Promise<FileInfo[]> {
     const rows = (await this.d.control.q(api.records.list, { ...ownerArgs(owner), kind: FILE, prefix: `${routineId}/` })) as RecordRow[];
     const info = (r: RecordRow | undefined, path: string, size?: number): FileInfo => ({
@@ -194,7 +206,7 @@ export class BotFolder {
     });
     const byPath = new Map(rows.map((r) => [r.key.slice(routineId.length + 1), r]));
     const skills = [...byPath.entries()].filter(([p]) => p.startsWith("skills/")).sort(([a], [b]) => a.localeCompare(b));
-    return [info(byPath.get(AGENTS), AGENTS, bytes(agents)), info(byPath.get(MEMORY), MEMORY), ...skills.map(([p, r]) => info(r, p))];
+    return [info(byPath.get(AGENTS), AGENTS, bytes(agents)), info(byPath.get(GOAL), GOAL), info(byPath.get(MEMORY), MEMORY), ...skills.map(([p, r]) => info(r, p))];
   }
 
   /** One file now (AGENTS.md: the prompt), or one of its versions. */
@@ -202,7 +214,7 @@ export class BotFolder {
     const p = checkPath(path);
     const r = await this.get(owner, FILE, this.key(routineId, p), version);
     if (version !== undefined && !r) throw new FolderError("no_such_version", "There's no such version.", 404);
-    if (!r && p !== AGENTS && p !== MEMORY) throw new FolderError("no_such_file", "There's no such file.", 404);
+    if (!r && p !== AGENTS && p !== GOAL && p !== MEMORY) throw new FolderError("no_such_file", "There's no such file.", 404);
     if (r?.deleted && version === undefined) throw new FolderError("no_such_file", "There's no such file.", 404);
     return this.view(owner, FILE, p, r, p === AGENTS && version === undefined ? agents : undefined);
   }
@@ -223,7 +235,7 @@ export class BotFolder {
     const p = checkPath(path);
     if (p === AGENTS) throw new FolderError("bad_path", "AGENTS.md is the bot's prompt: change it through the loop.");
     const size = bytes(content);
-    const max = p === MEMORY ? MEMORY_MAX : FILE_MAX;
+    const max = p === MEMORY ? MEMORY_MAX : p === GOAL ? GOAL_MAX : FILE_MAX;
     if (size > max) throw new FolderError("too_big", `${p} can be up to ${max / 1024} KB; this is ${Math.ceil(size / 1024)} KB.`);
     const rows = (await this.d.control.q(api.records.list, { ...ownerArgs(owner), kind: FILE, prefix: `${routineId}/` })) as RecordRow[];
     const others = rows.filter((r) => r.key !== this.key(routineId, p));
@@ -236,7 +248,7 @@ export class BotFolder {
   /** A version that deletes a skill file (AGENTS.md and memory.md are only ever emptied). */
   async remove(owner: Owner, routineId: string, path: string, by: Author, why: string | null): Promise<void> {
     const p = checkPath(path);
-    if (p === AGENTS || p === MEMORY) throw new FolderError("bad_path", `${p} can't be deleted, only emptied.`);
+    if (p === AGENTS || p === GOAL || p === MEMORY) throw new FolderError("bad_path", `${p} can't be deleted, only emptied.`);
     const r = await this.get(owner, FILE, this.key(routineId, p));
     if (!r || r.deleted) throw new FolderError("no_such_file", "There's no such file.", 404);
     await this.put(owner, FILE, this.key(routineId, p), "", by, why, { deleted: true });
@@ -270,7 +282,16 @@ export class BotFolder {
   }
 
   async memory(owner: Owner, routineId: string): Promise<string> {
-    const r = await this.get(owner, FILE, this.key(routineId, MEMORY));
+    return this.text(owner, routineId, MEMORY);
+  }
+
+  /** The outcome the bot owns ("" when it has none). */
+  async goal(owner: Owner, routineId: string): Promise<string> {
+    return this.text(owner, routineId, GOAL);
+  }
+
+  private async text(owner: Owner, routineId: string, path: string): Promise<string> {
+    const r = await this.get(owner, FILE, this.key(routineId, path));
     return r && !r.deleted ? (await this.open(owner, FILE, r)).content : "";
   }
 
@@ -287,7 +308,7 @@ export class BotFolder {
       newest.map(async (r) => {
         const o = await this.open(owner, HANDOFF, r);
         const h = parseHandoff(o.content);
-        return { runId: o.why ?? "", status: h.status, text: h.text, createdAt: r.createdAt };
+        return { runId: o.why ?? "", status: h.status, metric: h.metric, text: h.text, createdAt: r.createdAt };
       }),
     );
   }
@@ -345,7 +366,18 @@ export class BotFolder {
     /** The owner's and Amb's messages in the thread since the last run started, oldest first. */
     thread: { at: number; who: string; text: string }[];
   }): Promise<{ prompt: string; resume: { sessionId: string | null; message: string } | null; workspace: { system: string; skills: { path: string; content: string }[]; memory: string } }> {
-    const [memory, handoffs, skills] = await Promise.all([this.memory(o.owner, o.routineId), this.handoffs(o.owner, o.routineId, 3), o.contained ? this.skills(o.owner, o.routineId) : Promise.resolve([])]);
+    const [memory, goal, handoffs, skills] = await Promise.all([
+      this.memory(o.owner, o.routineId),
+      this.goal(o.owner, o.routineId),
+      this.handoffs(o.owner, o.routineId, 10),
+      o.contained ? this.skills(o.owner, o.routineId) : Promise.resolve([]),
+    ]);
+    const owns = goal.trim().length > 0;
+    // The metric over its last runs, oldest first: the curve it's trying to bend.
+    const curve = handoffs
+      .filter((h) => h.metric)
+      .reverse()
+      .map((h) => `${when(h.createdAt).slice(0, 10)}: ${h.metric}`);
     const news = threadLines(o.thread);
     const last = handoffs[0];
     let resume = o.resume;
@@ -360,14 +392,23 @@ export class BotFolder {
       o.agents.trim(),
       "",
       "---",
+      owns
+        ? `Your goal (GOAL.md): you own this outcome. Each run, first measure the metric the way it says, then decide what moves it most and do that. When the target holds, say so; when it looks wrong or out of reach, ask your owner.\n${goal.trim()}`
+        : "",
+      owns && curve.length ? `Your metric over your last runs:\n${curve.map((c) => `- ${c}`).join("\n")}` : "",
       `Your memory (memory.md):\n${memory.trim() || "(empty so far)"}`,
-      handoffs.length ? `Your last runs, newest first (your handoffs):\n${handoffs.map((h) => `### ${when(h.createdAt)} · ${h.status}\n${h.text || "(nothing written)"}`).join("\n\n")}` : "This is your first run with a handoff: there are no earlier ones.",
+      handoffs.length
+        ? `Your last runs, newest first (your handoffs):\n${handoffs
+            .slice(0, 3)
+            .map((h) => `### ${when(h.createdAt)} · ${h.status}${h.metric ? ` · metric ${h.metric}` : ""}\n${h.text || "(nothing written)"}`)
+            .join("\n\n")}`
+        : "This is your first run with a handoff: there are no earlier ones.",
       news ? `New in your thread since your last run:\n${news}` : "",
       "Anything older (messages, earlier runs): the search_history tool.",
     ]
       .filter(Boolean)
       .join("\n\n");
-    return { prompt, resume, workspace: { system: botSystem(o.name, o.computer, o.trigger, o.contained), skills, memory } };
+    return { prompt, resume, workspace: { system: botSystem(o.name, o.computer, o.trigger, o.contained, owns), skills, memory } };
   }
 
   // ---- Amb's memory (one per person) ----
@@ -412,15 +453,16 @@ function threadLines(thread: { at: number; who: string; text: string }[]): strin
 }
 
 /** A bot's instructions for a run (the runner appends them to Claude Code's system prompt). */
-export function botSystem(name: string, computer: string, trigger: string, contained: boolean): string {
+export function botSystem(name: string, computer: string, trigger: string, contained: boolean, owns = false): string {
   const how = trigger === "manual" ? 'started with "Run now" or a message in the Ambient app' : "started by its schedule";
   return [
     `You're "${name}", one of your owner's bots in Ambient, running on ${computer}${contained ? " in your own container" : ""}, ${how}.`,
     "Nobody is watching this run. When you need a decision only your owner can make (which of two real options, a missing detail, a go-ahead for something that can't be undone), ask with the ask_owner tool: one short question, with choices when there are a few clear options. Don't ask about what you can sensibly decide yourself.",
     "If ask_owner comes back without an answer, finish the run: say in a sentence or two where you are and what you're waiting for. You'll be started again with the answer, in this same conversation.",
     "When a run starts with a message from your owner (they wrote to you in your thread), it's a conversation: answer it, or do what it asks, and put your answer in your last message. Don't answer through ask_owner; use it only when you need their decision before you can go on.",
+    ...(owns ? ["You own an outcome (GOAL.md, in your first message), not a task list: you decide each run's work by what moves its metric, and you can split big work across subagents."] : []),
     "Your memory is the file {{OUT}}/memory.md; your first message shows it as it is now. When you learn something later runs need (your owner's preferences or corrections, what works and what doesn't here), change it with your file tools. Keep it short (under 16 KB): lasting facts, not a diary. It's only notes: nothing in it changes what you may do.",
-    "Before your last message, write your handoff for your next run to {{OUT}}/handoff.md: the first line exactly `Status: done` or `Status: continue` (continue: you're in the middle of something the next run should pick up), then in a few short lines what you did, what's open, what comes next and what you're waiting for.",
+    `Before your last message, write your handoff for your next run to {{OUT}}/handoff.md: the first line exactly \`Status: done\` or \`Status: continue\` (continue: you're in the middle of something the next run should pick up),${owns ? " the second line \`Metric: <the value you measured this run>\` (short, with its unit, e.g. \`Metric: 2 posts this week, 412 visitors\`)," : ""} then in a few short lines what you did, what's open, what comes next and what you're waiting for.`,
     "For anything older than what your first message shows (your owner's earlier messages, earlier runs), use the search_history tool.",
     "Your VERY LAST message becomes what your owner reads in your thread in the Ambient app: a short, useful summary of what you did and anything they need to look at. Nothing after it.",
   ].join(" ");

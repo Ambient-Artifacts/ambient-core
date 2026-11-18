@@ -198,6 +198,7 @@ export async function startStack(
     decisions: stack.decisions,
     heartbeat: stack.heartbeat,
     folders: stack.folders,
+    automations: stack.automations,
     graphTokens,
     deliverer,
     close: async () => {

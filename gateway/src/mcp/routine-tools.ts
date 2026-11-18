@@ -11,6 +11,7 @@ import type { Decision, DecisionService } from "../bots/decisions.ts";
 import type { Folders } from "../bots/files.ts";
 import { FolderError, type Author } from "../bots/folder.ts";
 import { historyLines } from "../bots/history.ts";
+import { AutomationInput, EVENT_KINDS, ProposedSettings, TEMPLATES, type AutomationView } from "../bots/automations.ts";
 import type { Principal } from "../auth/bearer.ts";
 import { RoutineError, RoutineInput, RoutinePatch, SecretName, SecretValue, type Actor, type Computer, type Routine, type RoutineService, type Run } from "../routines/service.ts";
 
@@ -572,12 +573,14 @@ function registerFolderTools(
     );
   }
 
+  if (principal.personal && folders.automations) registerAutomationTools(server, actor, folders.automations, guard);
+
   server.registerTool(
     "bot_files",
     {
       title: "A bot's files and last runs",
       description:
-        "A bot's folder: AGENTS.md (what it does: its prompt), memory.md (what it learned; it updates it itself), skills/<name>/SKILL.md (know-how), with who changed each last; and its last three handoffs (what each run did and left open).",
+        "A bot's folder: AGENTS.md (what it does: its prompt), GOAL.md (the outcome it owns, with its metric), memory.md (what it learned; it updates it itself), skills/<name>/SKILL.md (know-how), with who changed each last; and its last three handoffs (what each run did and left open).",
       inputSchema: { id: z.string().max(64) },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -585,7 +588,7 @@ function registerFolderTools(
       guard(async () => {
         const { files, handoffs } = await folders.files.list(actor, id);
         const lines = files.map((f) => `- ${f.path} (${f.size} bytes, version ${f.version}${f.by ? `, last by ${f.by.kind === "bot" ? "the bot" : f.by.kind === "amb" ? (f.by.name ?? "an AI app") : (f.by.name ?? "a person")}` : ""})`);
-        const h = handoffs.map((x) => `### ${new Date(x.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC · ${x.status}\n${x.text}`);
+        const h = handoffs.map((x) => `### ${new Date(x.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC · ${x.status}${x.metric ? ` · metric ${x.metric}` : ""}\n${x.text}`);
         return result(`Files:\n${lines.join("\n")}\n\nLast runs:\n${h.join("\n\n") || "(no handoffs yet)"}`, { files, handoffs });
       }),
   );
@@ -597,7 +600,7 @@ function registerFolderTools(
       description: "One of a bot's files as it is now, or an earlier version; history: true lists its versions (who, why, when) instead.",
       inputSchema: {
         id: z.string().max(64),
-        path: z.string().max(200).describe("AGENTS.md, memory.md, or skills/<name>/<file>."),
+        path: z.string().max(200).describe("AGENTS.md, GOAL.md, memory.md, or skills/<name>/<file>."),
         version: z.number().int().min(1).optional(),
         history: z.boolean().optional(),
       },
@@ -619,7 +622,7 @@ function registerFolderTools(
     {
       title: "Change a bot's file",
       description:
-        "Change one of a bot's files: a new version of memory.md (what it should remember), a skill (skills/<name>/SKILL.md: when to use it, then how), or AGENTS.md (its instructions; only when the user asked, or it's plainly broken). Send the whole file. delete: true removes a skill file; restore_version brings an earlier version back. Every change is a version the user can undo in the app, and changes to AGENTS.md or skills are posted in the bot's thread with your why. Never secrets.",
+        "Change one of a bot's files: a new version of memory.md (what it should remember), a skill (skills/<name>/SKILL.md: when to use it, then how), GOAL.md (the outcome it owns: only what the user agreed to), or AGENTS.md (its instructions; only when the user asked, or it's plainly broken). Send the whole file. delete: true removes a skill file; restore_version brings an earlier version back. Every change is a version the user can undo in the app, and changes to AGENTS.md or skills are posted in the bot's thread with your why. Never secrets.",
       inputSchema: {
         id: z.string().max(64),
         path: z.string().max(200),
@@ -643,6 +646,127 @@ function registerFolderTools(
         if (a.content === undefined) return error("Send the file's content, delete: true, or restore_version.");
         const f = await folders.files.write(actor, a.id, a.path, a.content, by, a.why, source);
         return result(`Saved ${f.path} (version ${f.version}).`, { file: { path: f.path, version: f.version, size: f.size } });
+      }),
+  );
+}
+
+// ---- automations (docs/bots.md, "Automations") ----
+
+function automationLine(a: AutomationView): string {
+  const last = a.lastRun ? `; last ran ${new Date(a.lastRun.at).toISOString().slice(0, 16).replace("T", " ")} UTC (${a.lastRun.result})` : "";
+  return `- ${a.name} (id: ${a.id}${a.template ? `, from ${a.template}` : ""}): ${a.enabled ? "on" : "off"}, ${a.when}, to ${a.delivery}${last}`;
+}
+
+function registerAutomationTools(server: McpServer, actor: Actor, auto: import("../bots/automations.ts").Automations, guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>) {
+  server.registerTool(
+    "list_automations",
+    {
+      title: "List Ambient's automations",
+      description: `What Ambient does for the user on its own: their automations (on or off, when, where it delivers, the last run), and the templates they can switch on (${TEMPLATES.map((t) => t.id).join(", ")}). Pass an id for one automation's instructions and recent runs.`,
+      inputSchema: { id: z.string().max(40).optional() },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id }) =>
+      guard(async () => {
+        if (id) {
+          const a = await auto.view(actor.uid, await auto.get(actor.uid, id));
+          const runs = await auto.runs(actor.uid, id);
+          return result(`${automationLine(a)}\n\nInstructions:\n${a.instructions}\n\nRecent runs:\n${runs.slice(0, 5).map((r) => `- ${new Date(r.at).toISOString().slice(0, 16).replace("T", " ")} UTC, ${r.by}${r.event ? ` (${r.event})` : ""}: ${r.result}${r.text ? `: ${r.text.slice(0, 200)}` : ""}`).join("\n") || "(none yet)"}`, { automation: a, runs });
+        }
+        const list = await auto.list(actor.uid);
+        const templates = TEMPLATES.map((t) => `- ${t.id}: ${t.name}. ${t.description}`).join("\n");
+        return result(`Their automations:\n${list.map(automationLine).join("\n")}\n\nTemplates:\n${templates}`, { automations: list, templates: TEMPLATES });
+      }),
+  );
+
+  server.registerTool(
+    "create_automation",
+    {
+      title: "Create an automation",
+      description:
+        "Have Ambient do something on its own: from a template (template: its id; change name, trigger, instructions or delivery if they asked), or from scratch (name, trigger, instructions). Only when the user asks for it. Time triggers take a schedule like a loop's; event triggers listen for: " +
+        EVENT_KINDS.join(", ") +
+        '. Delivery: "chat" (a message and a push), "chat_silent" (a message, no push), "thread" (for bot events: a note in the bot\'s thread).',
+      inputSchema: AutomationInput.shape,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async (input) =>
+      guard(async () => {
+        const a = await auto.create(actor.uid, AutomationInput.parse(input));
+        return result(`Created: ${automationLine(a).slice(2)}.`, { automation: a });
+      }),
+  );
+
+  server.registerTool(
+    "update_automation",
+    {
+      title: "Change an automation",
+      description: "Switch an automation on or off, or change its name, trigger, instructions or delivery. Only what's passed changes; only when the user asks.",
+      inputSchema: { id: z.string().max(40), ...AutomationInput.omit({ template: true }).shape },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id, ...patch }) =>
+      guard(async () => {
+        const a = await auto.update(actor.uid, id, AutomationInput.omit({ template: true }).parse(patch));
+        return result(`Changed: ${automationLine(a).slice(2)}.`, { automation: a });
+      }),
+  );
+
+  server.registerTool(
+    "delete_automation",
+    {
+      title: "Delete an automation",
+      description: "Delete one of the user's automations, when they ask. Watch my bots can only be switched off (update_automation, enabled: false).",
+      inputSchema: { id: z.string().max(40) },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id }) =>
+      guard(async () => {
+        await auto.remove(actor.uid, id);
+        return result("Deleted.");
+      }),
+  );
+
+  server.registerTool(
+    "run_automation",
+    {
+      title: "Run an automation now",
+      description: "Run one of the user's automations now, whatever its trigger, when they ask; what it says lands in the chat (or the result is silent). Waits for it.",
+      inputSchema: { id: z.string().max(40) },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ id }) =>
+      guard(async () => {
+        const run = await auto.runNow(actor.uid, id);
+        return result(run.result === "sent" ? `Ran and sent: ${run.text}` : run.result === "silent" ? "Ran: nothing worth saying." : `It didn't work: ${run.text}`, { run });
+      }),
+  );
+
+  server.registerTool(
+    "propose_bot_change",
+    {
+      title: "Propose a change to a bot",
+      description:
+        "Propose a change to one of the user's bots instead of making it: a new AGENTS.md (or other file), or settings (schedule, enabled, bot: isolation, secrets, report, delegate, model, runtime). The user gets it as a decision in the chat with Apply / Not now; it's made only when they say yes. Use it for anything beyond a bot's memory.md and skills when they didn't ask for the change themselves.",
+      inputSchema: {
+        id: z.string().max(64).describe("The bot's id."),
+        path: z.string().max(200).optional().describe("The file to change, e.g. AGENTS.md."),
+        content: z.string().max(70_000).optional().describe("The whole new file."),
+        settings: z.record(z.string(), z.unknown()).optional(),
+        why: z.string().min(1).max(500).describe("One or two sentences the user reads: what you'd change and why."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ id, path, content, settings, why }) =>
+      guard(async () => {
+        if (path === undefined === (settings === undefined)) return error("Propose either a file (path and content) or settings, one at a time.");
+        if (path !== undefined && content === undefined) return error("Send the whole new file as content.");
+        if (settings) {
+          const ok = ProposedSettings.safeParse(settings);
+          if (!ok.success) return error(`Those settings can't be proposed: ${ok.error.issues.map((i) => i.path.join(".")).join(", ")}.`);
+        }
+        const d = await auto.propose(actor, { routineId: id, bot: "", ...(path !== undefined ? { path, content } : {}), ...(settings ? { settings } : {}), why });
+        return result(`Proposed (decision ${d.id}): they'll see it in the chat with Apply / Not now.`, { decision: d });
       }),
   );
 }

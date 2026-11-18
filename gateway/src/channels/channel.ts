@@ -38,9 +38,17 @@ export class AppChannel implements Channel {
   constructor(private notifier?: Notifier) {}
 
   async deliver(m: Outgoing): Promise<void> {
-    if (!this.notifier || m.kind !== "question" || m.speaker.kind !== "bot") return;
-    await this.notifier.notify(m.to, botQuestionPush({ botId: m.speaker.botId, name: m.speaker.name, team: m.speaker.team, question: m.text }));
+    if (!this.notifier || m.kind !== "question") return;
+    if (m.speaker.kind === "bot") await this.notifier.notify(m.to, botQuestionPush({ botId: m.speaker.botId, name: m.speaker.name, team: m.speaker.team, question: m.text }));
+    // Ambient's own question (a change it proposes): opens its chat, where the card is.
+    else await this.notifier.notify(m.to, ambientQuestionPush(m.text));
   }
+}
+
+/** The push when Ambient asks something itself (a proposed change): tapping it opens the chat. */
+export function ambientQuestionPush(question: string): PushMessage {
+  const body = question.replace(/\s+/g, " ").trim();
+  return { title: "Ambient needs you", body: body.length > 180 ? `${body.slice(0, 179)}…` : body, url: "ambient://ambient", thread: "ambient", collapseId: "ambient-question" };
 }
 
 /** The push when a bot asks: tapping it opens the bot's thread. */

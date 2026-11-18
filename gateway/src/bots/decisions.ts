@@ -20,6 +20,26 @@ const ANSWER_PURPOSE = "decision:answer";
 /** How long Ambient may think about a bot's question before it goes to the person as it is. */
 const TRIAGE_MS = 75_000;
 
+/**
+ * A change to a bot Amb proposes instead of making (docs/bots.md, "Automations"): its
+ * instructions (a file), or its settings. Applied only when the person says yes.
+ */
+export interface ProposedChange {
+  routineId: string;
+  bot: string;
+  /** A new version of this file (AGENTS.md, say)… */
+  path?: string;
+  content?: string;
+  /** …or these settings (schedule, isolation, secrets, model, runtime, report, delegate). */
+  settings?: Record<string, unknown>;
+  why: string;
+}
+
+/** "Apply", "yes", "ja", "ok", "do it": the person says yes to a proposed change. */
+export function saysYes(text: string): boolean {
+  return /^\s*(apply|yes|yep|yeah|ja|jo|ok|okay|sure|do it|go|mach|passt)\b/i.test(text);
+}
+
 export interface Decision {
   id: string;
   status: "open" | "answered" | "expired";
@@ -30,6 +50,8 @@ export interface Decision {
   answer: { text: string; by: string | null; via: string | null; at: number } | null;
   urgent: boolean;
   createdAt: number;
+  /** A change Amb proposes (applied on "Apply"); null for questions. */
+  change: Omit<ProposedChange, "why"> | null;
 }
 
 export interface DecisionRow {
@@ -53,6 +75,7 @@ interface Sealed {
   o: string[];
   r?: { option: string; why: string };
   bot?: { id: string; name: string; face: string };
+  a?: ProposedChange;
 }
 
 /** What Ambient said about a bot's question: answer it, or ask the person (with a suggestion). */
@@ -130,6 +153,7 @@ export class DecisionService {
       answer: answer !== null ? { text: answer, by: row.answeredBy, via: row.via, at: row.answeredAt ?? row.createdAt } : null,
       urgent: row.urgent,
       createdAt: row.createdAt,
+      change: s.a ? { routineId: s.a.routineId, bot: s.a.bot, ...(s.a.path ? { path: s.a.path, content: s.a.content ?? "" } : {}), ...(s.a.settings ? { settings: s.a.settings } : {}) } : null,
     };
   }
 
@@ -204,6 +228,29 @@ export class DecisionService {
     }
   }
 
+  /** Applies a proposed change for the person (set by the automations; docs/bots.md, "Automations"). */
+  applyChange?: (actor: Actor, change: ProposedChange) => Promise<string>;
+
+  /**
+   * Amb proposes a change to a bot instead of making it: a decision in the chat with "Apply" and
+   * "Not now", and a push. Applied when the person says yes, wherever they answer.
+   */
+  async propose(uid: string, change: ProposedChange, opts: { push?: boolean } = {}): Promise<Decision> {
+    const what = change.path ? `change ${change.bot}'s ${change.path}` : `change ${change.bot}'s settings (${Object.keys(change.settings ?? {}).join(", ")})`;
+    const question = `Should I ${what}? ${change.why}`.trim();
+    const body: Sealed = { q: question, o: ["Apply", "Not now"], a: change };
+    const sealed = await this.d.keys.seal(this.owner(uid), PURPOSE, JSON.stringify(body));
+    const row = (await this.d.control.m(api.bots.createDecision, { uid: uid as never, iv: sealed.iv, ct: sealed.ciphertext, urgent: false, now: this.now() })) as unknown as DecisionRow;
+    const preview = change.path && change.content !== undefined ? `\n\nThe new ${change.path} would be:\n\n${change.content.length > 1500 ? `${change.content.slice(0, 1500)}…` : change.content}` : change.settings ? `\n\n${JSON.stringify(change.settings)}` : "";
+    await this.d.ambient.say(uid, `${question}${preview}`, String(row.id));
+    if (opts.push !== false) {
+      for (const channel of this.d.channels) {
+        void channel.deliver({ speaker: { kind: "ambient" }, to: uid, kind: "question", text: question, choices: ["Apply", "Not now"] }).catch(() => undefined);
+      }
+    }
+    return this.view(uid, row);
+  }
+
   /** The person answers (`via`: app, chat, later a channel). A bot's question goes to the bot. */
   async answer(actor: Actor, id: string, text: string, via: string): Promise<Decision> {
     const row = (await this.d.control.q(api.bots.decision, { uid: actor.uid as never, id })) as unknown as DecisionRow | null;
@@ -217,7 +264,15 @@ export class DecisionService {
       const after = (await this.d.control.q(api.bots.decision, { uid: actor.uid as never, id })) as unknown as DecisionRow;
       return this.view(actor.uid, after);
     }
-    const sealed = await this.d.keys.seal(this.owner(actor.uid), ANSWER_PURPOSE, answer);
+    // A proposed change is applied on yes; what came of it is part of the answer.
+    let outcome = answer;
+    const raw = await this.d.keys.open(this.owner(actor.uid), PURPOSE, row.iv, row.ct).catch(() => "{}");
+    const proposed = (JSON.parse(raw) as Sealed).a;
+    if (proposed && saysYes(answer)) {
+      if (!this.applyChange) throw new RoutineError("cannot_apply", "That change can't be applied here.", 400);
+      outcome = `${answer} → ${await this.applyChange(actor, proposed)}`;
+    }
+    const sealed = await this.d.keys.seal(this.owner(actor.uid), ANSWER_PURPOSE, outcome);
     const name = await this.d.ambient.nameOf(actor.uid);
     const out = await this.d.control.m(api.bots.resolveDecision, { uid: actor.uid as never, id, answerIv: sealed.iv, answerCt: sealed.ciphertext, by: name, via, now: this.now() });
     if (!out.ok) throw new RoutineError(out.error, "It's already answered.", 409);

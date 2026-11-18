@@ -59,6 +59,8 @@ export interface AppApiDeps {
   admin?: AdminService;
   decisions?: DecisionService;
   folders?: Folders;
+  /** A recorded meeting landed in someone's brain: automations may listen (docs/bots.md, "Automations"). */
+  onMeetingNote?: (e: { uid: string; title: string; ref: string; team: string | null }) => void;
   appleRevoke: AppleRevoker;
   /** Microsoft's app registration id the apps sign in with (/v1/app/config), when there is one. */
   microsoftClientId?: string;
@@ -509,7 +511,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   // ---- routines (prompts Claude Code runs on a schedule on the user's computers) ----
 
   routineAppRoutes(r, { routines: d.routines, directory: d.directory, auth, json });
-  if (d.bots && d.ambient) botAppRoutes(r, { routines: d.routines, bots: d.bots, ambient: d.ambient, admin: d.admin, decisions: d.decisions, files: d.folders?.files, folder: d.folders?.folder, directory: d.directory, auth, json });
+  if (d.bots && d.ambient) botAppRoutes(r, { routines: d.routines, bots: d.bots, ambient: d.ambient, admin: d.admin, decisions: d.decisions, files: d.folders?.files, folder: d.folders?.folder, automations: () => d.folders?.automations, directory: d.directory, auth, json });
 
   // ---- teams ----
 
@@ -699,7 +701,12 @@ export function appApiRouter(d: AppApiDeps): Router {
       return;
     }
     try {
-      res.json(await d.teams.deliver(team, parsed.data, uid, team.peopleSlug ?? null));
+      const delivered = await d.teams.deliver(team, parsed.data, uid, team.peopleSlug ?? null);
+      if (parsed.data.kind === "meeting" || parsed.data.kind === "call") {
+        const title = typeof parsed.data.entry_page.frontmatter.title === "string" ? parsed.data.entry_page.frontmatter.title : "A meeting";
+        d.onMeetingNote?.({ uid, title, ref: `team:${team.slug}:${parsed.data.note_id}`, team: team.name });
+      }
+      res.json(delivered);
     } catch (err) {
       if (err instanceof TeamServerError && err.status === 409) {
         // The team's repo is kept by another tool (connected read-only): it takes no notes. 403,
@@ -747,7 +754,20 @@ export function appApiRouter(d: AppApiDeps): Router {
       res.status(400).json({ error: "bad_request", issues: body.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
       return;
     }
-    res.json(await d.personal.sync(uidOf(res), body.data.ops, body.data.since_seq, body.data.device_id));
+    const uid = uidOf(res);
+    const out = await d.personal.sync(uid, body.data.ops, body.data.since_seq, body.data.device_id);
+    // A recorded meeting's note arriving in the personal brain (a new note under wiki/notes/).
+    if (d.onMeetingNote) {
+      const rejected = new Set(out.rejected.map((r) => r.path));
+      for (const op of body.data.ops) {
+        if (op.op !== "upsert" || rejected.has(op.path) || !/^wiki\/notes\/\d{4}\/\d{2}\/[^/]+\.md$/.test(op.path)) continue;
+        const front = /^---\n([\s\S]*?)\n---/.exec(op.content)?.[1] ?? "";
+        if (!/^kind:\s*["']?(meeting|call)["']?\s*$/m.test(front)) continue;
+        const title = /^title:\s*["']?(.+?)["']?\s*$/m.exec(front)?.[1] ?? "A meeting";
+        d.onMeetingNote({ uid, title, ref: `personal:${op.path.replace(/^wiki\//, "").replace(/\.md$/, "")}`, team: null });
+      }
+    }
+    res.json(out);
   });
 
   // What the server holds (paths and hashes only): a device removes pages it synced before
