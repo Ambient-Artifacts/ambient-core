@@ -31,7 +31,8 @@ import { EventHub, PollingRevisionSource, Revisions, type RevisionSource } from 
 import { hostRouter } from "./routines/route.ts";
 import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
-import { ambientHostRouter, botRunRouter } from "./bots/route.ts";
+import { ambientHostRouter, botRunRouter, githubHookRouter } from "./bots/route.ts";
+import { GitHubEvents } from "./bots/github.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
@@ -84,6 +85,8 @@ export interface AppDeps {
   ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number; noHeartbeat?: boolean; turnMs?: number };
   /** Tests: how long after a change bots are mirrored into git (default 30 s). */
   mirrorDelayMs?: number;
+  /** Tests: how long GitHub's events on one PR are gathered before they wake its bot (default 90 s). */
+  githubBatchMs?: number;
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
   microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
@@ -257,6 +260,17 @@ export function createApp(deps: AppDeps) {
   routines.onBotEvent = (e) => void automations.onEvent(e);
   bots.onEvent = (e) => void automations.onEvent(e);
   heartbeat.watching = (uid) => automations.watching(uid);
+  // GitHub's events wake the bot whose pull request it is; the PR gate (docs/bots.md).
+  const github = new GitHubEvents({
+    control,
+    keys: routineKeys,
+    origin: config.origin,
+    startNow: (hostId, routineId) => computers.start(hostId, routineId),
+    onCiFailed: (e) => void automations.onEvent({ kind: "github_ci_failed", ...e }),
+    batchMs: deps.githubBatchMs,
+  });
+  folders.github = github;
+  routines.githubFor = (owner, id) => github.forRun(owner, id);
   if (!deps.ambient?.noHeartbeat) {
     heartbeat.start();
     automations.start();
@@ -265,6 +279,7 @@ export function createApp(deps: AppDeps) {
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
   app.use(botRunRouter({ bots, history: folders.history }));
+  app.use(githubHookRouter(() => folders.github));
   app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
   app.use(

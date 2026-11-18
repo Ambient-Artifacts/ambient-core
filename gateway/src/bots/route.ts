@@ -16,9 +16,10 @@ import { FolderError, type BotFolder } from "./folder.ts";
 import type { BotFiles } from "./files.ts";
 import type { HistorySearch } from "./history.ts";
 import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
+import { GitHubError, type GitHubEvents } from "./github.ts";
 
 function fail(res: Response, err: unknown) {
-  if (err instanceof RoutineError || err instanceof FolderError) {
+  if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError) {
     res.status(err.status).json({ error: err.code, message: err.message });
     return;
   }
@@ -38,6 +39,7 @@ export function botAppRoutes(
     files?: BotFiles;
     folder?: BotFolder;
     automations?: () => Automations | undefined;
+    github?: () => GitHubEvents | undefined;
     directory: Directory;
     auth: RequestHandler;
     json: RequestHandler;
@@ -206,6 +208,58 @@ export function botAppRoutes(
     if (req.query.forget === "1" || req.query.forget === "true") await d.ambient.forget(a.uid);
     else await d.ambient.clear(a.uid, (await d.directory.user(a.uid))?.name);
     res.status(204).end();
+  });
+
+  // ---- GitHub: the owner's webhook, and which repos a bot watches (docs/bots.md, "GitHub events and the PR gate") ----
+
+  const teamOf = (req: Request) => (typeof req.query.team === "string" && req.query.team ? req.query.team : null);
+
+  r.get("/v1/app/github-hook", d.auth, async (req, res) => {
+    const gh = d.github?.();
+    if (!gh) return notEnabled(res);
+    try {
+      res.json(await gh.hook(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/github-hook/rotate", d.auth, async (req, res) => {
+    const gh = d.github?.();
+    if (!gh) return notEnabled(res);
+    try {
+      res.json(await gh.rotate(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.get("/v1/app/routines/:id/github", d.auth, async (req, res) => {
+    const gh = d.github?.();
+    if (!gh) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), false);
+      res.json({ repos: await gh.watch(f.owner, f.routineId), branchPrefix: await gh.prefixOf(f.owner, f.routineId) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.put("/v1/app/routines/:id/github", d.auth, d.json, async (req, res) => {
+    const gh = d.github?.();
+    if (!gh) return notEnabled(res);
+    const body = z.object({ repos: z.array(z.string().max(200)).max(20) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Send the repos as a list of owner/name." });
+      return;
+    }
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      const repos = await gh.setWatch(f.owner, f.routineId, body.data.repos);
+      res.json({ repos, branchPrefix: await gh.prefixOf(f.owner, f.routineId) });
+    } catch (err) {
+      fail(res, err);
+    }
   });
 
   // ---- automations (docs/bots.md, "Automations") ----
@@ -547,5 +601,25 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
     res.status(204).end();
   });
 
+  return r;
+}
+
+/**
+ * GitHub's deliveries to an owner's webhook (docs/bots.md, "GitHub events and the PR gate"). The
+ * body is kept raw: the signature is over the exact bytes GitHub sent.
+ */
+export function githubHookRouter(github: () => GitHubEvents | undefined): Router {
+  const r = express.Router();
+  const perHook = limiter(600);
+  r.post("/v1/hooks/github/:hookId", express.raw({ type: "*/*", limit: "2mb" }), async (req, res) => {
+    const gh = github();
+    const hook = String(req.params.hookId);
+    if (!gh) return res.status(404).json({ error: "not_found" });
+    if (!perHook(hook)) return res.status(429).json({ error: "slow_down" });
+    const header = (n: string) => (typeof req.headers[n] === "string" ? (req.headers[n] as string) : undefined);
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const out = await gh.receive(hook, { event: header("x-github-event"), signature: header("x-hub-signature-256"), delivery: header("x-github-delivery") }, body);
+    res.status(out.status).json({ result: out.result });
+  });
   return r;
 }

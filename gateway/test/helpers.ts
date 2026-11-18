@@ -54,6 +54,8 @@ export async function startStack(
     ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number };
     /** How long after a change bots are mirrored into git (tests: short; `idle()` waits). */
     mirrorDelayMs?: number;
+    /** GitHub's events on one PR are gathered this long before they wake its bot. */
+    githubBatchMs?: number;
   } = {},
 ) {
   const serviceSecret = randomBytes(24).toString("hex");
@@ -170,6 +172,7 @@ export async function startStack(
     microsoftConnect: opts.microsoftConnect ? { ...opts.microsoftConnect, fetchImpl: opts.microsoftFetch } : undefined,
     ambient: { ...opts.ambient, noHeartbeat: true },
     mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
+    githubBatchMs: opts.githubBatchMs ?? 60_000,
   });
   gatewayServer.on("request", stack.app);
 

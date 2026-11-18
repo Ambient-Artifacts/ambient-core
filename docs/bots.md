@@ -613,6 +613,64 @@ or `history: true`), `write_bot_file` (content, `delete`, or `restore_version`, 
 app). A version that deleted a file has empty content and `deleted: true`; restoring the one before
 it brings the file back.
 
+## GitHub events and the PR gate
+
+A bot that works through pull requests only marks one ready for review when nothing on it is open:
+every review comment (review bots and people) fixed or answered, and every check green. It doesn't
+poll for that: GitHub's events on its pull request wake it.
+
+**Which pull requests are a bot's.** A bot watches repos (`owner/name`, up to 10). Its branches
+start with `ambient/<bot>/` (its name as the git mirror spells it: `Blög Draft` →
+`ambient/blog-draft/`), and a pull request from such a branch is its own. Its instructions say
+so, and the gate.
+
+**The gate, in a watching bot's instructions** (code-owned text): name branches
+`ambient/<bot>/<topic>`; open pull requests as drafts; after each round read everything on it
+(`gh api repos/<o>/<r>/pulls/<n>/comments`, `gh pr view <n> --comments`, `gh pr checks <n>`); fix
+or answer every comment, reply on its thread and resolve it once fixed; push; only when nothing is
+open, every check is green and the latest review round brought nothing new, `gh pr ready <n>` and
+say so; never merge unless its `AGENTS.md` or `GOAL.md` says it may; end every comment it writes on
+GitHub with `— <bot name> (Ambient)`.
+
+**The webhook.** One per owner (a person, or a team), for all their repos: `POST
+/v1/hooks/github/<id>`, signed by GitHub with the hook's secret (`X-Hub-Signature-256`,
+HMAC-SHA256; unsigned or wrongly signed: 401; an unknown or rotated hook: 404). In the repo:
+Settings → Webhooks → Add webhook, content type `application/json`, the secret, and "Let me
+select individual events": Pull requests, Pull request reviews, Pull request review comments,
+Issue comments, Check runs, Check suites. A delivery GitHub sends twice (`X-GitHub-Delivery`) is
+taken once; everything that doesn't concern a bot gets 202 with what it was (`result`).
+
+**What wakes the bot**, gathered per pull request for 90 seconds into one message from "GitHub" in
+its thread, which starts a run (like its owner's message; it continues its session):
+
+- a review submitted (its state and text; an empty "commented" review, the wrapper of line
+  comments, is left out),
+- a review comment (who, `file:line`, the text, the link), a comment on the pull request,
+- a check that failed (its name, conclusion and link), and all checks green again after one failed.
+
+Left out: comments ending with the bot's own signature line, other branches, repos it doesn't
+watch. A comment on the pull request carries no branch, so it's matched by what an earlier pull
+request event said about that number (the bot's PR events: opened, synchronize). Merged or closed:
+a note in the thread, no run. At most 6 wake-ups per pull request an hour; then one note says it
+won't be woken for it until the hour is over. A message the owner left that no run has taken yet
+stays what the run starts with; GitHub's comes along as new in its thread.
+
+**App API** (who may change the owner's bots; a team's: its owners and admins):
+
+- `GET /v1/app/github-hook[?team=<slug>]` → `{ "id", "url", "secret", "events": [..] }` (made on
+  first use); `POST /v1/app/github-hook/rotate[?team=<slug>]` → the same with a new URL and
+  secret (the old ones stop at once).
+- `GET /v1/app/routines/:id/github` → `{ "repos": ["owner/name"], "branchPrefix": "ambient/<bot>/" }`
+  (the prefix always, also before it watches a repo); `PUT` with `{ "repos": [..] }`: owner/name,
+  or any github.com link to the repo (http or https, www., `git@github.com:`, `.git`, a link to a
+  pull request or a branch in it); `400 bad_repo` otherwise; an empty list stops it. The same
+  cleanup holds for the MCP tool. Everyone who sees the bot reads its repos; who may change it
+  writes them.
+- App link: `ambient://github-hook[?team=<slug>]` (the webhook's page with the secret).
+
+MCP tools for Amb: `github_webhook` (the URL and the events to tick; the secret only in the app)
+and `watch_github` (`{ id, repos }`).
+
 ## Automations
 
 Things Amb does for a person without being asked each time. One automation is **when** (a time,
@@ -661,7 +719,9 @@ heartbeat's beats. It can't be deleted or given another trigger.
   `bot_corrected` (the person wrote to a bot, not answering its question), `bot_asked_twice` (a
   bot asked much the same question it asked before), `decision_waiting` (a decision waited `hours`,
   default 4), `meeting_note` (a recorded meeting or call landed in their brain or a team's brain
-  they recorded for). `bot` limits bot events to one bot.
+  they recorded for), `github_ci_failed` (CI failed on the default branch of a repo one of their
+  bots watches, through the owner's GitHub webhook; a team's webhook tells the team's people). `bot`
+  limits bot events to one bot.
 - `delivery`: `chat` (a message in Amb's chat and a push, collapse id `automation-<id>`; no push
   22:00–07:00), `chat_silent` (the message, no push), `thread` (bot events: a note in the bot's
   thread).
