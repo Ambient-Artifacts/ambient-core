@@ -41,14 +41,28 @@ export function claudeProblem(text: string): "credit" | "signin" | null {
 }
 
 
-/** A failure that is the computer's Claude account: what the app offers to fix. */
+/**
+ * Why a Codex run failed, when it's the computer's OpenAI sign-in and not the bot: out of credit or
+ * over the plan's limit, or not signed in. Only for a failure the runner says is Codex's.
+ */
+export function openaiProblem(text: string): "credit" | "signin" | null {
+  if (!/\bCodex\b|codex login|api\.openai\.com|chatgpt\.com/.test(text)) return null;
+  if (/insufficient_quota|exceeded your current quota|usage limit|rate limit reached for|billing/i.test(text)) return "credit";
+  if (/invalid_api_key|incorrect api key|no codex credentials|not logged in|run codex login|401 unauthorized|refresh token|token (has )?expired|sign in again/i.test(text)) return "signin";
+  return null;
+}
+
+/** A failure that is the computer's Claude account (or its OpenAI sign-in for Codex): what the app offers to fix. */
 export interface ClaudeFix {
-  kind: "claude";
+  kind: "claude" | "openai";
   computer: string;
   reason: "credit" | "signin";
 }
 
 export function claudeFix(kind: string, text: string, computer: string | null | undefined): ClaudeFix | null {
-  const reason = kind === "failure" && computer ? claudeProblem(text) : null;
-  return reason && computer ? { kind: "claude", computer, reason } : null;
+  if (kind !== "failure" || !computer) return null;
+  const openai = openaiProblem(text);
+  if (openai) return { kind: "openai", computer, reason: openai };
+  const reason = claudeProblem(text);
+  return reason ? { kind: "claude", computer, reason } : null;
 }

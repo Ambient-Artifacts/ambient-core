@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -31,6 +31,8 @@ const CONFIG = join(CONFIG_DIR, "runner.env");
 const EXTRA = join(CONFIG_DIR, "extra.env");
 /** The Claude sign-in chosen in Ambient (a plan's token or an API key), fetched by sync. Wins over extra.env. */
 const CLAUDE_ENV = process.env.AMBIENT_CLAUDE_ENV || join(CONFIG_DIR, "claude.env");
+/** The OpenAI key chosen in Ambient for Codex bots (docs/bots.md, "Codex next to Claude Code"). */
+const OPENAI_ENV = process.env.AMBIENT_OPENAI_ENV || join(CONFIG_DIR, "openai.env");
 const INSTALL_DIR = process.env.AMBIENT_INSTALL_DIR || "/opt/ambient-runner";
 const INSTALLED = join(INSTALL_DIR, "ambient-runner.mjs");
 const STATE_DIR = process.env.AMBIENT_STATE_DIR || "/var/lib/ambient-runner";
@@ -99,6 +101,8 @@ function config() {
     token: env.AMBIENT_HOST_TOKEN,
     user: env.AMBIENT_USER || "root",
     claude: env.AMBIENT_CLAUDE || "claude",
+    /** Codex for Codex bots: this path, or found in the routine user's PATH when it runs. */
+    codex: env.AMBIENT_CODEX || "",
     claudeArgs: (env.AMBIENT_CLAUDE_ARGS ?? "--permission-mode auto").split(/\s+/).filter(Boolean),
     folder: env.AMBIENT_FOLDER || "",
     node: env.AMBIENT_NODE || process.execPath,
@@ -158,10 +162,141 @@ function claudeVersion(cfg) {
   }
 }
 
-/** What the app shows about this computer. Claude Code's version is checked once an hour. */
+/** What the app shows about this computer. Claude Code's and Codex's versions are checked once an hour. */
 function info(cfg, state) {
   if (!state.claude || Date.now() - state.claude.at > 3600_000) state.claude = { at: Date.now(), version: claudeVersion(cfg) };
-  return { hostname: hostname().slice(0, 120), os: `${type()} ${release()}`.slice(0, 120), runner: VERSION, claude: state.claude.version };
+  return { hostname: hostname().slice(0, 120), os: `${type()} ${release()}`.slice(0, 120), runner: VERSION, claude: state.claude.version, ...codexInfo(cfg, state) };
+}
+
+// ---- Codex (docs/bots.md, "Codex next to Claude Code") ----
+
+/** Where Codex is for the routine user: AMBIENT_CODEX, or the usual places (npm's global bin). */
+function codexPath(cfg) {
+  if (cfg.codex) return existsSync(cfg.codex) ? cfg.codex : null;
+  const h = home(cfg.user);
+  const dirs = [...(process.env.PATH ?? "").split(":"), join(h, ".local/bin"), join(h, ".npm-global/bin"), "/usr/local/bin", "/usr/bin"];
+  for (const d of dirs) if (d && existsSync(join(d, "codex"))) return join(d, "codex");
+  return null;
+}
+
+/** Codex as the routine user (its sign-in lives in their ~/.codex). */
+function codexAs(cfg, codex, args, opts = {}) {
+  const as = asUser(cfg.user);
+  return spawnSync(codex, args, { encoding: "utf8", timeout: 30_000, env: runEnv(cfg, as ? { HOME: as.home } : {}), ...(as ? { uid: as.uid, gid: as.gid } : {}), ...opts });
+}
+
+/** How Codex is signed in here: a ChatGPT plan, an API key, or not. */
+function codexLoginStatus(cfg, codex) {
+  const r = codexAs(cfg, codex, ["login", "status"]);
+  const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
+  if (r.status !== 0) return "none";
+  return /chatgpt/i.test(out) ? "chatgpt" : /api key/i.test(out) ? "api_key" : "none";
+}
+
+/** Codex's version (hourly) and sign-in (every few minutes, at once after a sign-in here). */
+function codexInfo(cfg, state) {
+  const codex = codexPath(cfg);
+  if (!codex) return { codex: "not found", codexLogin: "none" };
+  if (!state.codex || state.codex.path !== codex || Date.now() - state.codex.at > 3600_000) {
+    const r = codexAs(cfg, codex, ["--version"]);
+    state.codex = { at: Date.now(), path: codex, version: r.status === 0 ? String(r.stdout).trim().split("\n").pop().slice(0, 80) : "not found" };
+  }
+  if (!state.codexLogin || Date.now() - state.codexLogin.at > 300_000) state.codexLogin = { at: Date.now(), value: codexLoginStatus(cfg, codex) };
+  return { codex: state.codex.version, codexLogin: state.codexLogin.value };
+}
+
+/** The OpenAI key chosen in Ambient (openai.env): Codex bots use it instead of the computer's own sign-in. */
+function chosenOpenAI() {
+  const c = readEnvFile(OPENAI_ENV);
+  return c.CODEX_API_KEY ? { CODEX_API_KEY: c.CODEX_API_KEY } : {};
+}
+
+/** Fetch the OpenAI key chosen in Ambient when its version changed (null: the computer's own sign-in). */
+async function openaiSync(cfg, state, version) {
+  if ((state.openaiVersion ?? null) === version) return;
+  if (version === null) rmSync(OPENAI_ENV, { force: true });
+  else {
+    let out;
+    try {
+      out = await call(cfg, "GET", "/v1/host/openai");
+    } catch (err) {
+      log(`Couldn't fetch the OpenAI key chosen in Ambient: ${err.message}`);
+      return;
+    }
+    const key = String(out.env?.CODEX_API_KEY ?? "");
+    mkdirSync(dirname(OPENAI_ENV), { recursive: true, mode: 0o700 });
+    writeFileSync(OPENAI_ENV, /^sk-[A-Za-z0-9_-]+$/.test(key) ? `CODEX_API_KEY=${key}\n` : "", { mode: 0o600 });
+    chmodSync(OPENAI_ENV, 0o600);
+  }
+  state.openaiVersion = version;
+  log(version ? "Codex bots: an OpenAI key from Ambient" : "Codex bots: this computer's own Codex sign-in");
+}
+
+/** Strip a terminal's colours and cursor moves. */
+const plain = (t) => String(t).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+
+/** The link and one-time code from `codex login --device-auth`'s output, once both are there. */
+function deviceCode(text) {
+  const t = plain(text);
+  const url = /https:\/\/[^\s"'<>]+/.exec(t)?.[0]?.replace(/[).,]+$/, "");
+  const after = t.split("\n");
+  const at = after.findIndex((l) => /one-time code/i.test(l));
+  if (!url || at < 0) return null;
+  const inline = /code[^:]*:\s*([A-Za-z0-9]{3,}(?:-[A-Za-z0-9]{3,})+)/i.exec(after[at])?.[1];
+  const next = after.slice(at + 1).map((l) => l.trim()).find((l) => /^[A-Za-z0-9]{3,}(?:-[A-Za-z0-9]{3,})*$/.test(l) && l.length <= 24);
+  const code = inline ?? next;
+  return code ? { url, code } : null;
+}
+
+/**
+ * Sign Codex in here with a ChatGPT plan (a message from Ambient): `codex login --device-auth` as
+ * the routine user; the link and one-time code go back to the app, the person finishes in their
+ * browser, and the next sync tells Ambient Codex is signed in.
+ */
+async function codexLoginJob(cfg, job) {
+  const reply = (body) => call(cfg, "POST", `/v1/host/ambient/${job.id}`, body).catch((err) => log(`Couldn't report Codex's sign-in: ${err.message}`));
+  const codex = codexPath(cfg);
+  if (!codex) return reply({ error: `Codex isn't installed on ${hostname()} (npm install -g @openai/codex)` });
+  const as = asUser(cfg.user);
+  log("Codex sign-in with a ChatGPT plan: waiting for the code to be entered…");
+  const p = spawn(codex, ["login", "--device-auth"], { env: runEnv(cfg, as ? { HOME: as.home } : {}), stdio: ["ignore", "pipe", "pipe"], ...(as ? { uid: as.uid, gid: as.gid } : {}) });
+  let text = "";
+  let sent = false;
+  const give = setTimeout(() => {
+    if (sent) return;
+    sent = true;
+    p.kill("SIGTERM");
+    void reply({ error: `Codex didn't show a sign-in code: ${plain(text).trim().split("\n").slice(-2).join(" ").slice(0, 300) || "no output"}` });
+  }, 60_000);
+  const stop = setTimeout(() => p.kill("SIGTERM"), 16 * 60_000);
+  const seen = (d) => {
+    text = (text + d).slice(-8000);
+    const found = !sent && deviceCode(text);
+    if (found) {
+      sent = true;
+      clearTimeout(give);
+      void reply({ text: JSON.stringify({ ...found, expiresAt: Date.now() + 15 * 60_000 }) });
+    }
+  };
+  p.stdout.on("data", seen);
+  p.stderr.on("data", seen);
+  p.on("error", (err) => {
+    if (!sent) {
+      sent = true;
+      clearTimeout(give);
+      void reply({ error: err.message });
+    }
+  });
+  p.on("close", (code) => {
+    clearTimeout(give);
+    clearTimeout(stop);
+    log(code === 0 ? "Codex is signed in with a ChatGPT plan." : `Codex's sign-in ended without signing in (exit ${code}).`);
+    // Ambient learns at once: the sign-in is checked anew and the computer syncs.
+    const st = readState();
+    delete st.codexLogin;
+    writeState(st);
+    if (code === 0) spawn(process.execPath, [fileURLToPath(import.meta.url), "sync"], { stdio: "ignore", detached: true }).unref();
+  });
 }
 
 // ---- systemd ----
@@ -277,6 +412,7 @@ async function sync() {
   }
   ambientUnit(cfg, out.ambient === true);
   await claudeSync(cfg, state, out.claude ?? null);
+  await openaiSync(cfg, state, out.openai ?? null);
   const model = out.model ?? null;
   if (JSON.stringify(state.model ?? null) !== JSON.stringify(model)) {
     state.model = model;
@@ -533,6 +669,7 @@ async function ambientService() {
     }
     // Each person's message is answered in their own session; the next long poll doesn't wait for it.
     if (job?.kind === "exec") void execJob(cfg, job);
+    else if (job?.kind === "codex-login") void codexLoginJob(cfg, job);
     else if (job?.kind === "start") startJob(job);
     else if (job?.uid && job.token) {
       // One person's messages one after another in their session; Ambient's own turns (a bot's
@@ -777,6 +914,7 @@ function systemPrompt(routine, trigger, bot) {
 
 const ADAPTERS = {
   "claude-code": {
+    label: "Claude Code",
     /** The command line after the binary, and what goes to stdin. */
     start(cfg, routine, runInfo, bot, resume, mcpConfig, system) {
       // `system`: the bot's instructions for this run from the gateway (runner 0.8.0 on); older
@@ -821,7 +959,92 @@ const ADAPTERS = {
       return out;
     },
   },
+
+  // OpenAI's Codex CLI (docs/bots.md, "Codex next to Claude Code"): `codex exec --json`, the prompt on
+  // stdin, the bot's instructions as Codex's developer instructions, ask_owner and search_history
+  // as an MCP server given with -c. In a container the container is the sandbox; on the computer
+  // itself Codex's own sandbox keeps it to the workspace (network on, so git and gh work).
+  codex: {
+    label: "Codex",
+    start(cfg, routine, runInfo, bot, resume, mcp, system, opts = {}) {
+      const toml = (v) => JSON.stringify(v);
+      const flags = ["--json", "--skip-git-repo-check"];
+      if (opts.contained) flags.push("--dangerously-bypass-approvals-and-sandbox");
+      else {
+        flags.push("-c", 'sandbox_mode="workspace-write"', "-c", "sandbox_workspace_write.network_access=true", "-c", 'approval_policy="never"');
+        // Its memory.md and handoff.md are outside the workspace: writable too.
+        if (opts.outDir) flags.push("-c", `sandbox_workspace_write.writable_roots=${toml([opts.outDir])}`);
+      }
+      flags.push("-c", `developer_instructions=${toml(system || systemPrompt(routine, runInfo.trigger, bot))}`);
+      // The bot's secrets reach its commands (gh needs GH_TOKEN, say); the run's own token and the sign-ins don't.
+      flags.push(
+        "-c", 'shell_environment_policy.inherit="all"',
+        "-c", "shell_environment_policy.ignore_default_excludes=true",
+        "-c", `shell_environment_policy.exclude=${toml(["AMBIENT_RUN_TOKEN", "AMBIENT_HOST_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"])}`,
+      );
+      const m = codexModel(bot?.model);
+      if (m) {
+        flags.push("-m", m.model);
+        if (m.effort) flags.push("-c", `model_reasoning_effort=${toml(m.effort)}`);
+      }
+      if (mcp) {
+        flags.push(
+          "-c", `mcp_servers.ambient-bot.command=${toml(mcp.command)}`,
+          "-c", `mcp_servers.ambient-bot.args=${toml(mcp.args)}`,
+          // The run's token goes from Codex's environment to the server, never on a command line.
+          "-c", 'mcp_servers.ambient-bot.env_vars=["AMBIENT_SERVER","AMBIENT_RUN_TOKEN"]',
+          // ask_owner waits up to three minutes for an answer.
+          "-c", "mcp_servers.ambient-bot.tool_timeout_sec=600",
+        );
+      }
+      if (resume?.sessionId) return { args: ["exec", "resume", ...flags, resume.sessionId, "-"], stdin: resume.message };
+      return { args: ["exec", ...flags, "-"], stdin: resume ? `${routine.prompt}\n\n${resume.message}` : routine.prompt };
+    },
+    /** One `codex exec --json` line as run events; `ctx` keeps the thread and its last message. */
+    events(line, ctx = {}) {
+      let e;
+      try {
+        e = JSON.parse(line);
+      } catch {
+        return line.trim() ? [{ type: "status", text: line }] : [];
+      }
+      if (e.type === "thread.started" && typeof e.thread_id === "string") {
+        ctx.session = e.thread_id;
+        return [];
+      }
+      if (e.type === "turn.completed") return [{ type: "result", ok: true, text: ctx.last ?? "", turns: 1, session: ctx.session }];
+      if (e.type === "turn.failed") return [{ type: "result", ok: false, text: String(e.error?.message ?? "Codex's turn failed"), session: ctx.session }];
+      if (e.type === "error") return [{ type: "status", text: String(e.message ?? "").slice(0, 300) }];
+      if (e.type !== "item.completed" || !e.item) return [];
+      const it = e.item;
+      const short = (v) => String(v ?? "").replace(/\s+/g, " ").slice(0, 200) || undefined;
+      switch (it.type) {
+        case "agent_message":
+          if (typeof it.text !== "string" || !it.text.trim()) return [];
+          ctx.last = it.text.trim();
+          return [{ type: "text", text: ctx.last }];
+        case "command_execution":
+          return [{ type: "tool", name: "Bash", detail: short(it.command) }];
+        case "file_change":
+          return [{ type: "tool", name: "Edit", detail: short((it.changes ?? []).map((c) => c.path).join(", ")) }];
+        case "mcp_tool_call":
+          return [{ type: "tool", name: `${it.server ?? "mcp"}__${it.tool ?? "tool"}`, detail: undefined }];
+        case "web_search":
+          return [{ type: "tool", name: "WebSearch", detail: short(it.query) }];
+        case "error":
+          return [{ type: "status", text: String(it.message ?? "").slice(0, 300) }];
+        default:
+          return [];
+      }
+    },
+  },
 };
+
+/** A bot's own OpenAI model for Codex, with Codex's reasoning effort; none: Codex's default. */
+function codexModel(choice) {
+  if (!choice?.model || !/^(gpt-|o[1-9]|codex-)/.test(choice.model)) return null;
+  return { model: choice.model, effort: choice.effort === "max" ? "xhigh" : choice.effort };
+}
 
 /** One line per event for the journal (journalctl -u ambient-routine-<id>). */
 function journalLine(e) {
@@ -837,13 +1060,13 @@ function journalLine(e) {
 // and it can't use more than its share of the machine. The image is built here from this file's
 // Containerfile, once per image version.
 
-const IMAGE_VERSION = "2";
+const IMAGE_VERSION = "3";
 const IMAGE = `localhost/ambient-bot:${IMAGE_VERSION}`;
 const CONTAINERFILE = `FROM docker.io/library/node:24-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gh jq ripgrep python3 python3-pil webp openssh-client less procps \\
  && rm -rf /var/lib/apt/lists/*
-RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
-# The image is the version; a run never updates Claude Code in place (it'd be lost with the container).
+RUN npm install -g @anthropic-ai/claude-code @openai/codex && npm cache clean --force
+# The image is the version; a run never updates Claude Code or Codex in place (it'd be lost with the container).
 ENV DISABLE_AUTOUPDATER=1 HOME=/home/bot
 WORKDIR /home/bot
 USER node
@@ -1030,8 +1253,8 @@ function skillPath(path) {
  * run's come in (as ~/.claude/skills/<name>), and .ambient-managed lists them for next time. The
  * bot's own skills (folders it made itself) stay.
  */
-const SKILLS_SCRIPT = `set -e
-d="$HOME/.claude/skills"
+function skillsLines(dir) {
+  return `d="${dir}"
 mkdir -p "$d"
 if [ -f "$d/.ambient-managed" ]; then
   while IFS= read -r n; do case "$n" in ""|*/*|.*) ;; *) rm -rf "\${d:?}/$n" ;; esac; done < "$d/.ambient-managed"
@@ -1044,9 +1267,35 @@ for s in ${CONTAINER_SKILLS}/*/; do
   cp -R "$s" "$d/$n"
   echo "$n" >> "$d/.ambient-managed.new"
 done
-mv "$d/.ambient-managed.new" "$d/.ambient-managed"
+mv "$d/.ambient-managed.new" "$d/.ambient-managed"`;
+}
+const SKILLS_SCRIPT = `set -e
+${skillsLines("$HOME/.claude/skills")}
 set +e
 exec claude "$@"`;
+
+/** Where a container's Codex gets the computer's ChatGPT sign-in, and leaves it refreshed. */
+const CONTAINER_CODEX_AUTH = "/opt/ambient/codex-auth";
+
+/**
+ * Codex in the container: skills (when the run has a folder) into ~/.codex/skills like Claude
+ * Code's; the computer's ChatGPT sign-in copied in, and back out after the run, since Codex
+ * refreshes it while it works and the computer must keep the newest.
+ */
+const CODEX_SCRIPT = `set -e
+if [ -d ${CONTAINER_SKILLS} ]; then
+${skillsLines("$HOME/.codex/skills")}
+fi
+if [ -f ${CONTAINER_CODEX_AUTH}/auth.json ]; then
+  mkdir -p "$HOME/.codex"
+  cp ${CONTAINER_CODEX_AUTH}/auth.json "$HOME/.codex/auth.json"
+  chmod 600 "$HOME/.codex/auth.json"
+fi
+set +e
+codex "$@"
+code=$?
+if [ -f ${CONTAINER_CODEX_AUTH}/auth.json ] && [ -f "$HOME/.codex/auth.json" ]; then cp "$HOME/.codex/auth.json" ${CONTAINER_CODEX_AUTH}/auth.json; fi
+exit $code`;
 
 /** A file the run left in its out folder: a regular file only (never a link), at most 64 KB. */
 function readOut(dir, name) {
@@ -1104,6 +1353,10 @@ async function run(id) {
   };
 
   if (!adapter) await fail(`This runner (${VERSION}) can't run "${runtime}" yet. Update the runner, or switch the bot to Claude Code.`);
+  const codex = runtime === "codex";
+  // Codex lives in the image for a container; on the computer itself it's the routine user's.
+  const bin = codex ? (contained ? "codex" : codexPath(cfg)) : cfg.claude;
+  if (codex && !bin) await fail(`Codex isn't installed on ${hostname()}. Install it (npm install -g @openai/codex), or run this bot in its own container.`);
   if (!contained && (!existsSync(folder) || !statSync(folder).isDirectory())) await fail(`The folder ${folder} doesn't exist on ${hostname()}.`);
 
   // A bot's run gets the ask_owner tool: its MCP config, readable by the run (and only it).
@@ -1114,7 +1367,16 @@ async function run(id) {
   }
   const runDir = join(STATE_DIR, "runs", runInfo.id);
   let mcpFile = null;
-  if (bot && runToken) {
+  // Codex takes its MCP server on the command line (-c) and the run's token from its environment.
+  let mcpServer = null;
+  if (bot && runToken && codex) {
+    mkdirSync(join(STATE_DIR, "runs"), { recursive: true, mode: 0o711 });
+    chmodSync(join(STATE_DIR, "runs"), 0o711);
+    mkdirSync(runDir, { mode: 0o700 });
+    const owner = contained ? { uid: 1000, gid: 1000 } : as;
+    if (owner && process.getuid?.() === 0) chownSync(runDir, owner.uid, owner.gid);
+    mcpServer = { command: contained ? "node" : cfg.node, args: [contained ? "/opt/ambient/ambient-runner.mjs" : fileURLToPath(import.meta.url), "bot-mcp"] };
+  } else if (bot && runToken) {
     // The routine's user passes through runs/ (no listing) into its own run's folder.
     mkdirSync(join(STATE_DIR, "runs"), { recursive: true, mode: 0o711 });
     chmodSync(join(STATE_DIR, "runs"), 0o711);
@@ -1175,8 +1437,29 @@ async function run(id) {
   const system = ws && typeof ws.system === "string" && ws.system.trim() ? ws.system.replaceAll("{{OUT}}", contained ? CONTAINER_OUT : outDir) : null;
   const cleanup = () => rmSync(runDir, { recursive: true, force: true });
 
-  const runCfg = { ...cfg, claudeArgs: withModel(cfg.claudeArgs, bot?.model ?? readState().model) };
-  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, resume, mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile), system);
+  // Codex bots: the computer's ChatGPT sign-in goes into the container (and back out, refreshed)
+  // unless an OpenAI key from Ambient is used.
+  const openaiKey = codex ? chosenOpenAI() : {};
+  let codexAuth = null;
+  if (codex && contained && !openaiKey.CODEX_API_KEY) {
+    const hostAuth = join(as?.home ?? home(user), ".codex", "auth.json");
+    const text = readOut(dirname(hostAuth), "auth.json");
+    if (text) {
+      codexAuth = { dir: join(runDir, "codex-auth"), hostAuth, text };
+      if (!existsSync(runDir)) mkdirSync(runDir, { recursive: true, mode: 0o700 });
+      mkdirSync(codexAuth.dir, { mode: 0o700 });
+      writeFileSync(join(codexAuth.dir, "auth.json"), text, { mode: 0o600 });
+      if (process.getuid?.() === 0) {
+        chownSync(codexAuth.dir, 1000, 1000);
+        chownSync(join(codexAuth.dir, "auth.json"), 1000, 1000);
+      }
+    }
+  }
+  // Codex's own run settings: its model (a bot's own OpenAI model), never Claude Code's flags.
+  const runCfg = codex ? cfg : { ...cfg, claudeArgs: withModel(cfg.claudeArgs, bot?.model ?? readState().model) };
+  const mcpArg = codex ? mcpServer : mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile);
+  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, resume, mcpArg, system, { contained, outDir: contained ? null : outDir });
+  const codexEnv = codex ? { ...openaiKey, ...(mcpServer ? { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } : {}) } : {};
   let child;
   let containerName = null;
   if (contained) {
@@ -1192,7 +1475,9 @@ async function run(id) {
     }
     containerName = `ambient-run-${runInfo.id}`.slice(0, 60);
     // Values reach podman through its environment (never its command line); `-e NAME` passes one on.
-    const pass = { ...signInEnv(chosenClaude(pick(process.env, new RegExp(`^(${AUTH_ENV.join("|")})$`)))), ...Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k))) };
+    const secretEnv = Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k)));
+    // Claude Code gets its sign-in; Codex its OpenAI key (if one is chosen) and the run's token for its MCP server.
+    const pass = codex ? { ...secretEnv, ...codexEnv } : { ...signInEnv(chosenClaude(pick(process.env, new RegExp(`^(${AUTH_ENV.join("|")})$`)))), ...secretEnv };
     const podArgs = [
       "run", "--rm", "-i", "--name", containerName, "--user", "node", "--security-opt", "no-new-privileges", "--cap-drop", "all", ...LIMITS,
       "-v", `ambient-bot-${routine.id}:/home/bot:U`,
@@ -1201,17 +1486,18 @@ async function run(id) {
       // Its out folder (memory.md, handoff.md) to write, its skills to read.
       ...(outDir ? ["-v", `${outDir}:${CONTAINER_OUT}`] : []),
       ...(skillsDir ? ["-v", `${skillsDir}:${CONTAINER_SKILLS}:ro`] : []),
+      ...(codexAuth ? ["-v", `${codexAuth.dir}:${CONTAINER_CODEX_AUTH}`] : []),
       // A team's bot reads the team's wiki (the brain), never writes it.
       ...teamWikiMount(),
       "-w", "/home/bot",
       "-e", `AMBIENT_ROUTINE_ID=${routine.id}`, "-e", `AMBIENT_ROUTINE_NAME=${routine.name.replace(/[\r\n]/g, " ")}`, "-e", `AMBIENT_RUN_ID=${runInfo.id}`,
       ...Object.keys(pass).flatMap((k) => ["-e", k]),
       // With a workspace, a small shell puts the skills in place first, then becomes Claude Code.
-      ...(skillsDir ? [IMAGE, "sh", "-c", SKILLS_SCRIPT, "sh", ...args] : [IMAGE, "claude", ...args]),
+      ...(codex ? [IMAGE, "sh", "-c", CODEX_SCRIPT, "sh", ...args] : skillsDir ? [IMAGE, "sh", "-c", SKILLS_SCRIPT, "sh", ...args] : [IMAGE, "claude", ...args]),
     ];
     child = spawn(p, podArgs, { env: { PATH: SYSTEM_PATH.join(":"), HOME: "/root", ...pass }, stdio: ["pipe", "pipe", "pipe"] });
   } else {
-    child = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, {
+    child = spawn(drop ? sys("setpriv") : bin, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", bin, ...args] : args, {
       cwd: folder,
       env: runEnv(
         cfg,
@@ -1220,6 +1506,7 @@ async function run(id) {
           AMBIENT_ROUTINE_NAME: routine.name,
           AMBIENT_RUN_ID: runInfo.id,
           ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}),
+          ...codexEnv,
         },
         secrets,
       ),
@@ -1247,8 +1534,9 @@ async function run(id) {
   const progressTimer = setInterval(reportProgress, 5_000);
   progressTimer.unref();
 
+  const ctx = {};
   createInterface({ input: child.stdout }).on("line", (line) => {
-    for (const e of adapter.events(line)) {
+    for (const e of adapter.events(line, ctx)) {
       if (e.type === "result") {
         result = e;
         continue;
@@ -1289,6 +1577,7 @@ async function run(id) {
   clearInterval(progressTimer);
   // What the bot left for its next run, read before the run's folder goes.
   const files = outDir ? { memory: readOut(outDir, "memory.md"), handoff: readOut(outDir, "handoff.md") } : {};
+  if (codexAuth) keepCodexAuth(codexAuth, as);
   cleanup();
 
   const ok = code === 0 && result && result.ok && !stopped;
@@ -1301,9 +1590,9 @@ async function run(id) {
       : code === 127
         ? contained
           ? "Podman couldn't start the bot's container."
-          : `Claude Code wasn't found at ${cfg.claude}.`
+          : `${adapter.label} wasn't found at ${bin}.`
         : // "success" is Claude Code's word for a run that ended normally, also with an error.
-          `Claude Code ended with exit code ${code}${result?.subtype && result.subtype !== "success" ? ` (${result.subtype})` : ""}.`;
+          `${adapter.label} ended with exit code ${code}${result?.subtype && result.subtype !== "success" ? ` (${result.subtype})` : ""}.`;
     const tail = stderr.trim().split("\n").slice(-6).join("\n");
     summary = [why, summary, tail].filter(Boolean).join("\n\n");
   }
@@ -1318,6 +1607,27 @@ async function run(id) {
   });
   log(`Run ${ok ? "succeeded" : "failed"} (exit ${code}${result?.costUsd !== undefined ? `, $${Number(result.costUsd).toFixed(2)}` : ""})`);
   process.exit(ok ? 0 : 1);
+}
+
+/**
+ * Codex refreshes its ChatGPT sign-in while it works: what the container left goes back to the
+ * computer's, when it changed and still is a sign-in (the next run, and Codex on the computer,
+ * use the newest).
+ */
+function keepCodexAuth(c, as) {
+  const text = readOut(c.dir, "auth.json");
+  if (!text || text === c.text) return;
+  try {
+    const j = JSON.parse(text);
+    if (!j || typeof j !== "object" || !(j.tokens || j.OPENAI_API_KEY)) return;
+    const tmp = `${c.hostAuth}.ambient-${process.pid}`;
+    writeFileSync(tmp, text, { mode: 0o600 });
+    if (as && process.getuid?.() === 0) chownSync(tmp, as.uid, as.gid);
+    renameSync(tmp, c.hostAuth);
+    log("Kept Codex's refreshed sign-in from the bot's container.");
+  } catch (err) {
+    log(`Couldn't keep Codex's refreshed sign-in: ${err.message}`);
+  }
 }
 
 // ---- setup ----

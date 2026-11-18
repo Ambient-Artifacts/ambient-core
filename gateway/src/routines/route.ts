@@ -165,6 +165,39 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
     }
   });
 
+  // How the computer's Codex bots sign in to OpenAI (docs/bots.md, "Codex next to Claude Code"):
+  // an API key goes in here only; the ChatGPT plan is signed in on the computer (…/openai/login).
+  r.put("/v1/app/computers/:id/openai", d.auth, d.json, async (req, res) => {
+    const body = z.object({ key: z.string().trim().min(20).max(400) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_openai_key", message: "Paste an OpenAI API key (sk-…)." });
+      return;
+    }
+    try {
+      res.json({ computer: await d.routines.setOpenAIKey(await actor(res), id(req), body.data.key) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/computers/:id/openai/use", d.auth, d.json, async (req, res) => {
+    const body = z.object({ use: z.enum(["plan", "key"]) }).safeParse(req.body);
+    if (!body.success) return badRequest(res, body.error);
+    try {
+      res.json({ computer: await d.routines.useOpenAI(await actor(res), id(req), body.data.use) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/computers/:id/openai/key", d.auth, async (req, res) => {
+    try {
+      res.json({ computer: await d.routines.removeOpenAIKey(await actor(res), id(req)) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
   r.delete("/v1/app/computers/:id", d.auth, async (req, res) => {
     try {
       await d.routines.removeComputer(await actor(res), id(req));
@@ -235,6 +268,15 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
   r.get("/v1/host/claude", host, async (_req, res) => {
     try {
       res.set("cache-control", "no-store").json(await d.routines.hostClaude(hostOf(res)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // The computer's stored OpenAI key for its Codex bots, fetched when sync's `openai` version changes.
+  r.get("/v1/host/openai", host, async (_req, res) => {
+    try {
+      res.set("cache-control", "no-store").json(await d.routines.hostOpenAI(hostOf(res)));
     } catch (err) {
       fail(res, err);
     }

@@ -56,6 +56,21 @@ export class AdminService {
     return this.d.now?.() ?? Date.now();
   }
 
+  /**
+   * Sign Codex in with a ChatGPT plan on a computer the person may change (docs/bots.md, "Codex
+   * next to Claude Code"): the link and one-time code to finish it in their browser.
+   */
+  async codexLogin(actor: Actor, ref: string): Promise<{ computer: string; url: string; code: string; expiresAt: number }> {
+    const c = await this.d.routines.openaiComputer(actor, ref);
+    if (!this.d.computers.connected(c.id))
+      throw refused("not_connected", `${c.name} isn't connected to Ambient right now (its runner signs Codex in). Or sign in there yourself: codex login --device-auth, as the loops' user.`, 409);
+    try {
+      return { computer: c.name, ...(await this.d.computers.codexLogin(c.id)) };
+    } catch (err) {
+      throw refused("codex_login_failed", `${c.name} couldn't start Codex's sign-in: ${(err as Error).message}.`, 502);
+    }
+  }
+
   private owner(teamId: string | null, uid: string): Owner {
     return teamId ? { kind: "team", teamId } : { kind: "user", uid };
   }

@@ -13,7 +13,7 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { BotInput, ModelChoice, RoutineSchedule, botSettings, botState, describeSchedule, nextRun, onCalendar, storedModel, type BotSettings, type BotState } from "@brain/spec";
+import { BotInput, ModelChoice, RoutineSchedule, botSettings, modelRuntime, botState, describeSchedule, nextRun, onCalendar, storedModel, type BotSettings, type BotState } from "@brain/spec";
 import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix } from "../bots/messages.ts";
 import type { BotsAccess } from "../config.ts";
 import { api, type Control } from "../control.ts";
@@ -65,6 +65,10 @@ const MESSAGES: Record<string, [string, number]> = {
   no_plan: ["There's no Claude plan stored for this computer yet. Add one in the Ambient app (the computer, then Claude).", 409],
   no_key: ["There's no API key stored for this computer yet. Add one in the Ambient app (the computer, then Claude).", 409],
   raise_in_app: ["An AI app can only lower Ambient's access to a computer; raise it in the Ambient app (the computer, then Ambient's access).", 403],
+  bad_openai_key: ["That isn't an OpenAI API key (sk-…).", 400],
+  no_openai_key: ["There's no OpenAI API key stored for this computer yet. Add one in the Ambient app (the computer, then Codex).", 409],
+  model_runtime: ["That model is for the other runtime: Claude Code takes claude-… models, Codex takes OpenAI's (gpt-…, o3…, codex-…).", 400],
+  claude_model_only: ["A computer's default model is Claude Code's (claude-…); give a Codex bot its own model instead.", 400],
   claude_admins_only: ["Only the person whose computer it is, or a team's owners and admins for its server, can change its Claude sign-in.", 403],
   no_such_bot: ["There's no such bot.", 404],
   run_over: ["This run is over; it can't ask anything anymore.", 409],
@@ -118,6 +122,9 @@ export const HostInfo = z.object({
   os: z.string().max(120),
   runner: z.string().max(40),
   claude: z.string().max(80),
+  /** Codex's version and how it's signed in there (runner 0.9.0 on). */
+  codex: z.string().max(80).optional(),
+  codexLogin: z.enum(["chatgpt", "api_key", "none"]).optional(),
 });
 export type HostInfo = z.infer<typeof HostInfo>;
 
@@ -170,6 +177,7 @@ interface HostRow {
   info: HostInfo | null;
   lastSeenAt: number | null;
   claude: ClaudeAccount | null;
+  openai: { use: "plan" | "key"; key: { by: string | null; at: number } | null } | null;
   model: StoredModel | null;
   access: Access;
   allowed: string[];
@@ -184,6 +192,17 @@ export interface ClaudeAccount {
   use: "plan" | "key" | "computer";
   plan: { by: string | null; at: number } | null;
   key: { by: string | null; at: number } | null;
+}
+
+/**
+ * How a computer's Codex bots sign in to OpenAI (docs/bots.md, "Codex next to Claude Code"): the
+ * computer's own Codex sign-in ("plan": a ChatGPT plan signed in there) or a stored API key.
+ */
+export interface OpenAIAccount {
+  use: "plan" | "key";
+  key: { by: string | null; at: number } | null;
+  /** How Codex is signed in on the computer itself; null: not known yet (an older runner). */
+  signedIn: "chatgpt" | "api_key" | "none" | null;
 }
 
 /** A plan's token (claude setup-token) or an Anthropic API key, as people paste them. */
@@ -224,6 +243,10 @@ export interface Computer {
   lastSeenAt: number | null;
   /** Whose Claude it signs in with: a stored plan or key, or its own (`use: "computer"`). */
   claudeAccount: ClaudeAccount;
+  /** Codex's version there ("not found" when it isn't installed); null: an older runner. */
+  codex: string | null;
+  /** How its Codex bots sign in to OpenAI. */
+  openaiAccount: OpenAIAccount;
   /** The default model for its runs and Ambient there; null: Claude Code's own. */
   model: { model: string; effort: string | null; fallback: string | null } | null;
   /** What Ambient may do there (docs/bots.md). */
@@ -488,6 +511,8 @@ export class RoutineService {
       runner: h.info?.runner ?? null,
       lastSeenAt: h.lastSeenAt,
       claudeAccount: h.claude ?? { use: "computer", plan: null, key: null },
+      codex: h.info?.codex ?? null,
+      openaiAccount: { use: h.openai?.use ?? "plan", key: h.openai?.key ?? null, signedIn: h.info?.codexLogin ?? null },
       model: h.model ? { model: h.model.model, effort: h.model.effort ?? null, fallback: h.model.fallback ?? null } : null,
       access: h.access ?? "standard",
       allowed: h.allowed ?? [],
@@ -632,7 +657,7 @@ export class RoutineService {
       hostId: hostId ?? undefined,
       folder: input.folder ?? undefined,
       enabled: input.enabled ?? true,
-      bot: input.bot ? botSettings(input.bot) : undefined,
+      bot: input.bot ? matchingModel(botSettings(input.bot)) : undefined,
       source,
       now: this.now(),
     });
@@ -649,7 +674,7 @@ export class RoutineService {
     const sealed = patch.prompt !== undefined ? await this.d.keys.seal(this.ownerOf(r), "routine:prompt", patch.prompt) : undefined;
     const hostId = !r.teamId && patch.computer !== undefined ? await this.resolveComputer(actor, patch.computer) : undefined;
     if (patch.bot && !this.botsFor(actor, r)) throw refused("bots_not_enabled");
-    const bot = patch.bot === undefined ? undefined : patch.bot === null ? null : botSettings(patch.bot, r.bot ?? undefined);
+    const bot = patch.bot === undefined ? undefined : patch.bot === null ? null : matchingModel(botSettings(patch.bot, r.bot ?? undefined));
     const out = await this.d.control.m(api.routines.update, {
       ...access,
       id,
@@ -852,6 +877,7 @@ export class RoutineService {
 
   /** The default model for the computer's runs and Ambient there; null: Claude Code's own. */
   async setModel(actor: Actor, ref: string, model: ModelChoice | null): Promise<Computer> {
+    if (model && modelRuntime(model.model) !== "claude-code") throw refused("claude_model_only");
     const h = await this.claudeComputer(actor, ref);
     return this.afterClaude(actor, await this.d.control.m(api.routines.setModel, { uid: actor.uid as never, id: h.id, model: model ? storedModel(model) : null }));
   }
@@ -871,6 +897,46 @@ export class RoutineService {
   async adminComputer(actor: Actor, ref: string): Promise<Computer & { hostTeamId: string | null }> {
     const h = await this.claudeComputer(actor, ref);
     return { ...this.computer(h, actor), hostTeamId: h.teamId };
+  }
+
+  // ---- how a computer's Codex bots sign in to OpenAI ----
+
+  /** Store an OpenAI API key for the computer, sealed, and use it. Only from the app. */
+  async setOpenAIKey(actor: Actor, ref: string, key: string): Promise<Computer> {
+    const k = key.trim().replace(/^(OPENAI_API_KEY|CODEX_API_KEY)=/, "");
+    if (!/^sk-[A-Za-z0-9_-]{20,300}$/.test(k) || k.startsWith("sk-ant-")) throw refused("bad_openai_key");
+    const h = await this.claudeComputer(actor, ref);
+    const sealed = await this.d.keys.seal(this.computerOwner(h, actor), "host:openai:key", k);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.setOpenAI, { uid: actor.uid as never, id: h.id, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() }));
+  }
+
+  /** Switch the computer's Codex bots between the stored key and the computer's own sign-in. */
+  async useOpenAI(actor: Actor, ref: string, use: "plan" | "key"): Promise<Computer> {
+    const h = await this.claudeComputer(actor, ref);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.useOpenAI, { uid: actor.uid as never, id: h.id, use }));
+  }
+
+  async removeOpenAIKey(actor: Actor, ref: string): Promise<Computer> {
+    const h = await this.claudeComputer(actor, ref);
+    return this.afterClaude(actor, await this.d.control.m(api.routines.removeOpenAI, { uid: actor.uid as never, id: h.id }));
+  }
+
+  /** A computer the user may change, for signing Codex in there (the runner does it, by device code). */
+  async openaiComputer(actor: Actor, ref: string): Promise<Computer> {
+    return this.computer(await this.claudeComputer(actor, ref), actor);
+  }
+
+  private async openaiVersion(host: Host): Promise<string | null> {
+    const c = await this.d.control.q(api.routines.hostOpenAI, { hostId: host.id as never });
+    return c ? `key:${c.at}` : null;
+  }
+
+  /** The computer's stored OpenAI key as environment for its Codex runs; none: its own sign-in. */
+  async hostOpenAI(host: Host): Promise<{ version: string | null; env: Record<string, string> }> {
+    const c = await this.d.control.q(api.routines.hostOpenAI, { hostId: host.id as never });
+    if (!c) return { version: null, env: {} };
+    const owner: Owner = c.teamId ? { kind: "team", teamId: String(c.teamId) } : { kind: "user", uid: String(c.uid) };
+    return { version: `key:${c.at}`, env: { CODEX_API_KEY: await this.d.keys.open(owner, "host:openai:key", c.iv, c.ct) } };
   }
 
   /** The computer's chosen sign-in as environment (only the computer asks, with its token). */
@@ -908,7 +974,7 @@ export class RoutineService {
   async sync(
     host: Host,
     info?: HostInfo,
-  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null; model: StoredModel | null }> {
+  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null; openai: string | null; model: StoredModel | null }> {
     const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info, now: this.now() });
     if (!out) throw new RoutineError("unauthorized", "This computer was removed.", 401);
     return {
@@ -925,6 +991,8 @@ export class RoutineService {
       ambient: await this.ambientOn(host),
       // Which Claude sign-in it uses, as a version: the computer fetches it when this changes.
       claude: await this.claudeVersion(host),
+      // Which OpenAI key its Codex bots use, as a version (null: the computer's own sign-in).
+      openai: await this.openaiVersion(host),
       // The default model for its runs (a bot's own wins; startRun says).
       model: (out as unknown as { model?: StoredModel | null }).model ?? null,
     };
@@ -1076,4 +1144,10 @@ const setupCode = (code: string) => code.trim().toUpperCase();
 /** What the app shows to set up a computer (Linux with systemd, Node and Claude Code). */
 export function setupCommands(origin: string, code: string): string {
   return [`curl -fsSL ${origin}/runner/ambient-runner.mjs -o ambient-runner.mjs`, `sudo node ambient-runner.mjs setup ${code}`].join("\n");
+}
+
+/** A bot's own model must be its runtime's (a Claude model can't run in Codex, nor the other way). */
+function matchingModel(b: BotSettings): BotSettings {
+  if (b.model && modelRuntime(b.model.model) !== b.runtime) throw refused("model_runtime");
+  return b;
 }

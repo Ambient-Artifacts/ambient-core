@@ -92,6 +92,19 @@ export function botAppRoutes(
   });
 
   // Decisions waiting for the person (docs/bots.md, "Decisions"): the stack, and answering one.
+  // Codex's ChatGPT sign-in on a computer (docs/bots.md, "Codex next to Claude Code").
+  r.post("/v1/app/computers/:id/openai/login", d.auth, async (req, res) => {
+    if (!d.admin) {
+      res.status(404).json({ error: "not_found", message: "This server can't sign Codex in on computers." });
+      return;
+    }
+    try {
+      res.json(await d.admin.codexLogin(await actor(res), id(req)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
   r.get("/v1/app/decisions", d.auth, async (_req, res) => {
     const a = await actor(res);
     if (!d.decisions || !d.routines.botsEnabled(a)) return res.json({ decisions: [] });

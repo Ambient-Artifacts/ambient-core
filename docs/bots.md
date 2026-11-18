@@ -15,7 +15,7 @@ events in Ambient's own shape, and a channel interface with the app as its first
 | Field | Values | Meaning |
 |---|---|---|
 | `face` | `classic`, `round`, `tall`, `wide` | The shape of its head. The colour is always its state. |
-| `runtime` | `claude-code` | What runs it. Others come as runner adapters. |
+| `runtime` | `claude-code`, `codex` | What runs it: Claude Code, or OpenAI's Codex (see "Codex next to Claude Code"). Others come as runner adapters. |
 | `isolation` | `container`, `host` | `container`: its own Podman container and volume (its workspace, `HOME`), only its granted secrets. `host`: like a loop today, as the computer's routine user. |
 | `secrets` | names, or `null` | The secrets its runs get. `null` (loops from before): all of its owner's. |
 | `report` | `news`, `every_run` | `news`: the thread gets a run's result only when it failed, asked something or said something new; `every_run`: every result. |
@@ -214,6 +214,77 @@ computer ("Use my Claude plan").
 
 `ambient://computer/<id>/claude` opens the Bots tab on that computer with its Claude sheet open.
 Ambient's chat replies use it as a Markdown link ("[Add your Claude plan](ambient://computer/…/claude)").
+
+## Codex next to Claude Code
+
+A bot runs on Claude Code (`runtime: "claude-code"`, the default) or on OpenAI's Codex CLI
+(`runtime: "codex"`). Everything around the run stays the same: its thread, `ask_owner` and
+`search_history`, its folder, memory and handoffs, its container and grants. Amb itself stays on
+Claude Code.
+
+**A bot's model.** `bot.model.model` is a Claude model for Claude Code (`claude-…`) and an
+OpenAI model for Codex (`gpt-…`, `o3…`, `codex-…`); the other runtime's model is refused
+(`400 model_runtime`), and switching a bot's runtime drops a model of the other one. `effort`
+becomes Codex's reasoning effort (`max` is Codex's `xhigh`); `fallback` is Claude Code's only. A
+Codex bot without a model of its own uses Codex's default: a computer's default model is Claude
+Code's (`set_computer_model` takes only `claude-…`, `400 claude_model_only` otherwise).
+
+### How Codex signs in on a computer
+
+Each computer has `openaiAccount` next to `claudeAccount`:
+
+```json
+"codex": "codex-cli 0.169.0",
+"openaiAccount": { "use": "plan", "key": null, "signedIn": "chatgpt" }
+```
+
+- `codex`: Codex's version there; `"not found"` when it isn't installed; null from runners before 0.9.0.
+- `use: "plan"` (the default): the computer's own Codex sign-in, normally the person's **ChatGPT
+  plan**. `signedIn` says how Codex is signed in there: `chatgpt`, `api_key`, `none` (null: not known yet).
+- `use: "key"`: an **OpenAI API key** stored in Ambient (sealed with the owner's data key, like a
+  Claude key; `key: { by, at }`, never the value), passed to Codex as `CODEX_API_KEY`.
+
+The ChatGPT plan is signed in on the computer itself, with Codex's device code, because ChatGPT's
+sign-in refreshes itself on the machine that uses it (there's no long-lived token to paste like
+`claude setup-token`'s):
+
+- `POST /v1/app/computers/:id/openai/login` → `{ "computer": "Build server", "url": "https://auth.openai.com/…", "code": "ABCD-12345", "expiresAt": 1763380000000 }`.
+  The app shows "Open this link, sign in, enter this code" (15 minutes). The computer's runner
+  starts `codex login --device-auth` as the loops' user and sends the link and code back through
+  its long poll (a `codex-login` job), so the computer must be connected to Ambient (it runs Amb,
+  `409 not_connected` otherwise: the message says how to sign in there by hand). Once the person
+  entered the code, the computer syncs and `openaiAccount.signedIn` turns `chatgpt`: poll
+  `GET /v1/app/routines` (its `computers`) every few seconds while the sheet is open.
+- `PUT /v1/app/computers/:id/openai` with `{ "key": "sk-…" }` stores a key and uses it (`400 bad_openai_key` for anything else).
+- `POST /v1/app/computers/:id/openai/use` with `{ "use": "plan" | "key" }` (`409 no_openai_key` when none is stored).
+- `DELETE /v1/app/computers/:id/openai/key` removes the key; the computer's own sign-in is used.
+
+All answer `{ "computer": Computer }` (login: the object above); who may change them is who may
+change the computer's Claude sign-in. App link: `ambient://computer/<id>/openai`.
+
+**In a bot's container** Codex is in the image (bots' image version 3). With `use: "plan"` the
+runner copies the computer's sign-in (`~/.codex/auth.json` of the loops' user) into the run and,
+after it, keeps the refreshed one if Codex renewed it, so the computer always holds the newest.
+Several busy Codex bots on one computer can race on that refresh: an API key is the steadier
+choice there. With `use: "key"` only the key goes in. A bot that runs on the computer itself uses
+the loops' user's Codex and its sign-in directly, in Codex's own workspace sandbox (network on, its
+memory and handoff folder writable).
+
+**When Codex can't sign in** (no sign-in, an expired one, a key that's wrong, a plan's usage limit
+or no credit) the run fails with a message that names Codex, and the thread's failure carries
+`fix: { "kind": "openai", "computer": "<id>", "reason": "signin" | "credit" }` (Claude's are
+`kind: "claude"`): the app offers the sign-in sheet.
+
+**The computer's side** (runner 0.9.0): sync reports `info.codex` and `info.codexLogin`; sync's
+answer has `openai` (a version: the stored key changed, null: the computer's own sign-in), and
+`GET /v1/host/openai` → `{ "version", "env": { "CODEX_API_KEY": "…" } }`. A Codex run is
+`codex exec --json` (or `codex exec resume <thread> --json`) with the prompt on stdin, the bot's
+instructions as Codex's `developer_instructions`, and `ambient-bot` (`ask_owner`,
+`search_history`) as an MCP server whose run token comes from Codex's environment, never its
+command line. The bot's secrets reach its commands; the run's token and the sign-ins don't.
+
+**For Amb:** `update_routine` with `bot.runtime: "codex"` (and an OpenAI model), `use_openai_account`,
+and `sign_in_chatgpt` (returns the link and code to give the person). Keys go in through the app only.
 
 ## Files in Ambient's chat
 

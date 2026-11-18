@@ -17,7 +17,14 @@ const MAX_SECRETS = 30;
 const KEEP_RUNS = 50;
 
 const access = { uid: v.id("users"), teamIds: v.array(v.id("teams")) };
-const hostInfo = v.object({ hostname: v.string(), os: v.string(), runner: v.string(), claude: v.string() });
+const hostInfo = v.object({
+  hostname: v.string(),
+  os: v.string(),
+  runner: v.string(),
+  claude: v.string(),
+  codex: v.optional(v.string()),
+  codexLogin: v.optional(v.union(v.literal("chatgpt"), v.literal("api_key"), v.literal("none"))),
+});
 
 function routineShape(r: Doc<"routines">) {
   return {
@@ -58,6 +65,7 @@ function hostShape(h: Doc<"routineHosts">) {
           key: h.claude.key ? { by: h.claude.key.by ?? null, at: h.claude.key.at } : null,
         }
       : null,
+    openai: { use: h.openai?.use ?? ("plan" as const), key: h.openai?.key ? { by: h.openai.key.by ?? null, at: h.openai.key.at } : null },
     model: h.model ?? null,
     access: h.access ?? "standard",
     allowed: h.allowed ?? [],
@@ -715,6 +723,57 @@ export const hostClaude = query({
     const c = h.claude[h.claude.use];
     if (!c) return null;
     return { kind: h.claude.use, iv: c.iv, ct: c.ct, at: c.at, uid: h.userId ?? null, teamId: h.teamId ?? null };
+  },
+});
+
+// ---- how a computer's Codex bots sign in to OpenAI (docs/bots.md, "Codex next to Claude Code") ----
+
+/** Store an OpenAI API key (sealed) and use it. */
+export const setOpenAI = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, id, iv, ct, now }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    const user = await ctx.db.get(uid);
+    await ctx.db.patch(h._id, { openai: { use: "key", key: { iv, ct, by: user?.name, at: now } } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** Use the stored key, or the computer's own Codex sign-in (its ChatGPT plan). */
+export const useOpenAI = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), use: v.union(v.literal("plan"), v.literal("key")) },
+  handler: async (ctx, { secret, uid, id, use }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    if (use === "key" && !h.openai?.key) return { ok: false as const, error: "no_openai_key" };
+    await ctx.db.patch(h._id, { openai: { ...(h.openai ?? {}), use } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** Remove the stored key; the computer's own sign-in is used. */
+export const removeOpenAI = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string() },
+  handler: async (ctx, { secret, uid, id }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    await ctx.db.patch(h._id, { openai: { use: "plan" } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** The computer's stored key (sealed) when it uses one, for the computer itself; null: its own sign-in. */
+export const hostOpenAI = query({
+  args: { ...secretArg, hostId: v.id("routineHosts") },
+  handler: async (ctx, { secret, hostId }) => {
+    assertService(secret);
+    const h = await ctx.db.get(hostId);
+    if (h?.openai?.use !== "key" || !h.openai.key) return null;
+    return { iv: h.openai.key.iv, ct: h.openai.key.ct, at: h.openai.key.at, uid: h.userId ?? null, teamId: h.teamId ?? null };
   },
 });
 
