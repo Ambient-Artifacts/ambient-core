@@ -239,8 +239,7 @@ export function botAppRoutes(
     if (!gh) return notEnabled(res);
     try {
       const f = await d.routines.folderOf(await actor(res), id(req), false);
-      const run = await gh.forRun(f.owner, f.routineId);
-      res.json({ repos: await gh.watch(f.owner, f.routineId), branchPrefix: run?.prefix ?? null });
+      res.json({ repos: await gh.watch(f.owner, f.routineId), branchPrefix: await gh.prefixOf(f.owner, f.routineId) });
     } catch (err) {
       fail(res, err);
     }
@@ -257,8 +256,7 @@ export function botAppRoutes(
     try {
       const f = await d.routines.folderOf(await actor(res), id(req), true);
       const repos = await gh.setWatch(f.owner, f.routineId, body.data.repos);
-      const run = await gh.forRun(f.owner, f.routineId);
-      res.json({ repos, branchPrefix: run?.prefix ?? null });
+      res.json({ repos, branchPrefix: await gh.prefixOf(f.owner, f.routineId) });
     } catch (err) {
       fail(res, err);
     }

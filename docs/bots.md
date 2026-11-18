@@ -660,9 +660,12 @@ stays what the run starts with; GitHub's comes along as new in its thread.
 - `GET /v1/app/github-hook[?team=<slug>]` → `{ "id", "url", "secret", "events": [..] }` (made on
   first use); `POST /v1/app/github-hook/rotate[?team=<slug>]` → the same with a new URL and
   secret (the old ones stop at once).
-- `GET /v1/app/routines/:id/github` → `{ "repos": ["owner/name"], "branchPrefix": "ambient/<bot>/" | null }`;
-  `PUT` with `{ "repos": [..] }` (also `https://github.com/owner/name(.git)`; `400 bad_repo`;
-  an empty list stops it).
+- `GET /v1/app/routines/:id/github` → `{ "repos": ["owner/name"], "branchPrefix": "ambient/<bot>/" }`
+  (the prefix always, also before it watches a repo); `PUT` with `{ "repos": [..] }`: owner/name,
+  or any github.com link to the repo (http or https, www., `git@github.com:`, `.git`, a link to a
+  pull request or a branch in it); `400 bad_repo` otherwise; an empty list stops it. The same
+  cleanup holds for the MCP tool. Everyone who sees the bot reads its repos; who may change it
+  writes them.
 - App link: `ambient://github-hook[?team=<slug>]` (the webhook's page with the secret).
 
 MCP tools for Amb: `github_webhook` (the URL and the events to tick; the secret only in the app)

@@ -198,3 +198,11 @@ describe("the MCP tools", () => {
     expect((await call("GET", `/v1/app/routines/${writer}/github`)).json.repos).toEqual([REPO]);
   });
 });
+
+describe("repo names as people paste them", () => {
+  it("come back as owner/name", async () => {
+    const { repoName } = await import("../src/bots/github.ts");
+    for (const raw of ["acme/web", "https://github.com/acme/web", "http://www.github.com/acme/web.git", "git@github.com:acme/web.git", "https://github.com/acme/web/pull/12", "github.com/acme/web/tree/main", " acme/web/ "]) expect(repoName(raw)).toBe("acme/web");
+    expect(repoName("https://gitlab.com/acme/web")).toBe("https://gitlab.com/acme/web");
+  });
+});

@@ -34,6 +34,16 @@ export const signature = (bot: string) => `— ${bot} (Ambient)`;
 /** The branch prefix a bot's pull requests start with. */
 export const branchPrefix = (slug: string) => `ambient/${slug}/`;
 
+/**
+ * A repo as people paste it, as owner/name: https or http, www., git@github.com:, .git, and links
+ * into it (…/pull/12, …/tree/main) all work. Anything else comes back as written (and is refused).
+ */
+export function repoName(raw: string): string {
+  const t = raw.trim();
+  const m = /^(?:(?:https?:\/\/)?(?:www\.)?github\.com[/:]|git@github\.com:)([^/\s]+)\/([^/\s#?]+?)(?:\.git)?(?:[/#?].*)?$/i.exec(t);
+  return m ? `${m[1]}/${m[2]}` : t.replace(/\.git$/, "").replace(/\/$/, "");
+}
+
 const ownerArgs = (owner: Owner) => (owner.kind === "user" ? { ownerKind: "user" as const, ownerId: owner.uid } : { ownerKind: "team" as const, ownerId: owner.teamId });
 
 /** The hook's id in its URL: whose it is, and a random part. */
@@ -166,12 +176,18 @@ export class GitHubEvents {
   }
 
   async setWatch(owner: Owner, routineId: string, repos: string[]): Promise<string[]> {
-    const clean = [...new Set(repos.map((r) => r.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").replace(/\/$/, "")))].filter(Boolean);
+    const clean = [...new Set(repos.map(repoName))].filter(Boolean);
     const bad = clean.find((r) => !REPO.test(r));
     if (bad) throw new GitHubError("bad_repo", `“${bad}” isn't a GitHub repo: write it as owner/name.`);
     if (clean.length > REPOS_MAX) throw new GitHubError("bad_repo", `A bot watches up to ${REPOS_MAX} repos.`);
     await this.write(owner, WATCH, routineId, { repos: clean }, clean.length === 0);
     return clean;
+  }
+
+  /** The bot's branch prefix, whether or not it watches repos yet (null: no such bot). */
+  async prefixOf(owner: Owner, routineId: string): Promise<string | null> {
+    const slug = (await this.slugs(owner)).get(routineId);
+    return slug ? branchPrefix(slug) : null;
   }
 
   /** For a run's instructions: the bot's branch prefix and the repos it watches (null: none). */
