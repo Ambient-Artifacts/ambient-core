@@ -15,7 +15,7 @@ import type { Owner } from "../routines/keys.ts";
 
 export interface ThreadMessage {
   id: string;
-  role: "bot" | "user";
+  role: "bot" | "user" | "ambient";
   kind: "result" | "failure" | "question" | "answer" | "message";
   text: string;
   choices: string[] | null;
@@ -32,7 +32,7 @@ export interface ThreadMessage {
 
 interface MessageRow {
   id: string;
-  role: "bot" | "user";
+  role: "bot" | "user" | "ambient";
   kind: ThreadMessage["kind"];
   iv: string;
   ct: string;
@@ -58,6 +58,8 @@ export class BotService {
       channels: Channel[];
       /** Starts a bot's run on its computer at once (its long poll) instead of at the next check. */
       startNow?: (hostId: string, routineId: string) => boolean;
+      /** A bot's question goes to Ambient first (DecisionService); without it, straight to the channels. */
+      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string }; question: string; choices: string[]; delegate: "never" | "brain" | "most"; team: string | null }) => void;
       now?: () => number;
     },
   ) {}
@@ -123,14 +125,19 @@ export class BotService {
    * Someone writes to a bot: the answer to its open question, or a message. Its next run starts
    * with it (within a minute), unless the run that asked is still waiting and takes it itself.
    */
-  async post(actor: Actor, id: string, text: string): Promise<{ message: ThreadMessage; routine: Routine }> {
+  /** Ambient answers (or writes) in a bot's thread for its owner, under its own name. */
+  async postAsAmbient(actor: Actor, id: string, text: string): Promise<{ message: ThreadMessage; routine: Routine }> {
+    return this.post(actor, id, text, { asAmbient: true });
+  }
+
+  async post(actor: Actor, id: string, text: string, opts: { asAmbient?: boolean } = {}): Promise<{ message: ThreadMessage; routine: Routine }> {
     const r = await this.bot(actor, id);
     if (r.teamId ? !actor.canWriteTeams : !actor.canWritePersonal) throw refused("read_only", "This connection can't write to bots. Reconnect Ambient in this app and allow saving.", 403);
     const body = text.trim().slice(0, MESSAGE_MAX);
     if (!body) throw refused("bad_request", "Write something first.");
     const owner = this.ownerOf(r);
     const sealed = await sealMessage(this.d.routines.keys, owner, { text: body });
-    const out = await this.d.routines.control.m(api.bots.post, { ...this.writeAccess(actor), id, iv: sealed.iv, ct: sealed.ct, now: this.now() });
+    const out = await this.d.routines.control.m(api.bots.post, { ...this.writeAccess(actor), id, iv: sealed.iv, ct: sealed.ct, now: this.now(), ...(opts.asAmbient ? { asAmbient: true } : {}) });
     if (!out.ok) {
       const messages: Record<string, [string, number]> = {
         no_such_bot: ["There's no such bot.", 404],
@@ -171,16 +178,24 @@ export class BotService {
     const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks });
     const out = await this.d.routines.control.m(api.bots.ask, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
-    for (const channel of this.d.channels) {
-      void channel
-        .deliver({
-          speaker: { kind: "bot", botId: String(out.routineId), name: who.name, face: who.face, team: out.team },
-          to: String(out.notify),
-          kind: "question",
-          text,
-          ...(picks.length ? { choices: picks } : {}),
-        })
-        .catch((err: Error) => console.warn(`[bots] ${channel.kind} couldn't deliver a question: ${err.message}`));
+    // Ambient looks first (DecisionService): it answers for the owner, or brings it to them.
+    if (this.d.onQuestion) {
+      this.d.onQuestion({
+        uid: String(out.notify),
+        routineId: String(out.routineId),
+        questionId: String(out.questionId),
+        bot: { name: who.name, face: who.face },
+        question: text,
+        choices: picks,
+        delegate: (who as { delegate?: "never" | "brain" | "most" }).delegate ?? "brain",
+        team: out.team,
+      });
+    } else {
+      for (const channel of this.d.channels) {
+        void channel
+          .deliver({ speaker: { kind: "bot", botId: String(out.routineId), name: who.name, face: who.face, team: out.team }, to: String(out.notify), kind: "question", text, ...(picks.length ? { choices: picks } : {}) })
+          .catch((err: Error) => console.warn(`[bots] ${channel.kind} couldn't deliver a question: ${err.message}`));
+      }
     }
     return { id: String(out.questionId) };
   }

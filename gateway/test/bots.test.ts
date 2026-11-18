@@ -212,6 +212,8 @@ describe("a bot", () => {
 describe("Ambient's chat", () => {
   it("answers with Claude over the person's own tools, and keeps the history sealed", async () => {
     await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Release notes", prompt: "Write the release notes.", schedule: daily, bot: {} });
+    // A bot's earlier question came to the chat as a decision; this test starts from an empty chat.
+    await appCall(s, lena.access_token, "DELETE", "/v1/app/ambient/chat");
     const sent = await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "How are my bots?" });
     expect(sent.status, JSON.stringify(sent.json)).toBe(200);
     expect(sent.json).toMatchObject({ message: { role: "user", text: "How are my bots?" }, pending: true });

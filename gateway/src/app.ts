@@ -34,6 +34,9 @@ import { AmbientChat } from "./bots/ambient.ts";
 import { ambientHostRouter, botRunRouter } from "./bots/route.ts";
 import { AmbientComputers } from "./bots/computer.ts";
 import { AdminService } from "./bots/admin.ts";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { DecisionService } from "./bots/decisions.ts";
+import { Heartbeat } from "./bots/heartbeat.ts";
 import { AppChannel } from "./channels/channel.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadRunner, RoutineService } from "./routines/service.ts";
@@ -72,8 +75,8 @@ export interface AppDeps {
   streamMaxMs?: number;
   /** Tests: the Teams bots against a fake Bot Framework, with their state in memory. */
   msteams?: { fetchImpl?: typeof fetch; verifier?: InboundVerifier; apiKey?: string };
-  /** Tests: Ambient's chat against a fake Anthropic. */
-  ambient?: { fetchImpl?: typeof fetch; apiKey?: string };
+  /** Tests: Ambient's chat against a fake Anthropic; how long it may look at a bot's question; no heartbeat timer. */
+  ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number; noHeartbeat?: boolean };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
   microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
@@ -122,7 +125,14 @@ export function createApp(deps: AppDeps) {
   });
   // Bots talk to people through channels; the app is the first (docs/bots.md).
   let startNow: ((hostId: string, routineId: string) => boolean) | undefined;
-  const bots = new BotService({ routines, channels: [new AppChannel(notifier)], startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false });
+  // A bot's question goes to Ambient first (DecisionService, set up below with Ambient).
+  let onQuestion: ((q: Parameters<DecisionService["onBotQuestion"]>[0]) => void) | undefined;
+  const bots = new BotService({
+    routines,
+    channels: [new AppChannel(notifier)],
+    startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false,
+    onQuestion: (q) => (onQuestion ? onQuestion(q) : undefined),
+  });
   const userName = async (uid: string) => (await directory.user(uid))?.name;
   const readers: ReaderSource = {
     personal: (uid) => personal.reader(uid),
@@ -197,21 +207,29 @@ export function createApp(deps: AppDeps) {
   startNow = (hostId, routineId) => computers.start(hostId, routineId);
   // Root commands Ambient asks for, run by the computer's runner after an approval (or at once on full access).
   const admin = new AdminService({ control, keys: routines.keys, routines, computers, notifier });
-  const ambient = new AmbientChat({
+  const ambient: AmbientChat = new AmbientChat({
     control,
     keys: routines.keys,
-    mcp: async (uid) => {
+    mcp: async (uid): Promise<McpServer> => {
       const principal = { uid, scopes: new Set(MCP_SCOPES), via: "pat" as const, clientId: "ambient-chat", personal: true, teams: await directory.teamsOf(uid) };
       const personal = await personalInstructions(principal, readers, { name: await userName(uid).catch(() => undefined) });
-      return buildMcpServer({ principal, readers, routines, bots, admin, settings, voices, version: VERSION, personal });
+      return buildMcpServer({ principal, readers, routines, bots, admin, decisions, settings, voices, version: VERSION, personal });
     },
     apiKey: deps.ambient?.apiKey ?? process.env.ANTHROPIC_API_KEY,
     model: config.ambientModel ?? "claude-sonnet-5-5",
     fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
     computers,
     computersOf: (uid) => routines.computersOf(uid),
+    nameOf: async (uid) => (await directory.user(uid))?.name,
   });
-  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, settings, voices, version: VERSION, userName }));
+  // Bots report to Ambient, Ambient reports to the person (docs/bots.md, "Decisions").
+  const actorFor = async (uid: string) => ({ uid, teams: await directory.teamsOf(uid), personal: true, canWritePersonal: true, canWriteTeams: true });
+  const decisions: DecisionService = new DecisionService({ control, keys: routines.keys, routines, bots, ambient, channels: [new AppChannel(notifier)], actorFor, triageMs: deps.ambient?.triageMs });
+  ambient.decisionView = (uid, row) => decisions.view(uid, row);
+  onQuestion = (q) => void decisions.onBotQuestion(q);
+  const heartbeat = new Heartbeat({ control, ambient, bots: config.bots, notifier });
+  if (!deps.ambient?.noHeartbeat) heartbeat.start();
+  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
   app.use(botRunRouter({ bots }));
@@ -235,6 +253,7 @@ export function createApp(deps: AppDeps) {
       bots,
       ambient,
       admin,
+      decisions,
       appleRevoke: deps.appleRevoke ?? appleRevoker(config.appleRevoke, deps.fetchImpl),
       microsoftClientId: microsoft ? config.microsoftClientIds?.[0] : undefined,
       googleClientId: google ? config.googleClientIds?.[0] : undefined,
@@ -272,5 +291,5 @@ export function createApp(deps: AppDeps) {
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });
 
-  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
+  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
 }

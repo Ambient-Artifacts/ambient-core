@@ -26,6 +26,8 @@ export const botSettings = v.object({
   report: v.union(v.literal("news"), v.literal("every_run")),
   /** Absent: the computer's default model. */
   model: v.optional(v.object({ model: v.string(), effort: v.optional(v.string()), fallback: v.optional(v.string()) })),
+  /** What Ambient may answer for its owner: never, brain (default), most. */
+  delegate: v.optional(v.union(v.literal("never"), v.literal("brain"), v.literal("most"))),
 });
 /** A model choice: the model, its effort, and a model to fall back to (docs/bots.md). */
 export const modelChoice = v.object({ model: v.string(), effort: v.optional(v.string()), fallback: v.optional(v.string()) });
@@ -476,7 +478,8 @@ export default defineSchema({
   botMessages: defineTable({
     routineId: v.id("routines"),
     teamId: v.optional(v.id("teams")),
-    role: v.union(v.literal("bot"), v.literal("user")),
+    /** ambient: Ambient answered for the bot's owner (docs/bots.md, "Decisions"). */
+    role: v.union(v.literal("bot"), v.literal("user"), v.literal("ambient")),
     kind: botMessageKind,
     iv: v.string(),
     ct: v.string(),
@@ -515,8 +518,42 @@ export default defineSchema({
     role: v.union(v.literal("user"), v.literal("ambient")),
     iv: v.string(),
     ct: v.string(),
+    /** A decision this message brings to the person (shown as a card). */
+    decisionId: v.optional(v.id("decisions")),
     createdAt: v.number(),
   }).index("by_user", ["userId", "createdAt"]),
+
+  /**
+   * Something only the person decides: a bot's question Ambient didn't answer itself, or Ambient's
+   * own (docs/bots.md, "Decisions"). Question, options and Ambient's suggestion are sealed with the
+   * person's key; so is the answer.
+   */
+  decisions: defineTable({
+    userId: v.id("users"),
+    routineId: v.optional(v.id("routines")),
+    questionId: v.optional(v.id("botMessages")),
+    iv: v.string(),
+    ct: v.string(),
+    status: v.union(v.literal("open"), v.literal("answered"), v.literal("expired")),
+    answerIv: v.optional(v.string()),
+    answerCt: v.optional(v.string()),
+    answeredBy: v.optional(v.string()),
+    via: v.optional(v.string()),
+    answeredAt: v.optional(v.number()),
+    urgent: v.boolean(),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId", "status", "createdAt"])
+    .index("by_question", ["questionId"]),
+
+  /** Ambient's heartbeat for a person: when it last looked, what it already told them, how often today. */
+  ambientState: defineTable({
+    userId: v.id("users"),
+    lastBeatAt: v.number(),
+    day: v.string(),
+    sentToday: v.number(),
+    seen: v.array(v.string()),
+  }).index("by_user", ["userId"]),
 
   /**
    * Values a routine's runs get as environment variables (a GitHub token, say), per user or per

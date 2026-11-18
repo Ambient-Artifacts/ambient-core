@@ -7,6 +7,7 @@ import { z } from "zod";
 import { BOT_FACES, BOT_ISOLATIONS, BOT_REPORTS, WEEKDAYS } from "@brain/spec";
 import type { BotService, ThreadMessage } from "../bots/service.ts";
 import type { AdminService, CommandResult } from "../bots/admin.ts";
+import type { Decision, DecisionService } from "../bots/decisions.ts";
 import type { Principal } from "../auth/bearer.ts";
 import { RoutineError, RoutineInput, RoutinePatch, SecretName, SecretValue, type Actor, type Computer, type Routine, type RoutineService, type Run } from "../routines/service.ts";
 
@@ -132,6 +133,7 @@ const BotArg = z
     secrets: z.array(z.string().max(64)).max(30).nullable().optional().describe("The names of the secrets its runs get (see list_routines); null: all of its owner's."),
     report: z.enum(BOT_REPORTS).optional().describe('"news" (default): its thread gets a result only when it failed or says something new; "every_run".'),
     model: ModelArg.nullable().optional().describe("Its own model; null: the computer's default."),
+    delegate: z.enum(["never", "brain", "most"]).optional().describe('What Ambient may answer for the user when this bot asks: "never", "brain" (default: when the brain makes it clear), "most" (all but spending, publishing, deleting).'),
   })
   .describe("Make it a bot: a loop with a face and a thread, that can ask the user while it runs.");
 
@@ -141,7 +143,14 @@ function commandText(r: CommandResult): string {
 }
 
 
-export function registerRoutineTools(server: McpServer, principal: Principal, routines: RoutineService, bots?: BotService, admin?: AdminService) {
+function decisionLine(d: Decision): string {
+  const from = d.from.kind === "bot" ? `${d.from.name} asks` : "Ambient asks";
+  const opts = d.options.length ? ` Options: ${d.options.join(" / ")}.` : "";
+  const rec = d.recommendation ? ` Suggested: ${d.recommendation.option}${d.recommendation.why ? ` (${d.recommendation.why})` : ""}.` : "";
+  return `- ${from} (id: ${d.id}, ${new Date(d.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC): ${d.question}${opts}${rec}`;
+}
+
+export function registerRoutineTools(server: McpServer, principal: Principal, routines: RoutineService, bots?: BotService, admin?: AdminService, decisions?: DecisionService) {
   const actor: Actor = {
     uid: principal.uid,
     teams: principal.teams,
@@ -414,6 +423,38 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       },
       async ({ id }) => guard(async () => result(commandText(await admin.status(actor, id)))),
+    );
+  }
+
+  if (hasBots && decisions && principal.personal) {
+    server.registerTool(
+      "open_decisions",
+      {
+        title: "What waits for the user's decision",
+        description: "The decisions waiting for the user, oldest first: bots' questions Ambient didn't answer itself, with its suggestion.",
+        inputSchema: {},
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async () =>
+        guard(async () => {
+          const list = await decisions.list(actor.uid);
+          return result(list.length ? list.map(decisionLine).join("\n") : "Nothing waits for them.", { decisions: list });
+        }),
+    );
+
+    server.registerTool(
+      "answer_decision",
+      {
+        title: "File the user's answer to a decision",
+        description: "File the user's answer to a waiting decision: the bot gets it and carries on. Only with what the user decided in this conversation (their words, e.g. \"take the second\"), never your own choice.",
+        inputSchema: { id: z.string().max(64), answer: z.string().min(1).max(4000).describe("Their answer: one of the options as written, or their own words.") },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ id, answer }) =>
+        guard(async () => {
+          const d = await decisions.answer(actor, id, answer, "chat");
+          return result(`Filed: “${answer}”${d.from.kind === "bot" ? `. ${d.from.name} carries on with it.` : "."}`, { decision: d });
+        }),
     );
   }
 

@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.7.5";
+const VERSION = "0.7.6";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -465,6 +465,9 @@ async function ambientService() {
     }
   };
 
+  /** Each person's turns in order (a promise chain per uid). */
+  const queues = new Map();
+
   log(`Ambient on this computer: waiting for messages from ${cfg.server}`);
   for (;;) {
     let job;
@@ -478,7 +481,13 @@ async function ambientService() {
     // Each person's message is answered in their own session; the next long poll doesn't wait for it.
     if (job?.kind === "exec") void execJob(cfg, job);
     else if (job?.kind === "start") startJob(job);
-    else if (job?.uid && job.token) void handle(job);
+    else if (job?.uid && job.token) {
+      // One person's turns one after another: their message, a bot's question Ambient looks at,
+      // the heartbeat all go to the same session, which answers one at a time.
+      const prev = queues.get(job.uid) ?? Promise.resolve();
+      const next = prev.then(() => handle(job));
+      queues.set(job.uid, next.catch(() => {}));
+    }
   }
 }
 

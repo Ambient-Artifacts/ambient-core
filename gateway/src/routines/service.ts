@@ -262,6 +262,8 @@ export interface BotView {
   report: BotSettings["report"];
   /** Its own model; null: the computer's default. */
   model: { model: string; effort: string | null; fallback: string | null } | null;
+  /** What Ambient may answer for its owner. */
+  delegate: "never" | "brain" | "most";
   state: BotState;
   openQuestion: { id: string; text: string; choices: string[] | null; askedAt: number } | null;
   /** The newest thing it said: a result, a failure or a question; `fix` for a Claude account problem. */
@@ -495,6 +497,7 @@ export class RoutineService {
       secrets: r.bot.secrets ?? null,
       report: r.bot.report,
       model: r.bot.model ? { model: r.bot.model.model, effort: r.bot.model.effort ?? null, fallback: r.bot.model.fallback ?? null } : null,
+      delegate: r.bot.delegate ?? "brain",
       state: botState({ enabled: r.enabled, ready, lastRunStatus: r.lastRun?.status ?? null, openQuestion: r.openQuestionId !== null }),
       openQuestion: q ? { id: String(q.m.id), text: q.body.text, choices: q.body.choices ?? null, askedAt: q.m.createdAt } : null,
       lastMessage: last ? { text: last.body.text, kind: last.m.kind, at: last.m.createdAt, fix: claudeFix(last.m.kind, last.body.text, computer) } : null,
