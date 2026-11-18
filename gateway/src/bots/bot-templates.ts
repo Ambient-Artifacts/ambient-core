@@ -84,7 +84,7 @@ description: How a pull request of yours gets to ready for review. Use it every 
 1. One change per pull request, small enough to review in ten minutes. Open it as a draft.
 2. After each push, wait for the review bots and checks, then read everything: inline comments, reviews, PR comments, checks.
 3. Every comment gets either a fix (push it, then resolve the thread) or an answer on its thread saying why not. Review bots' comments too.
-4. Ready for review (gh pr ready) only when nothing is open, every check is green and the last review round brought nothing new. Then say in your last message what it does and how you checked it.
+4. Ready for review (gh pr ready) only when nothing is open, every check is green and the last review round brought nothing new. Then hand it to your owner with ask_owner and wait: false ("PR #<n> is ready: … Merge it?", Merge / Changes) and say in your last message what it does and how you checked it.
 5. Never merge, never force-push over someone else's commits.
 `;
 

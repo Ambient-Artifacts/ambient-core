@@ -608,7 +608,10 @@ async function botRunMessage(
   if (sessionId) patch.lastSessionId = sessionId;
   // A run that failed without a session (its session to resume was gone, say) starts the next one afresh.
   else if (failed) patch.lastSessionId = undefined;
-  const asked = r.openQuestionId !== undefined;
+  // Held back only for a question this run asked (its question is the news then). A question left
+  // open from an earlier run must not swallow what this run did.
+  const question = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
+  const asked = Boolean(question && !question.answeredAt && question.runId === run._id);
   const fresh = message && message.hash !== r.lastResultHash;
   if (message && (failed || r.bot?.report === "every_run" || (fresh && !asked))) {
     await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "bot", kind: failed ? "failure" : "result", iv: message.iv, ct: message.ct, runId: run._id, createdAt: now });

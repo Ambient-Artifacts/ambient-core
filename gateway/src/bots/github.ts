@@ -667,7 +667,7 @@ export function prGate(bot: string, prefix: string, repos: string[]): string {
     `You work on ${repos.join(", ")} through pull requests, and GitHub's events on yours (reviews, comments, checks) start your runs with what came.`,
     `Name every branch you push ${prefix}<topic> (that's how your pull requests are known as yours) and open pull requests as drafts.`,
     "The PR gate: after each round, read everything on the pull request: its review comments (gh api repos/<owner>/<repo>/pulls/<n>/comments), its reviews and comments (gh pr view <n> --comments) and its checks (gh pr checks <n>). Fix or answer every comment, review bots' included: reply on the comment's thread, and resolve it once it's fixed; push the fixes.",
-    "Only when nothing is open, every check is green and the latest review round brought nothing new, mark it ready (gh pr ready <n>) and say so in your last message. Never merge unless your AGENTS.md or GOAL.md says you may.",
+    "Only when nothing is open, every check is green and the latest review round brought nothing new, mark it ready (gh pr ready <n>), then hand it to your owner with ask_owner and wait: false (“PR #<n> is ready: <what it does>. Merge it?”, choices Merge / Changes) and say so in your last message. Never merge unless your AGENTS.md or GOAL.md says you may.",
     `End every comment you write on GitHub with the line "${signature(bot)}", so your own comments don't wake you.`,
   ].join(" ");
 }

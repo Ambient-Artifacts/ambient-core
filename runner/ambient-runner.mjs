@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.9.0";
+const VERSION = "0.9.1";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 const CONFIG_DIR = "/etc/ambient-runner";
@@ -1129,12 +1129,13 @@ function signInEnv(env) {
 const ASK_TOOL = {
   name: "ask_owner",
   description:
-    "Ask your owner (the person this bot works for) a question and wait a few minutes for the answer in the Ambient app. Use it for decisions only they can make. Give choices when there are a few clear options.",
+    "Ask your owner (the person this bot works for) a question; by default wait a few minutes for the answer in the Ambient app. Use it for decisions only they can make. Give choices when there are a few clear options. wait: false hands it over without waiting (something ready for them: a pull request to merge, a post to publish): it reaches them as a decision, and their answer starts your next run.",
   inputSchema: {
     type: "object",
     properties: {
       question: { type: "string", description: "One short question." },
       choices: { type: "array", items: { type: "string" }, maxItems: 6, description: "Answers to pick from, if there are a few clear options." },
+      wait: { type: "boolean", description: "false: don't wait for the answer (default true)." },
     },
     required: ["question"],
   },
@@ -1178,9 +1179,12 @@ async function botMcp() {
     if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
     return json;
   };
-  const ask = async ({ question, choices }) => {
+  const ask = async ({ question, choices, wait }) => {
     if (typeof question !== "string" || !question.trim()) return { text: "Pass a question.", error: true };
     const { id } = await api("POST", "/v1/bot/ask", { question, ...(Array.isArray(choices) && choices.length ? { choices: choices.map(String).slice(0, 6) } : {}) });
+    if (wait === false) {
+      return { text: "Handed to your owner: it reaches them as a decision (Ambient looks at it first), and their answer starts your next run, in this same conversation. Finish this run now with your summary." };
+    }
     const until = Date.now() + waitMs;
     while (Date.now() < until) {
       await new Promise((r) => setTimeout(r, 5000));
