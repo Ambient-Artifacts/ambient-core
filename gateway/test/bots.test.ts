@@ -69,21 +69,28 @@ afterAll(() => s.close());
 
 describe("the gate", () => {
   it("shows bots only to accounts and teams in BRAIN_BOTS", async () => {
-    expect((await appCall(s, lena.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true });
-    expect((await appCall(s, ben.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: false });
+    expect((await appCall(s, lena.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true, loopsAreBots: true });
+    expect((await appCall(s, ben.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: false, loopsAreBots: false });
     const refused = await appCall(s, ben.access_token, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: daily, bot: {} });
     expect(refused.status).toBe(403);
     expect(refused.json.error).toBe("bots_not_enabled");
     expect((await appCall(s, ben.access_token, "GET", "/v1/app/ambient/chat")).status).toBe(403);
   });
 
-  it("leaves plain loops as they are", async () => {
-    const plain = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Plain", prompt: "y", schedule: daily });
-    expect((plain.json.routine as R).bot).toBeNull();
-    const start = await hostCall(host, "POST", `/v1/host/routines/${(plain.json.routine as R).id}/runs`);
-    expect(start.json).toMatchObject({ bot: null, resume: null, runToken: null });
-    expect(Object.keys(start.json.env as object).sort()).toEqual(["GH_TOKEN", "STRIPE_KEY"]);
-    await appCall(s, lena.access_token, "DELETE", `/v1/app/routines/${(plain.json.routine as R).id}`);
+  it("makes every new loop a bot with bots on, and leaves loops as they are without", async () => {
+    // With bots there are no plain loops: one made without bot settings is a new bot (docs/bots.md, "Loops are bots").
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Plain", prompt: "y", schedule: daily });
+    expect((made.json.routine as R).bot).toMatchObject({ isolation: "container", secrets: [], report: "news" });
+    const start = await hostCall(host, "POST", `/v1/host/routines/${(made.json.routine as R).id}/runs`);
+    expect(start.json).toMatchObject({ bot: { isolation: "container" } });
+    expect(start.json.env).toEqual({});
+    await hostCall(host, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "ok" });
+    await appCall(s, lena.access_token, "DELETE", `/v1/app/routines/${(made.json.routine as R).id}`);
+    // Without bots, a loop stays a loop.
+    const loop = await appCall(s, ben.access_token, "POST", "/v1/app/routines", { name: "Plain", prompt: "y", schedule: daily });
+    expect(loop.status, JSON.stringify(loop.json)).toBe(200);
+    expect((loop.json.routine as R).bot).toBeNull();
+    await appCall(s, ben.access_token, "DELETE", `/v1/app/routines/${(loop.json.routine as R).id}`);
   });
 });
 
@@ -92,9 +99,9 @@ describe("the gate by team", () => {
     const owner = await signIn(s, "apple-tina", "Tina Roth");
     const made = await appCall(s, owner.access_token, "POST", "/v1/app/teams", { name: "Bots Lab" });
     const slug = (made.json.team as { slug: string }).slug;
-    expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: false });
+    expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: false, loopsAreBots: false });
     s.config.bots!.teams.push(slug);
-    expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true });
+    expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true, loopsAreBots: true });
     // A bot of their own needs one of their computers first.
     const none = await appCall(s, owner.access_token, "POST", "/v1/app/routines", { name: "Mine", prompt: "y", schedule: daily, bot: {} });
     expect(none.json.error).toBe("bot_needs_computer");
@@ -204,12 +211,13 @@ describe("a bot", () => {
     expect((await appCall(s, ben.access_token, "GET", `/v1/app/routines/${id}/thread`)).status).toBe(404);
   });
 
-  it("changes settings and becomes a plain loop again", async () => {
+  it("changes settings, and stays a bot: with bots, none goes back to a plain loop", async () => {
     const changed = (await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${id}`, { bot: { report: "every_run", secrets: null } })).json.routine as R;
     expect(changed.bot).toMatchObject({ face: "pebble", report: "every_run", secrets: null });
-    const plain = (await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${id}`, { bot: null })).json.routine as R;
-    expect(plain.bot).toBeNull();
-    expect((await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/thread`)).status).toBe(404);
+    const back = await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${id}`, { bot: null });
+    expect(back.status).toBe(400);
+    expect(back.json.error).toBe("bots_only");
+    expect((await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/thread`)).status).toBe(200);
   });
 
   it("asks with a push that opens its thread", () => {
