@@ -185,14 +185,32 @@ export class AmbientChat {
     return (await this.d.nameOf?.(uid).catch(() => undefined)) ?? "them";
   }
 
+  /**
+   * What Ambient wrote on its own since the person's last message (uid → texts). Its chat session on
+   * the computer didn't write those (a short session of its own did), so they go with the person's
+   * next message. Kept in memory: a gateway restart forgets them, and the chat session then just
+   * doesn't know about those few messages (the person still sees them, and Ambient can look them up).
+   */
+  private unseen = new Map<string, string[]>();
+
   /** Ambient writes first: a message in the chat (a decision's, or the heartbeat's). */
   async say(uid: string, text: string, decisionId?: string): Promise<ChatMessage> {
-    return this.add(uid, "ambient", text, decisionId);
+    const message = await this.add(uid, "ambient", text, decisionId);
+    this.unseen.set(uid, [...(this.unseen.get(uid) ?? []), text].slice(-10));
+    return message;
+  }
+
+  /** The note that tells the chat's session what Ambient wrote on its own; cleared once taken. */
+  private takeUnseen(uid: string): string[] {
+    const texts = this.unseen.get(uid) ?? [];
+    this.unseen.delete(uid);
+    return texts;
   }
 
   /**
-   * A turn that isn't the person's (a bot's question to look at, the heartbeat): Ambient answers in
-   * its session, so it remembers it, but nothing of it is stored in the chat. "" when it can't.
+   * A turn that isn't the person's (a bot's question to look at, the heartbeat). On a computer it
+   * runs in a short session of its own (mode "internal"): it doesn't wait behind the chat, and its
+   * prompt stays out of the chat's history. Nothing of it is stored in the chat. "" when it can't.
    */
   async internalTurn(uid: string, name: string, prompt: string): Promise<string> {
     const computer = await this.computer(uid);
@@ -200,7 +218,8 @@ export class AmbientChat {
       return this.d.computers!.ask(computer, {
         text: prompt,
         name,
-        instructions: computerInstructions(name, computer.team ? `${computer.team}'s server` : computer.name, computer.team === null),
+        instructions: computerInstructions(name, computer.team ? `${computer.team}'s server` : computer.name, computer.team === null, false),
+        mode: "internal",
         fresh: false,
         history: [],
       });
@@ -249,17 +268,23 @@ export class AmbientChat {
     let text: string;
     const computer = await this.computer(uid);
     if (computer) {
+      const said = this.takeUnseen(uid);
+      const note = said.length ? `[Since ${name}'s last message you wrote to them yourself:\n${said.map((t) => `- ${t.replace(/\s+/g, " ").slice(0, 600)}`).join("\n")}]\n\n` : "";
       try {
         text =
           (await this.d.computers!.ask(computer, {
-            text: question,
+            text: `${note}${question}`,
             name,
             instructions: computerInstructions(name, computer.team ? `${computer.team}'s server` : computer.name, computer.team === null),
-            fresh: history.length === 0,
+            mode: "chat",
+            // A new session once the chat was cleared, even if Ambient wrote in it since.
+            fresh: !history.some((t) => t.role === "user"),
             history: trimHistory(history),
             attachments: files,
           })) || "I don't have an answer to that.";
       } catch (err) {
+        // Not delivered: the note goes with the next message.
+        if (said.length) this.unseen.set(uid, [...said, ...(this.unseen.get(uid) ?? [])].slice(-10));
         console.warn(`[ambient] ${computer.name} couldn't answer: ${(err as Error).message}`);
         text = `I couldn't answer on ${computer.team ? `${computer.team}'s server` : computer.name}: ${(err as Error).message}. Please try again in a minute.`;
       }
@@ -293,16 +318,17 @@ export class AmbientChat {
   }
 
   async clear(uid: string): Promise<void> {
+    this.unseen.delete(uid);
     await this.d.control.m(api.bots.clearChat, { uid: uid as never });
   }
 }
 
 /** Ambient on the person's computer: the same rules, and it can work on that machine when asked. */
-export function computerInstructions(name: string, computer: string, own = true): string {
+export function computerInstructions(name: string, computer: string, own = true, chat = true): string {
   return [
     ambientInstructions(name),
     `You run as Claude Code on ${computer}${own ? `, ${name}'s own computer` : ", Ambient's machine for the team, where the team's bots run too"}, with Ambient's tools (the mcp__ambient tools) and this machine's own. When ${name} asks you to do something here (look at a repo, run a script, check on a bot's workspace), do it, carefully: say what you'll change before anything that can't be undone.`,
-    "This conversation continues across messages; earlier turns are yours.",
+    chat ? "This conversation continues across messages; earlier turns are yours." : `This is a short session of your own, beside your chat with ${name}: do what the message asks and answer once.`,
   ].join("\n");
 }
 

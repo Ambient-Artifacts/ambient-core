@@ -96,6 +96,45 @@ describe("Ambient on the person's computer", () => {
   });
 });
 
+describe("Ambient's own turns", () => {
+  it("go to the computer as internal jobs, and what Ambient said reaches the chat's session with the next message", async () => {
+    // A bot's question or the heartbeat: an internal job, never the chat's session.
+    const asked = s.ambient.internalTurn(lena.user.uid, "Lena", "[Heartbeat] Blog draft failed.");
+    const job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; mode: string; text: string; history: unknown[] };
+    expect(job.mode).toBe("internal");
+    expect(job.text).toContain("Blog draft failed");
+    expect(job.history).toEqual([]);
+    await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { text: "NOTHING" });
+    expect(await asked).toBe("NOTHING");
+    expect((await chat()).messages.map((m) => m.text)).not.toContain("[Heartbeat] Blog draft failed.");
+
+    // Ambient writes on its own; the person's next message carries it to the chat's session, once.
+    await s.ambient.say(lena.user.uid, "Blog draft failed twice: the repo token expired.");
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Why?" });
+    const next = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; mode: string; text: string };
+    expect(next.mode).toBe("chat");
+    expect(next.text).toMatch(/^\[Since Lena Vogel's last message you wrote to them yourself:\n- Blog draft failed twice: the repo token expired\.\]\n\nWhy\?$/);
+    await hostCall(host, "POST", `/v1/host/ambient/${next.id}`, { text: "Its token expired." });
+    await settled();
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Thanks" });
+    const after = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; text: string };
+    expect(after.text).toBe("Thanks");
+    await hostCall(host, "POST", `/v1/host/ambient/${after.id}`, { text: "Sure." });
+    await settled();
+  });
+
+  it("start a new session once the chat was cleared, even when Ambient wrote in it since", async () => {
+    await appCall(s, lena.access_token, "DELETE", "/v1/app/ambient/chat");
+    await s.ambient.say(lena.user.uid, "A decision waits for you.");
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Which?" });
+    const job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; fresh: boolean; text: string };
+    expect(job.fresh).toBe(true);
+    expect(job.text).toContain("A decision waits for you.");
+    await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { text: "The blog one." });
+    await settled();
+  });
+});
+
 describe("files in the chat", () => {
   it("reach the computer's job, and the history keeps only their names", async () => {
     const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
@@ -159,6 +198,15 @@ describe("the runner's ambient service", () => {
     writeFileSync(
       join(bin, "claude"),
       `#!/bin/sh
+case "$*" in
+  *--input-format*) ;;
+  *)
+    # One of Ambient's own turns: a one-shot run beside the chat's session.
+    echo "$@" > internal-args.txt
+    cat > internal-stdin.txt
+    echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"is_error\\":false,\\"result\\":\\"looked\\",\\"session_id\\":\\"int-1\\",\\"num_turns\\":1}"
+    exit 0 ;;
+esac
 echo "$@" > args.txt
 n=0
 while IFS= read -r line; do
@@ -205,6 +253,19 @@ done
     expect(args).toContain("--mcp-config");
     expect(args).toContain("--disallowedTools mcp__ambient__set_routine_secret");
     expect(args).toContain("You run as Claude Code on VPS");
+    expect(JSON.parse(readFileSync(join(dir, "state", "state.json"), "utf8")).ambientSessions).toEqual({ [lena.user.uid]: "amb-1" });
+
+    // Ambient's own turn: a one-shot session of its own, not the chat's (no resume, no stream input).
+    expect(await s.ambient.internalTurn(lena.user.uid, "Lena", "[Heartbeat] Look at Blog draft.")).toBe("looked");
+    const internalArgs = readFileSync(join(dir, "ambient", lena.user.uid, "internal-args.txt"), "utf8");
+    expect(internalArgs).not.toContain("--resume");
+    expect(internalArgs).not.toContain("--input-format");
+    expect(internalArgs).toContain("--disallowedTools mcp__ambient__set_routine_secret");
+    expect(internalArgs).toContain("a short session of your own");
+    expect(readFileSync(join(dir, "ambient", lena.user.uid, "internal-stdin.txt"), "utf8")).toBe("[Heartbeat] Look at Blog draft.");
+    // The chat's session goes on where it was: its next reply is its fourth.
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Third" });
+    expect((await settled()).messages.at(-1)?.text, out).toBe("reply 4");
     expect(JSON.parse(readFileSync(join(dir, "state", "state.json"), "utf8")).ambientSessions).toEqual({ [lena.user.uid]: "amb-1" });
   }, 30_000);
 });

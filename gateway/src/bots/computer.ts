@@ -6,6 +6,9 @@
 //   app ──▶ AmbientChat ──▶ ask(host) ──▶ queue ──▶ GET /v1/host/ambient/next (the runner waits here)
 //                                     ◀── reply ◀── POST /v1/host/ambient/:jobId
 //
+// Ambient's own turns (a bot's question, the heartbeat) go the same way with mode "internal": the
+// runner answers them in a short session beside the chat's, never in it.
+//
 // One gateway process holds the queues: a restart loses a message in flight, and the chat says so.
 import { randomUUID } from "node:crypto";
 import type { PatService } from "../auth/pats.ts";
@@ -17,6 +20,12 @@ export type ControlJob = { id: string; kind: "exec"; command: string; timeoutS: 
 export interface ComputerJob {
   id: string;
   kind?: "chat";
+  /**
+   * chat: the person's message, in their open session. internal: Ambient's own turn (a bot's
+   * question, the heartbeat), in a short session of its own, so it neither waits behind the chat
+   * nor ends up in its history. Runners before 0.7.7 don't know it and use the chat's session.
+   */
+  mode?: "chat" | "internal";
   /** Whose chat it is (a team's server runs Ambient for each of its people, one session each). */
   uid: string;
   /** What the person wrote. */

@@ -148,10 +148,19 @@ chat says no computer is connected.
 - The service keeps one Claude Code session open per person (`--input-format stream-json`, resumed
   after a restart, in `~/ambient/<account id>`) and waits on `GET /v1/host/ambient/next` (computer
   token, a 25-second long poll). A message comes as
-  `{ id, uid, text, name, instructions, fresh, history, token }`; `token` is that person's token
+  `{ id, uid, text, name, instructions, fresh, history, token, mode }`; `token` is that person's token
   for Ambient's MCP (24 hours, renewed an hour before it ends, listed in the app's tokens as
   "Ambient on <computer>"). The reply goes to `POST /v1/host/ambient/:id` as `{ text }` or
   `{ error }`.
+- `mode` is `chat` (the person's message, in their open session) or `internal` (runner 0.7.7):
+  Ambient's own turn, such as looking at a bot's question or the heartbeat. An internal turn runs
+  in a short session of its own beside the chat's (`claude -p`, no resume, at most 5 minutes, one
+  at a time per person), never in the chat's session. So it doesn't wait behind a long chat turn
+  (a bot's question has 75 seconds), the chat doesn't wait behind it, and its prompts stay out of
+  the conversation's history. Runners before 0.7.7 ignore `mode` and use the chat's session.
+- What Ambient then writes on its own (a decision, a heartbeat message) goes with the person's
+  next message to the chat's session, as a short bracketed note before their text, so that
+  session knows what "it" said. The gateway keeps that list in memory; a restart forgets it.
 - It runs as the machine's routine user, not in a container: Ambient is meant to work on that
   machine. `set_routine_secret` is left out; secrets go in through the app.
 - Its Claude sign-in is the machine's (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in
@@ -279,7 +288,7 @@ conversation, and an answer anywhere settles it everywhere.
 ### The chain
 
 1. A bot asks (`ask_owner`). The question lands in its thread as before.
-2. Ambient looks at it first, by the bot's `delegate` setting:
+2. Ambient looks at it first (an internal turn, see "Ambient on a computer"), by the bot's `delegate` setting:
    - `never`: it goes straight to you (a decision with Ambient's suggestion when it has one).
    - `brain` (default): Ambient answers itself when the answer is clear from your brain (wiki,
      decisions, earlier answers); otherwise it goes to you with its suggestion.
@@ -319,5 +328,5 @@ conversation, and an answer anywhere settles it everywhere.
 
 Every 30 minutes between 08:00 and 21:00 (Europe/Vienna for now), code gathers what happened for
 each person with bots: runs that failed, decisions waiting longer than two hours, approvals waiting.
-Only when that isn't empty does Ambient get a turn; it writes a short message into the chat (with a
+Only when that isn't empty does Ambient get a turn (an internal one, see "Ambient on a computer"); it writes a short message into the chat (with a
 push) or stays silent. Nothing twice, at most 6 such messages a day, none at night.
