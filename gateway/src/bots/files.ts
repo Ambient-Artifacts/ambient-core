@@ -6,12 +6,15 @@ import { api } from "../control.ts";
 import type { Actor, RoutineService } from "../routines/service.ts";
 import { AGENTS, FolderError, MEMORY, checkPath, type Author, type BotFolder, type FileInfo, type FileView, type Handoff } from "./folder.ts";
 import { sealMessage } from "./messages.ts";
+import type { BotMirror, MirrorStatus } from "./mirror.ts";
 
 export class BotFiles {
   constructor(
     private d: {
       routines: RoutineService;
       folder: BotFolder;
+      /** Bots' folders in git; absent: not mirrored. */
+      mirror?: BotMirror;
       now?: () => number;
     },
   ) {}
@@ -30,6 +33,21 @@ export class BotFiles {
     const f = await this.d.routines.folderOf(actor, id, false);
     const [files, handoffs] = await Promise.all([this.d.folder.files(f.owner, f.routineId, f.agents), this.d.folder.handoffs(f.owner, f.routineId, 3)]);
     return { files, handoffs };
+  }
+
+  /** Where the bot's folder is in git, and how the last mirror went. */
+  async mirrorStatus(actor: Actor, id: string): Promise<MirrorStatus | null> {
+    if (!this.d.mirror) return null;
+    const f = await this.d.routines.folderOf(actor, id, false);
+    return this.d.mirror.status(f.owner, f.routineId);
+  }
+
+  /** Mirror the bot's owner's bots now (who may change the bot). */
+  async mirrorNow(actor: Actor, id: string): Promise<MirrorStatus | null> {
+    if (!this.d.mirror) return null;
+    const f = await this.d.routines.folderOf(actor, id, true);
+    await this.d.mirror.mirror(f.owner);
+    return this.d.mirror.status(f.owner, f.routineId);
   }
 
   async read(actor: Actor, id: string, path: string, version?: number): Promise<FileView> {
@@ -88,6 +106,8 @@ export class BotFiles {
 export interface Folders {
   files: BotFiles;
   folder: BotFolder;
+  /** Bots' folders in git (docs/bots.md, "A bot's folder in git"). */
+  mirror?: import("./mirror.ts").BotMirror;
   history: import("./history.ts").HistorySearch;
   /** Amb's automations (set once Amb is up; docs/bots.md, "Automations"). */
   automations?: import("./automations.ts").Automations;

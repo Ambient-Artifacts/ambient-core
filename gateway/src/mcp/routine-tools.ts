@@ -587,9 +587,17 @@ function registerFolderTools(
     async ({ id }) =>
       guard(async () => {
         const { files, handoffs } = await folders.files.list(actor, id);
+        const m = await folders.files.mirrorStatus(actor, id).catch(() => null);
+        const mirror = !m
+          ? ""
+          : m.state === "not_connected"
+            ? "\n\nIn git: not mirrored (the user has no repo connected for their brain; they can connect one in the app)."
+            : m.state === "read_only"
+              ? "\n\nIn git: not mirrored (another tool keeps the team's repo; Ambient only reads it)."
+              : `\n\nIn git: ${m.path ?? "bots/"} in ${m.repo ?? "the team brain's own git on its server"}${m.state === "pending" ? " (a change waits to be mirrored)" : m.state === "error" ? ` (the last mirror failed: ${m.lastError})` : ""}. Mirrored one way: edits made in git are overwritten.`;
         const lines = files.map((f) => `- ${f.path} (${f.size} bytes, version ${f.version}${f.by ? `, last by ${f.by.kind === "bot" ? "the bot" : f.by.kind === "amb" ? (f.by.name ?? "an AI app") : (f.by.name ?? "a person")}` : ""})`);
         const h = handoffs.map((x) => `### ${new Date(x.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC · ${x.status}${x.metric ? ` · metric ${x.metric}` : ""}\n${x.text}`);
-        return result(`Files:\n${lines.join("\n")}\n\nLast runs:\n${h.join("\n\n") || "(no handoffs yet)"}`, { files, handoffs });
+        return result(`Files:\n${lines.join("\n")}\n\nLast runs:\n${h.join("\n\n") || "(no handoffs yet)"}${mirror}`, { files, handoffs, mirror: m });
       }),
   );
 

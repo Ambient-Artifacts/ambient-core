@@ -435,3 +435,43 @@ export const routineOwner = query({
     return r ? { teamId: r.teamId ?? null, createdBy: r.userId } : null;
   },
 });
+
+// ---- the git mirror (docs/bots.md, "A bot's folder in git") ----
+
+/**
+ * An owner's bots (a person's own, or a team's), for mirroring their folders into git: the sealed
+ * prompt (AGENTS.md) and settings. A team's also comes with where its server is.
+ */
+export const ownerBots = query({
+  args: { ...secretArg, ownerKind: v.union(v.literal("user"), v.literal("team")), ownerId: v.string() },
+  handler: async (ctx, { secret, ownerKind, ownerId }) => {
+    assertService(secret);
+    let team: { id: string; slug: string; name: string; status: string; serverUrl: string | null } | null = null;
+    let rows: Doc<"routines">[];
+    if (ownerKind === "team") {
+      const tid = ctx.db.normalizeId("teams", ownerId);
+      const t = tid ? await ctx.db.get(tid) : null;
+      if (!t) return null;
+      team = { id: t._id, slug: t.slug, name: t.name, status: t.status, serverUrl: t.serverUrl ?? null };
+      rows = await ctx.db
+        .query("routines")
+        .withIndex("by_team", (q) => q.eq("teamId", t._id))
+        .take(200);
+    } else {
+      const uid = ctx.db.normalizeId("users", ownerId);
+      if (!uid || !(await ctx.db.get(uid))) return null;
+      rows = (
+        await ctx.db
+          .query("routines")
+          .withIndex("by_user", (q) => q.eq("userId", uid))
+          .take(200)
+      ).filter((r) => !r.teamId);
+    }
+    return {
+      team,
+      bots: rows
+        .filter((r) => r.bot)
+        .map((r) => ({ id: r._id, name: r.name, promptIv: r.promptIv, promptCt: r.promptCt, schedule: r.schedule, enabled: r.enabled, bot: r.bot!, createdAt: r.createdAt })),
+    };
+  },
+});

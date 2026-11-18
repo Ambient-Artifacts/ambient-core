@@ -7,6 +7,9 @@ import { attention, LocalReader, indexFilesIn, normalizeIgnore, renderIndexFiles
 import type { TeamRemote } from "./remote.ts";
 import { Repo, type Author } from "./repo.ts";
 
+/** Where bots' folders are mirrored (inside the fence when there is one). */
+export const BOTS_DIR = "bots";
+
 /** Write a file in the wiki; `index: false` keeps it out of the page index (raw transcripts). */
 export type Put = (path: string, text: string, opts?: { index?: boolean }) => Promise<void>;
 
@@ -56,6 +59,15 @@ export class TeamWiki {
     this.store = WikiStore.fromDirectory(dir, "team", teamId, { ignore: this.ignore });
   }
 
+  /**
+   * What stays out of the brain: the team's own list, and bots' folders mirrored from Ambient
+   * (bots/ at the top is skipped by the store; inside a fence they're at <fence>/bots).
+   */
+  private get skipped(): string[] {
+    const fence = this.remote?.fence;
+    return fence ? normalizeIgnore([...this.ignore, `${fence}/${BOTS_DIR}`]) : this.ignore;
+  }
+
   /** The team changed what stays out: read the repo again without it (or with it again). */
   setIgnore(list: readonly string[]): void {
     const next = normalizeIgnore(list);
@@ -74,6 +86,8 @@ export class TeamWiki {
     if (remote) {
       await remote.load();
       wiki.remote = remote;
+      // Inside a fence, the bots' folder is under it: read the wiki again without it.
+      if (remote.fence) wiki.reload();
     }
     wiki.knownHead = await wiki.repo.head();
     // Repos from before index pages existed (or edited by hand) get them now; a wiki another
@@ -120,7 +134,7 @@ export class TeamWiki {
 
   /** Re-read everything from disk (after another process, e.g. the nightly job, committed). */
   reload(): void {
-    this.store = WikiStore.fromDirectory(this.dir, "team", this.teamId, { ignore: this.ignore });
+    this.store = WikiStore.fromDirectory(this.dir, "team", this.teamId, { ignore: this.skipped });
   }
 
   read(path: string): string {
