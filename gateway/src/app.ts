@@ -37,7 +37,9 @@ import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
 import { BotMirror } from "./bots/mirror.ts";
-import { Automations } from "./bots/automations.ts";
+import { Automations, askedBefore } from "./bots/automations.ts";
+import { BotLearning } from "./bots/learning.ts";
+import { AmbSettings } from "./bots/amb-settings.ts";
 import { AmbientComputers } from "./bots/computer.ts";
 import { AdminService } from "./bots/admin.ts";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -87,6 +89,8 @@ export interface AppDeps {
   mirrorDelayMs?: number;
   /** Tests: how long GitHub's events on one PR are gathered before they wake its bot (default 90 s). */
   githubBatchMs?: number;
+  /** Tests: how long after a signal Amb looks at a bot (default 10 minutes). */
+  learning?: { reviewAfterMs?: number };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
   microsoftConnect?: { connector: MicrosoftConnector; fetchImpl?: typeof fetch; propagationDelayMs?: number };
 }
@@ -255,11 +259,50 @@ export function createApp(deps: AppDeps) {
   onQuestion = (q) => void decisions.onBotQuestion(q);
   const heartbeat = new Heartbeat({ control, ambient, bots: config.bots, notifier });
   // What Amb does on its own: templates on a schedule or an event (docs/bots.md, "Automations").
-  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, heartbeat, notifier, bots: config.bots, actorFor, turnMs: deps.ambient?.turnMs });
+  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, notifier, bots: config.bots, actorFor, turnMs: deps.ambient?.turnMs });
   folders.automations = automations;
-  routines.onBotEvent = (e) => void automations.onEvent(e);
-  bots.onEvent = (e) => void automations.onEvent(e);
-  heartbeat.watching = (uid) => automations.watching(uid);
+  // Watching the bots is part of Amb (its settings), not an automation.
+  const ambSettings = new AmbSettings({ control, keys: routineKeys, legacyOff: (uid) => automations.legacyWatchOff(uid) });
+  folders.ambSettings = ambSettings;
+  heartbeat.watching = (uid) => ambSettings.notifies(uid);
+  // Every bot learns on its own (docs/bots.md, "How bots learn").
+  const learning = new BotLearning({
+    control,
+    keys: routineKeys,
+    folder,
+    files: folders.files,
+    ambient,
+    decisions,
+    actorFor,
+    reviewAfterMs: deps.learning?.reviewAfterMs,
+    turnMs: deps.ambient?.turnMs,
+    owners: async () => {
+      const b = config.bots;
+      if (!b) return [];
+      const people = (await control.q(api.bots.heartbeatPeople, { users: b.users.filter((u) => u !== "*"), teams: b.teams.filter((t) => t !== "*") })) as string[];
+      const teams = await Promise.all(b.teams.filter((t) => t !== "*").map((slug) => directory.teamBySlug(slug)));
+      return [...people.map((uid) => ({ kind: "user" as const, uid: String(uid) })), ...teams.filter((t) => t).map((t) => ({ kind: "team" as const, teamId: t!.id }))];
+    },
+  });
+  folders.learning = learning;
+  const ownerOf = async (routineId: string) => {
+    const r = (await control.q(api.bots.routineOwner, { id: routineId })) as { teamId: string | null; createdBy: string } | null;
+    return r ? (r.teamId ? { kind: "team" as const, teamId: String(r.teamId) } : { kind: "user" as const, uid: String(r.createdBy) }) : null;
+  };
+  // What happens in a bot's thread: automations for the person, and signals for the bot's learning.
+  const onBotEvent = (e: Parameters<Automations["onEvent"]>[0]) => {
+    void automations.onEvent(e);
+    if (e.kind !== "bot_failed" && e.kind !== "bot_corrected" && e.kind !== "bot_asked") return;
+    void (async () => {
+      const owner = await ownerOf(e.routineId);
+      if (!owner) return;
+      if (e.kind === "bot_failed") await learning.signal(owner, e.routineId, { kind: "run_failed", text: e.text.slice(0, 600), source: `run ${e.runId}` });
+      else if (e.kind === "bot_corrected") await learning.signal(owner, e.routineId, { kind: "corrected", text: e.text.slice(0, 600) });
+      else if (await askedBefore(control, routineKeys, e, Date.now())) await learning.signal(owner, e.routineId, { kind: "asked_twice", text: e.text.slice(0, 600) });
+    })().catch((err: Error) => console.warn(`[learning] ${err.message}`));
+  };
+  routines.onBotEvent = onBotEvent;
+  bots.onEvent = onBotEvent;
   // GitHub's events wake the bot whose pull request it is; the PR gate (docs/bots.md).
   const github = new GitHubEvents({
     control,
@@ -267,6 +310,7 @@ export function createApp(deps: AppDeps) {
     origin: config.origin,
     startNow: (hostId, routineId) => computers.start(hostId, routineId),
     onCiFailed: (e) => void automations.onEvent({ kind: "github_ci_failed", ...e }),
+    onSignal: (owner, routineId, signal) => void learning.signal(owner, routineId, signal),
     batchMs: deps.githubBatchMs,
   });
   folders.github = github;
@@ -274,6 +318,7 @@ export function createApp(deps: AppDeps) {
   if (!deps.ambient?.noHeartbeat) {
     heartbeat.start();
     automations.start();
+    learning.start();
   }
   app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));

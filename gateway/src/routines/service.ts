@@ -47,6 +47,7 @@ const MESSAGES: Record<string, [string, number]> = {
   no_such_routine: ["There's no such loop.", 404],
   no_such_computer: ["There's no such computer. Connect one in the Ambient app under Loops.", 400],
   no_computer: ["This loop has no computer to run on. Pick one first.", 400],
+  bot_needs_computer: ["A bot of your own runs on one of your computers, and none is picked. Connect a computer in the Ambient app (Bots, then Computers) or pick one, then try again. A team's bots run on the team's server.", 400],
   no_team_server: ["The team's server isn't set up for loops yet.", 400],
   team_routine_computer: ["A team's loops run on the team's server; leave the computer out.", 400],
   not_a_member: ["You're not in that team.", 403],
@@ -365,7 +366,7 @@ export class RoutineService {
   /** A bot's run failed: automations may listen (docs/bots.md, "Automations"). Set once they're up. */
   onBotEvent?: (e: AutomationEvent) => void;
   /** A bot that watches GitHub repos: its branch prefix and repos, for the PR gate in its instructions (app.ts sets it). */
-  githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[] } | null>;
+  githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[]; on?: import("../bots/github.ts").WatchMode[] } | null>;
 
   constructor(
     private d: {
@@ -648,6 +649,8 @@ export class RoutineService {
     }
     const owner: Owner = team ? { kind: "team", teamId: team.id } : { kind: "user", uid: actor.uid };
     if (input.bot && !(team ? this.botsOn({ slug: team.slug }) : this.personalBots(actor))) throw refused("bots_not_enabled");
+    // A bot of one's own without a computer would only ever sit there asleep: refused up front.
+    if (input.bot && !team && !hostId) throw refused("bot_needs_computer");
     const sealed = await this.d.keys.seal(owner, "routine:prompt", input.prompt);
     const out = await this.d.control.m(api.routines.create, {
       uid: actor.uid as never,
@@ -676,6 +679,11 @@ export class RoutineService {
     const sealed = patch.prompt !== undefined ? await this.d.keys.seal(this.ownerOf(r), "routine:prompt", patch.prompt) : undefined;
     const hostId = !r.teamId && patch.computer !== undefined ? await this.resolveComputer(actor, patch.computer) : undefined;
     if (patch.bot && !this.botsFor(actor, r)) throw refused("bots_not_enabled");
+    // A personal bot keeps a computer: taking it away, or making a loop without one a bot, is refused.
+    if (!r.teamId && (r.bot || patch.bot) && patch.bot !== null) {
+      const keeps = hostId !== undefined ? hostId : r.hostId;
+      if (!keeps) throw refused("bot_needs_computer");
+    }
     const bot = patch.bot === undefined ? undefined : patch.bot === null ? null : matchingModel(botSettings(patch.bot, r.bot ?? undefined));
     const out = await this.d.control.m(api.routines.update, {
       ...access,

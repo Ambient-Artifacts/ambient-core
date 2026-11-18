@@ -94,8 +94,15 @@ describe("the gate by team", () => {
     expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: false });
     s.config.bots!.teams.push(slug);
     expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true });
-    const own = await appCall(s, owner.access_token, "POST", "/v1/app/routines", { name: "Mine", prompt: "y", schedule: daily, bot: {} });
+    // A bot of their own needs one of their computers first.
+    const none = await appCall(s, owner.access_token, "POST", "/v1/app/routines", { name: "Mine", prompt: "y", schedule: daily, bot: {} });
+    expect(none.json.error).toBe("bot_needs_computer");
+    const code = String((await appCall(s, owner.access_token, "POST", "/v1/app/computers", { name: "Tina's Mac" })).json.code);
+    const tinaMac = ((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.computer as { id: string }).id;
+    const own = await appCall(s, owner.access_token, "POST", "/v1/app/routines", { name: "Mine", prompt: "y", schedule: daily, computer: tinaMac, bot: {} });
     expect(own.status, JSON.stringify(own.json)).toBe(200);
+    // …and keeps it: taking the computer away is refused.
+    expect((await appCall(s, owner.access_token, "PATCH", `/v1/app/routines/${(own.json.routine as R).id}`, { computer: null })).json.error).toBe("bot_needs_computer");
     expect((own.json.routine as R).bot).not.toBeNull();
   });
 });

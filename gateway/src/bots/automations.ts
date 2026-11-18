@@ -7,10 +7,10 @@
 //   a decision waits) ──▶ the automations listening for them
 //                     ──▶ an internal Amb turn (its own short session) ──▶ delivered, or nothing
 //
-// Code decides when; Amb decides what to say. Templates are the starting points; "Watch my bots"
-// is the heartbeat (heartbeat.ts), on by default. "Improve my bots" is the reviewer: it improves a
-// bot's memory and skills itself, and proposes changes to its instructions or settings as a
-// decision the person applies (decisions.ts). Stored as sealed records: no table of its own.
+// Code decides when; Amb decides what to say. Automations are only for the person: watching
+// their bots is part of Amb (the heartbeat, "notify" in Amb's settings), and every bot learns on
+// its own (learning.ts); neither is an automation to find and switch on. Proposed changes to a
+// bot are decisions the person applies (decisions.ts). Stored as sealed records: no table.
 import { randomBytes } from "node:crypto";
 import { RoutineSchedule, describeSchedule, nextRun } from "@brain/spec";
 import { z } from "zod";
@@ -22,8 +22,8 @@ import { RoutineError, type Actor, type RoutineService } from "../routines/servi
 import type { AmbientChat } from "./ambient.ts";
 import type { DecisionService, ProposedChange } from "./decisions.ts";
 import type { BotFiles } from "./files.ts";
-import { AGENTS, GOAL, type Author } from "./folder.ts";
-import { NOTHING, type Heartbeat } from "./heartbeat.ts";
+import type { Author } from "./folder.ts";
+import { NOTHING } from "./heartbeat.ts";
 import { openMessage } from "./messages.ts";
 
 // ---- what an automation is ----
@@ -43,8 +43,6 @@ export const Trigger = z.discriminatedUnion("kind", [
     /** Only this bot's events (its id); null or absent: all of the person's bots. */
     bot: z.string().max(64).nullable().optional(),
   }),
-  /** "Watch my bots": the heartbeat, every half hour in the day. */
-  z.object({ kind: z.literal("heartbeat") }),
 ]);
 export type Trigger = z.infer<typeof Trigger>;
 
@@ -128,14 +126,6 @@ export const TEMPLATES: Template[] = [
     delivery: "chat",
   },
   {
-    id: "watch_bots",
-    name: "Watch my bots",
-    description: "Every half hour in the day: tells you when a bot failed, a decision waited too long, or a command needs your approval. Silent otherwise.",
-    trigger: { kind: "heartbeat" },
-    instructions: "Ambient's heartbeat: failed runs, decisions waiting over two hours, root commands waiting for approval. At most six messages a day, none at night.",
-    delivery: "chat",
-  },
-  {
     id: "weekly_review",
     name: "Weekly review",
     description: "Friday afternoon: what moved this week, what's stuck, and three things for next week.",
@@ -143,15 +133,6 @@ export const TEMPLATES: Template[] = [
     instructions:
       "Write their weekly review from the brain and their bots: what moved this week (decisions, notes, projects), what's stuck or overdue, what their bots shipped and where they struggled, and three suggestions for next week. Ten short lines at most.",
     delivery: "chat",
-  },
-  {
-    id: "improve_bots",
-    name: "Improve my bots",
-    description: "When a bot fails, gets corrected or asks the same thing twice, Ambient improves its memory and skills, and asks you before it changes a bot's instructions.",
-    trigger: { kind: "event", events: ["bot_failed", "bot_corrected", "bot_asked_twice"] },
-    instructions:
-      "Find out what went wrong or what they corrected: bot_files (its files and handoffs), bot_thread, read_bot_file, search_history. If the bot should do better next time, improve it: write a lesson into its memory.md, or a skill for something it does repeatedly (write_bot_file, with a short why). Changes to its AGENTS.md, its GOAL.md or its settings (schedule, secrets, isolation, model, runtime, what it publishes, deletes or sends) you only propose, with propose_bot_change. Don't touch it if one failure was bad luck (a network error, a full disk). Reply with one sentence on what you changed or proposed, or NOTHING.",
-    delivery: "chat_silent",
   },
   {
     id: "new_in_brain",
@@ -163,7 +144,8 @@ export const TEMPLATES: Template[] = [
   },
 ];
 
-export const WATCH_BOTS = "watch_bots";
+/** Templates that were automations once and are part of Amb and every bot now: ignored if stored. */
+const RETIRED = new Set(["watch_bots", "improve_bots"]);
 
 /** What the app and the MCP tools send to create or change one. */
 export const AutomationInput = z.object({
@@ -224,7 +206,6 @@ export function dueAt(schedule: RoutineSchedule, now: number, lastDueAt: number 
 
 export function describeTrigger(t: Trigger): string {
   if (t.kind === "time") return describeSchedule(t.schedule, { withZone: true });
-  if (t.kind === "heartbeat") return "Every half hour in the day, when something needs you";
   const words: Record<EventKind, string> = {
     bot_failed: "a bot fails",
     bot_corrected: "you correct a bot",
@@ -254,8 +235,6 @@ export class Automations {
   private busy = false;
   /** One person's automations run one at a time. */
   private queues = new Map<string, Promise<unknown>>();
-  /** Bots being reviewed right now, per person: their AGENTS.md is only proposed, never written. */
-  private reviewing = new Map<string, Set<string>>();
 
   constructor(
     private d: {
@@ -265,7 +244,6 @@ export class Automations {
       ambient: AmbientChat;
       files: BotFiles;
       decisions: DecisionService;
-      heartbeat?: Heartbeat;
       notifier?: Notifier;
       bots?: BotsAccess;
       actorFor: (uid: string) => Promise<Actor>;
@@ -274,11 +252,6 @@ export class Automations {
       turnMs?: number;
     },
   ) {
-    // The reviewer never rewrites a bot's instructions: it proposes (docs/bots.md, "Automations").
-    d.files.guard = (actor, id, path, by) =>
-      by.kind === "amb" && (path === AGENTS || path === GOAL) && this.reviewing.get(actor.uid)?.has(id)
-        ? `While improving a bot on its own, Ambient doesn't change its ${path}: propose the change with propose_bot_change, and the user applies it.`
-        : null;
     d.decisions.applyChange = (actor, change) => this.apply(actor, change);
   }
 
@@ -323,16 +296,22 @@ export class Automations {
     });
   }
 
-  /** The person's automations ("Watch my bots" is there even before it was ever changed). */
+  /** The person's automations (ones from retired templates are left out: they're part of Amb now). */
   async all(uid: string): Promise<Automation[]> {
     const rows = (await this.d.control.q(api.records.list, { ownerKind: "user", ownerId: uid, kind: KIND, prefix: "" })) as { key: string; iv: string; ct: string }[];
     const out: Automation[] = [];
     for (const r of rows) {
       const a = await this.open<Automation>(uid, KIND, r);
-      if (a) out.push(a);
+      if (a && !RETIRED.has(a.id) && !(a.template && RETIRED.has(a.template)) && Trigger.safeParse(a.trigger).success) out.push(a);
     }
-    if (!out.some((a) => a.id === WATCH_BOTS)) out.unshift(this.fromTemplate(TEMPLATES.find((t) => t.id === WATCH_BOTS)!, WATCH_BOTS, 0));
     return out.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** "Watch my bots" switched off back when it was an automation (Amb's settings take it over). */
+  async legacyWatchOff(uid: string): Promise<boolean> {
+    const r = (await this.d.control.q(api.records.get, { ownerKind: "user", ownerId: uid, kind: KIND, key: "watch_bots" })) as { iv: string; ct: string; deleted: boolean } | null;
+    if (!r || r.deleted) return false;
+    return (await this.open<Automation>(uid, KIND, r))?.enabled === false;
   }
 
   private async state(uid: string, id: string): Promise<State> {
@@ -378,8 +357,7 @@ export class Automations {
     let a: Automation;
     if (input.template) {
       const t = TEMPLATES.find((x) => x.id === input.template);
-      if (!t) throw new RoutineError("no_such_template", `There's no template "${input.template}". Templates: ${TEMPLATES.map((x) => x.id).join(", ")}.`, 400);
-      if (t.id === WATCH_BOTS) throw new RoutineError("bad_request", "Watch my bots is always there: switch it on or off instead.", 400);
+      if (!t) throw new RoutineError("no_such_template", `There's no template "${input.template}". Templates: ${TEMPLATES.map((x) => x.id).join(", ")}.${RETIRED.has(input.template) ? " Watching bots is part of Ambient (its settings), and every bot learns on its own." : ""}`, 400);
       a = this.fromTemplate(t, `a${randomBytes(6).toString("hex")}`, now);
     } else {
       if (!input.name || !input.trigger || !input.instructions) throw new RoutineError("bad_request", "Give it a name, a trigger and instructions, or start from a template.", 400);
@@ -394,8 +372,6 @@ export class Automations {
 
   private merge(a: Automation, input: AutomationInput, now: number): Automation {
     const trigger = input.trigger ?? a.trigger;
-    if (a.id === WATCH_BOTS && trigger.kind !== "heartbeat") throw new RoutineError("bad_request", "Watch my bots runs on the heartbeat; only switch it on or off.", 400);
-    if (a.id !== WATCH_BOTS && trigger.kind === "heartbeat") throw new RoutineError("bad_request", "Only Watch my bots runs on the heartbeat.", 400);
     return {
       ...a,
       ...(input.name ? { name: input.name } : {}),
@@ -421,8 +397,7 @@ export class Automations {
   }
 
   async remove(uid: string, id: string): Promise<void> {
-    const a = await this.get(uid, id);
-    if (a.id === WATCH_BOTS) throw new RoutineError("bad_request", "Watch my bots can only be switched off.", 400);
+    await this.get(uid, id);
     await this.d.control.m(api.records.removeAll, { ownerKind: "user", ownerId: uid, kind: KIND, prefix: id });
     await this.d.control.m(api.records.removeAll, { ownerKind: "user", ownerId: uid, kind: STATE, prefix: id });
   }
@@ -430,13 +405,6 @@ export class Automations {
   async runs(uid: string, id: string): Promise<AutomationRun[]> {
     await this.get(uid, id);
     return [...(await this.state(uid, id)).runs].reverse();
-  }
-
-  /** Whether the heartbeat beats for this person ("Watch my bots" on; it is unless switched off). */
-  async watching(uid: string): Promise<boolean> {
-    const r = (await this.d.control.q(api.records.get, { ownerKind: "user", ownerId: uid, kind: KIND, key: WATCH_BOTS })) as { iv: string; ct: string; deleted: boolean } | null;
-    if (!r || r.deleted) return true;
-    return (await this.open<Automation>(uid, KIND, r))?.enabled ?? true;
   }
 
   // ---- running one ----
@@ -451,13 +419,6 @@ export class Automations {
   /** "Run now" (app, MCP): runs it at once, whatever its trigger. */
   async runNow(uid: string, id: string): Promise<AutomationRun> {
     const a = await this.get(uid, id);
-    if (a.id === WATCH_BOTS) {
-      const out = this.d.heartbeat ? await this.d.heartbeat.beat(uid, { force: true }) : "skipped";
-      const run: AutomationRun = { at: this.now(), by: "manual", event: null, result: out === "sent" ? "sent" : "silent", text: out === "sent" ? "Sent what needed you." : "Nothing new needed you." };
-      const s = await this.state(uid, a.id);
-      await this.saveState(uid, a.id, { ...s, runs: [...s.runs, run] });
-      return run;
-    }
     return this.enqueue(uid, () => this.execute(uid, a, { by: "manual", facts: null, event: null }));
   }
 
@@ -495,8 +456,6 @@ export class Automations {
   /** One run: Amb's internal turn, then delivery (or silence). Recorded in the automation's log. */
   private async execute(uid: string, a: Automation, o: { by: AutomationRun["by"]; facts: string | null; event: string | null; routineId?: string }): Promise<AutomationRun> {
     const name = await this.d.ambient.nameOf(uid);
-    const review = a.template === "improve_bots" && o.routineId ? o.routineId : null;
-    if (review) this.reviewing.set(uid, new Set([...(this.reviewing.get(uid) ?? []), review]));
     let run: AutomationRun;
     try {
       const reply = (await this.withTimeout(this.d.ambient.internalTurn(uid, name, this.prompt(name, a, o)), this.d.turnMs ?? TURN_MS)).trim();
@@ -505,8 +464,6 @@ export class Automations {
       run = { at: this.now(), by: o.by, event: o.event, result: silent ? "silent" : "sent", text: silent ? "" : reply.slice(0, 2_000) };
     } catch (err) {
       run = { at: this.now(), by: o.by, event: o.event, result: "failed", text: (err as Error).message.slice(0, 500) };
-    } finally {
-      if (review) this.reviewing.get(uid)?.delete(review);
     }
     const s = await this.state(uid, a.id);
     await this.saveState(uid, a.id, { ...s, runs: [...s.runs, run] });
@@ -590,7 +547,7 @@ export class Automations {
       let facts: string;
       let routineId: string | undefined;
       if (e.kind === "bot_asked") {
-        if (!(await this.askedBefore(e))) return;
+        if (!(await askedBefore(this.d.control, this.d.keys, e, this.now()))) return;
         kind = "bot_asked_twice";
         key = `asked:${e.questionId}`;
         facts = `The bot "${e.bot}" (id ${e.routineId}) asked again what it asked before: “${e.text}”.`;
@@ -635,24 +592,7 @@ export class Automations {
     void this.enqueue(uid, () => this.execute(uid, a, { by: "event", facts, event: label, routineId }));
   }
 
-  /** Whether the bot asked this before (an earlier question in its thread says much the same). */
-  private async askedBefore(e: Extract<AutomationEvent, { kind: "bot_asked" }>): Promise<boolean> {
-    const page = (await this.d.control.q(api.bots.threadHistory, { id: e.routineId, after: 0, before: this.now() + 1, limit: 200 }).catch(() => null)) as {
-      teamId: string | null;
-      createdBy: string;
-      messages: { id: string; kind: string; iv: string; ct: string }[];
-    } | null;
-    if (!page) return false;
-    const owner: Owner = page.teamId ? { kind: "team", teamId: String(page.teamId) } : { kind: "user", uid: String(page.createdBy) };
-    for (const m of page.messages) {
-      if (m.kind !== "question" || String(m.id) === e.questionId) continue;
-      const body = await openMessage(this.d.keys, owner, m.iv, m.ct).catch(() => null);
-      if (body && sameQuestion(body.text, e.text)) return true;
-    }
-    return false;
-  }
-
-  // ---- proposed changes (the reviewer's, and Amb's) ----
+  // ---- proposed changes (learning's, and Amb's) ----
 
   /** Amb proposes a change to a bot: a decision the person applies. */
   async propose(actor: Actor, change: ProposedChange) {
@@ -694,3 +634,20 @@ export const ProposedSettings = z
       .optional(),
   })
   .strict();
+
+/** Whether the bot asked this before (an earlier question in its thread says much the same). */
+export async function askedBefore(control: Control, keys: RoutineKeys, e: { routineId: string; questionId: string; text: string }, now: number): Promise<boolean> {
+  const page = (await control.q(api.bots.threadHistory, { id: e.routineId, after: 0, before: now + 1, limit: 200 }).catch(() => null)) as {
+    teamId: string | null;
+    createdBy: string;
+    messages: { id: string; kind: string; iv: string; ct: string }[];
+  } | null;
+  if (!page) return false;
+  const owner: Owner = page.teamId ? { kind: "team", teamId: String(page.teamId) } : { kind: "user", uid: String(page.createdBy) };
+  for (const m of page.messages) {
+    if (m.kind !== "question" || String(m.id) === e.questionId) continue;
+    const body = await openMessage(keys, owner, m.iv, m.ct).catch(() => null);
+    if (body && sameQuestion(body.text, e.text)) return true;
+  }
+  return false;
+}

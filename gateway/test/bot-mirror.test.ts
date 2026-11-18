@@ -41,7 +41,11 @@ beforeAll(async () => {
   ben = await signIn(s, "apple-ben-mirror", "Ben Weiss");
   s.config.bots!.users.push(lena.user.uid, ben.user.uid);
   await call("PUT", "/v1/app/routines/secrets/GH_TOKEN", { value: "ghp_secret_value" });
-  const made = await call("POST", "/v1/app/routines", { name: "Blög Draft", prompt: "Write the weekly post.", schedule: daily, bot: { secrets: ["GH_TOKEN"] } });
+  // A bot of one's own runs on one of their computers.
+  const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
+  const setup = await fetch(`${s.origin}/v1/host/setup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, info: { hostname: "srv-test", os: "Linux 6.8", runner: "0.9.0", claude: "2.1.300 (Claude Code)" } }) });
+  const computer = ((await setup.json()) as { computer: { id: string } }).computer.id;
+  const made = await call("POST", "/v1/app/routines", { name: "Blög Draft", prompt: "Write the weekly post.", schedule: daily, computer, bot: { secrets: ["GH_TOKEN"] } });
   blog = (made.json.routine as { id: string }).id;
   await call("PUT", `/v1/app/routines/${blog}/files/content?path=${enc("skills/tone/SKILL.md")}`, { content: "Short sentences." });
   await call("PUT", `/v1/app/routines/${blog}/files/content?path=memory.md`, { content: "- German posts." });
@@ -148,7 +152,10 @@ describe("a person's bots", () => {
   }, 30_000);
 
   it("are told to Amb in bot_files", async () => {
-    const made = await call("POST", "/v1/app/routines", { name: "Inbox", prompt: "Sort mail.", schedule: daily, bot: {} }, ben);
+    const code = String((await call("POST", "/v1/app/computers", { name: "Ben's Mac" }, ben)).json.code);
+    const setup = await fetch(`${s.origin}/v1/host/setup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, info: { hostname: "ben-mac", os: "macOS", runner: "0.9.0", claude: "2.1.300 (Claude Code)" } }) });
+    const computer = ((await setup.json()) as { computer: { id: string } }).computer.id;
+    const made = await call("POST", "/v1/app/routines", { name: "Inbox", prompt: "Sort mail.", schedule: daily, computer, bot: {} }, ben);
     const id = (made.json.routine as { id: string }).id;
     const pat = String((await call("POST", "/v1/app/pats", { label: "Claude" }, ben)).json.token);
     const client = await mcpClient(`${s.origin}/mcp`, pat);

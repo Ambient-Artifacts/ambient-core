@@ -56,6 +56,8 @@ export async function startStack(
     mirrorDelayMs?: number;
     /** GitHub's events on one PR are gathered this long before they wake its bot. */
     githubBatchMs?: number;
+    /** How long after a signal Amb looks at a bot (learning.ts). */
+    learningAfterMs?: number;
   } = {},
 ) {
   const serviceSecret = randomBytes(24).toString("hex");
@@ -173,6 +175,7 @@ export async function startStack(
     ambient: { ...opts.ambient, noHeartbeat: true },
     mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
     githubBatchMs: opts.githubBatchMs ?? 60_000,
+    learning: { reviewAfterMs: opts.learningAfterMs ?? 60_000 },
   });
   gatewayServer.on("request", stack.app);
 

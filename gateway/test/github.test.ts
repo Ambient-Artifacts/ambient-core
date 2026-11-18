@@ -96,8 +96,8 @@ describe("a bot's repos and pull requests", () => {
   it("watches repos it's given, and its branches start with its name", async () => {
     expect((await call("PUT", `/v1/app/routines/${builder}/github`, { repos: ["not a repo"] })).json.error).toBe("bad_repo");
     const set = (await call("PUT", `/v1/app/routines/${builder}/github`, { repos: [`https://github.com/${REPO}.git`] })).json;
-    expect(set).toEqual({ repos: [REPO], branchPrefix: "ambient/builder/" });
-    expect((await call("GET", `/v1/app/routines/${builder}/github`)).json).toEqual({ repos: [REPO], branchPrefix: "ambient/builder/" });
+    expect(set).toEqual({ repos: [REPO], on: ["own_prs"], branchPrefix: "ambient/builder/" });
+    expect((await call("GET", `/v1/app/routines/${builder}/github`)).json).toEqual({ repos: [REPO], on: ["own_prs"], branchPrefix: "ambient/builder/" });
     expect((await call("PUT", `/v1/app/routines/${builder}/github`, { repos: [REPO] }, ben)).status).toBe(404);
   });
 

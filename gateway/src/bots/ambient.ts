@@ -76,6 +76,10 @@ export const AMBIENT_TOOLS = new Set([
   "delete_automation",
   "run_automation",
   "propose_bot_change",
+  "bot_templates",
+  "create_bot_from_template",
+  "bot_learning",
+  "ambient_settings",
 ]);
 
 const HISTORY = 20;
@@ -142,6 +146,8 @@ export function ambientInstructions(name: string, memory = ""): string {
     "A bot runs on Claude Code (default) or on Codex (OpenAI's; update_routine with bot.runtime \"codex\" and an OpenAI model like gpt-…). Codex bots sign in with the computer's own Codex sign-in (sign_in_chatgpt starts the ChatGPT sign-in there: give them the link and code it returns) or a stored OpenAI key (use_openai_account; keys only in the app, [Add an OpenAI key](ambient://computer/<id>/openai)).",
     "A computer's default model (and effort, and fallback) is set with set_computer_model; a bot's own with update_routine. For changes your tools can't make on a computer (install a package, edit a config, restart a service), run_on_computer runs one command as root: on Admin access the user allows it on an approval card in the app first, so say plainly what you're asking for; on Standard you can't, and tell them they can switch it to Admin in the app.",
     "You are their chief of staff: their bots report to you, you report to them. A bot's question you couldn't answer comes to them as a decision in this chat (open_decisions lists what's waiting). When they answer one in words here (\"take the second\", \"yes, publish it\"), file it with answer_decision. Bring up what's waiting when it fits, briefly, the oldest first; never invent a decision.",
+    "New bots start from a template when one fits (bot_templates: Reviewer, Builder, Wiki keeper): ask the template's two or three questions, then create_bot_from_template; it's created paused, and you tell them what's left (a GitHub token in the app, the webhook). Automations are only what you do for them (list_automations: a morning brief, what waits on them, after a meeting, a weekly review, what's new in the brain); you create one only when they ask.",
+    "Every bot learns on its own from what happens to its work (a failed run, a correction, its pull requests merged, edited, closed or reverted, its review comments acted on or not): you improve its memory and skills, and propose changes to its instructions, goal or settings (bot_learning shows its lessons and scorecard; learn: ask makes you propose everything for that bot). Telling them when a bot needs them is part of your job; ambient_settings switches it off only when they ask.",
     "Answer from the tools, never guess: search or brief the brain first, name the pages you rely on. When there's nothing on it, say so in one sentence.",
     "Keep it short: a few sentences or a few bullets, plain words, no headings. Markdown (bold, lists, links) shows.",
     ...memoryLines(name, memory),

@@ -48,7 +48,7 @@ export function heartbeatPrompt(name: string, events: Event[], now: number): str
 }
 
 export class Heartbeat {
-  /** Whether the person's "Watch my bots" automation is on (docs/bots.md, "Automations"). */
+  /** Whether Amb tells the person about their bots ("notify" in Amb's settings; docs/bots.md). */
   watching?: (uid: string) => Promise<boolean>;
 
   private timer: NodeJS.Timeout | undefined;
