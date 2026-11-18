@@ -56,6 +56,8 @@ export async function startStack(
     mirrorDelayMs?: number;
     /** GitHub's events on one PR are gathered this long before they wake its bot. */
     githubBatchMs?: number;
+    /** Ambient's GitHub App, against a stand-in GitHub API (`apiBase`). */
+    githubApp?: import("../src/bots/github-app.ts").GitHubAppConfig;
     /** How long after a signal Amb looks at a bot (learning.ts). */
     learningAfterMs?: number;
   } = {},
@@ -123,6 +125,7 @@ export async function startStack(
     signups: opts.signups,
     requireSignInNonce: opts.requireSignInNonce,
     bots: opts.bots,
+    githubApp: opts.githubApp,
   };
 
   // Team server with a copy of the fixture team wiki.

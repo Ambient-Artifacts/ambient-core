@@ -287,6 +287,14 @@ export class GitHubEvents {
     const h = await this.read<{ id: string; secret: string }>(owner, HOOK, "hook").catch(() => null);
     if (!h || h.id !== id) return { status: 404, result: "no such hook" };
     if (!signedBy(h.secret, body, headers.signature)) return { status: 401, result: "bad signature" };
+    return this.deliver(owner, headers, body);
+  }
+
+  /**
+   * A delivery that's known to be the owner's (their webhook's, signed; or the GitHub App's, for an
+   * installation linked to them): to the bots watching that repo.
+   */
+  async deliver(owner: Owner, headers: { event?: string; delivery?: string }, body: Buffer): Promise<{ status: number; result: string }> {
     // The same delivery twice (a replay, GitHub's redelivery) is taken once.
     const now = this.now();
     for (const [k, at] of this.deliveries) if (now - at > 24 * 3600_000) this.deliveries.delete(k);

@@ -374,6 +374,8 @@ export class RoutineService {
   onBotEvent?: (e: AutomationEvent) => void;
   /** A bot that watches GitHub repos: its branch prefix and repos, for the PR gate in its instructions (app.ts sets it). */
   githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[]; on?: import("../bots/github.ts").WatchMode[] } | null>;
+  /** A GitHub token for a bot's run from Ambient's GitHub App (docs/bots.md, "Connect GitHub"); null: none covers it. */
+  githubToken?: (owner: Owner, routineId: string) => Promise<string | null>;
 
   constructor(
     private d: {
@@ -1058,6 +1060,18 @@ export class RoutineService {
     const env: Record<string, string> = {};
     // Secrets stored before a name was reserved don't go out either.
     for (const s of out.secrets) if (!RESERVED_ENV.test(s.name)) env[s.name] = await this.d.keys.open(owner, `routine:secret:${s.name}`, s.iv, s.ct);
+    // A bot without a GitHub token of its own gets one from Ambient's GitHub App, for this run and
+    // the repos it watches only (it lasts an hour; never stored).
+    if (r.bot && !env.GH_TOKEN && this.githubToken) {
+      const token = await this.githubToken(owner, r.id).catch((err: Error) => {
+        console.warn(`[github-app] no token for a run: ${err.message}`);
+        return null;
+      });
+      if (token) {
+        env.GH_TOKEN = token;
+        env.GITHUB_TOKEN = token;
+      }
+    }
     let resume: { sessionId: string | null; message: string } | null = null;
     if (r.bot && out.resume) {
       const body = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch(() => ({ text: "" }));

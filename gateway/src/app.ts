@@ -33,6 +33,7 @@ import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
 import { ambientHostRouter, botRunRouter, githubHookRouter } from "./bots/route.ts";
 import { GitHubEvents } from "./bots/github.ts";
+import { GitHubApp } from "./bots/github-app.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
@@ -89,6 +90,8 @@ export interface AppDeps {
   mirrorDelayMs?: number;
   /** Tests: how long GitHub's events on one PR are gathered before they wake its bot (default 90 s). */
   githubBatchMs?: number;
+  /** Tests: Ambient's GitHub App against a stand-in GitHub API. */
+  githubFetch?: typeof fetch;
   /** Tests: how long after a signal Amb looks at a bot (default 10 minutes). */
   learning?: { reviewAfterMs?: number };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
@@ -315,6 +318,10 @@ export function createApp(deps: AppDeps) {
   });
   folders.github = github;
   routines.githubFor = (owner, id) => github.forRun(owner, id);
+  // Connect GitHub: Ambient's GitHub App, when it's set up (docs/bots.md, "Connect GitHub").
+  const githubApp = config.githubApp ? new GitHubApp({ control, keys: routineKeys, config: config.githubApp, github, fetchImpl: deps.githubFetch ?? deps.fetchImpl }) : undefined;
+  folders.githubApp = githubApp;
+  if (githubApp) routines.githubToken = async (owner, id) => githubApp.tokenFor(owner, (await github.watchOf(owner, id)).repos);
   if (!deps.ambient?.noHeartbeat) {
     heartbeat.start();
     automations.start();
@@ -324,7 +331,7 @@ export function createApp(deps: AppDeps) {
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
   app.use(botRunRouter({ bots, history: folders.history }));
-  app.use(githubHookRouter(() => folders.github));
+  app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
   app.use(
