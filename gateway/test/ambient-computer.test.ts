@@ -127,7 +127,13 @@ describe("Ambient's own turns", () => {
     await appCall(s, lena.access_token, "DELETE", "/v1/app/ambient/chat");
     await s.ambient.say(lena.user.uid, "A decision waits for you.");
     await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Which?" });
-    const job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; fresh: boolean; text: string };
+    // A new chat first gives Amb a background turn to keep what matters in its memory.
+    let job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string; fresh: boolean; text: string; mode?: string };
+    while (job.mode === "internal") {
+      expect(job.text).toContain("started a new chat");
+      await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { text: "NOTHING" });
+      job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as typeof job;
+    }
     expect(job.fresh).toBe(true);
     expect(job.text).toContain("A decision waits for you.");
     await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { text: "The blog one." });

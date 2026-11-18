@@ -7,6 +7,7 @@ import type { RoutineService } from "../routines/service.ts";
 import type { BotService } from "../bots/service.ts";
 import type { AdminService } from "../bots/admin.ts";
 import type { DecisionService } from "../bots/decisions.ts";
+import type { Folders } from "../bots/files.ts";
 import { personalInstructions } from "./context.ts";
 import { buildMcpServer, type ReaderSource } from "./tools.ts";
 import { addressKey, strikes } from "../limiter.ts";
@@ -45,6 +46,7 @@ export function mcpRouter(deps: {
   bots?: BotService;
   admin?: AdminService;
   decisions?: DecisionService;
+  folders?: Folders;
   settings?: SettingsService;
   voices?: Voices;
   version: string;
@@ -112,7 +114,7 @@ export function mcpRouter(deps: {
     const personal = connecting
       ? await personalInstructions(principal, deps.readers, { name: await deps.userName?.(principal.uid).catch(() => undefined) })
       : null;
-    const server = buildMcpServer({ principal, readers: deps.readers, routines: deps.routines, bots: deps.bots, admin: deps.admin, decisions: deps.decisions, settings: deps.settings, voices: deps.voices, version: deps.version, personal });
+    const server = buildMcpServer({ principal, readers: deps.readers, routines: deps.routines, bots: deps.bots, admin: deps.admin, decisions: deps.decisions, folders: deps.folders, settings: deps.settings, voices: deps.voices, version: deps.version, personal });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       void transport.close();

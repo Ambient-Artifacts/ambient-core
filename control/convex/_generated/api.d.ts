@@ -16,6 +16,7 @@ import type * as lib_service from "../lib/service.js";
 import type * as oauth from "../oauth.js";
 import type * as personal from "../personal.js";
 import type * as push from "../push.js";
+import type * as records from "../records.js";
 import type * as repos from "../repos.js";
 import type * as revisions from "../revisions.js";
 import type * as routines from "../routines.js";
@@ -40,6 +41,7 @@ declare const fullApi: ApiFromModules<{
   oauth: typeof oauth;
   personal: typeof personal;
   push: typeof push;
+  records: typeof records;
   repos: typeof repos;
   revisions: typeof revisions;
   routines: typeof routines;

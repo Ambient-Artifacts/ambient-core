@@ -2,14 +2,16 @@
 // with Ambient. Text is sealed by the gateway (the owner's data key, or the person's own for the
 // chat); these functions only decide who may read and write what, and keep the bot's state.
 import { v } from "convex/values";
-import type { Doc, Id } from "./_generated/dataModel.js";
-import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
+import type { Doc } from "./_generated/dataModel.js";
+import { mutation, query, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
 import { manages, routineFor } from "./routines.js";
 
 const access = { uid: v.id("users"), teamIds: v.array(v.id("teams")) };
-const KEEP_MESSAGES = 300;
-const KEEP_CHAT = 200;
+/** How much of the chat the app shows at once. Nothing is cut off: the history is kept in full. */
+const SHOW_CHAT = 200;
+/** A page of history for search (docs/bots.md, "History"). */
+const HISTORY_PAGE = 500;
 
 function messageShape(m: Doc<"botMessages">) {
   return {
@@ -26,14 +28,6 @@ function messageShape(m: Doc<"botMessages">) {
   };
 }
 
-async function prune(ctx: MutationCtx, routineId: Id<"routines">) {
-  const old = await ctx.db
-    .query("botMessages")
-    .withIndex("by_routine", (q) => q.eq("routineId", routineId))
-    .order("desc")
-    .take(KEEP_MESSAGES + 20);
-  for (const m of old.slice(KEEP_MESSAGES)) await ctx.db.delete(m._id);
-}
 
 /** A bot's thread, newest last, with its open question. Readable by whoever sees the bot. */
 export const thread = query({
@@ -118,9 +112,24 @@ export const post = mutation({
       const d = await ctx.db.query("decisions").withIndex("by_question", (q) => q.eq("questionId", question._id)).first();
       if (d && d.status === "open") await ctx.db.patch(d._id, { status: "answered", answerIv: iv, answerCt: ct, answeredBy: asAmbient ? "Ambient" : user?.name, via: asAmbient ? "ambient" : "thread", answeredAt: now });
     }
-    await prune(ctx, r._id);
     const m = (await ctx.db.get(messageId))!;
     return { ok: true as const, message: messageShape(m) };
+  },
+});
+
+/**
+ * A note from Amb in a bot's thread (it changed the bot's files, say): the owner sees it where they
+ * talk to the bot, and it doesn't start a run.
+ */
+export const note = mutation({
+  args: { ...secretArg, ...access, id: v.string(), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, teamIds, id, iv, ct, now }) => {
+    assertService(secret);
+    const r = await routineFor(ctx, uid, teamIds, id);
+    if (!r?.bot) return { ok: false as const, error: "no_such_bot" };
+    const user = await ctx.db.get(uid);
+    const messageId = await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "ambient", kind: "message", iv, ct, authorId: uid, authorName: `Ambient, for ${user?.name ?? "you"}`, createdAt: now });
+    return { ok: true as const, message: messageShape((await ctx.db.get(messageId))!) };
   },
 });
 
@@ -153,7 +162,6 @@ export const ask = mutation({
     const { run, r } = found;
     const questionId = await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "bot", kind: "question", iv, ct, runId: run._id, createdAt: now });
     await ctx.db.patch(r._id, { openQuestionId: questionId });
-    await prune(ctx, r._id);
     const team = r.teamId ? await ctx.db.get(r.teamId) : null;
     return { ok: true as const, questionId, routineId: r._id, name: r.name, notify: r.userId, team: team?.name ?? null };
   },
@@ -182,15 +190,18 @@ export const questionAnswer = mutation({
 
 // ---- Ambient, the master bot ----
 
+/** The chat as the app shows it: since the person last started a new chat. */
 export const chat = query({
   args: { ...secretArg, uid: v.id("users"), limit: v.number() },
   handler: async (ctx, { secret, uid, limit }) => {
     assertService(secret);
+    const state = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    const from = state?.chatClearedAt ?? 0;
     const rows = await ctx.db
       .query("ambientChat")
-      .withIndex("by_user", (q) => q.eq("userId", uid))
+      .withIndex("by_user", (q) => q.eq("userId", uid).gte("createdAt", from))
       .order("desc")
-      .take(Math.min(Math.max(limit, 1), KEEP_CHAT));
+      .take(Math.min(Math.max(limit, 1), SHOW_CHAT));
     const out = [];
     for (const m of rows.reverse()) {
       const d = m.decisionId ? await ctx.db.get(m.decisionId) : null;
@@ -206,26 +217,82 @@ export const addChat = mutation({
     assertService(secret);
     const did = decisionId ? ctx.db.normalizeId("decisions", decisionId) : null;
     const id = await ctx.db.insert("ambientChat", { userId: uid, role, iv, ct, ...(did ? { decisionId: did } : {}), createdAt: now });
-    const old = await ctx.db
-      .query("ambientChat")
-      .withIndex("by_user", (q) => q.eq("userId", uid))
-      .order("desc")
-      .take(KEEP_CHAT + 20);
-    for (const m of old.slice(KEEP_CHAT)) await ctx.db.delete(m._id);
     return { id, createdAt: now };
   },
 });
 
+/** "New chat": the app shows the chat from now on; the history stays for search. */
 export const clearChat = mutation({
-  args: { ...secretArg, uid: v.id("users") },
-  handler: async (ctx, { secret, uid }) => {
+  args: { ...secretArg, uid: v.id("users"), now: v.number() },
+  handler: async (ctx, { secret, uid, now }) => {
+    assertService(secret);
+    const state = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    if (state) await ctx.db.patch(state._id, { chatClearedAt: now });
+    else await ctx.db.insert("ambientState", { userId: uid, lastBeatAt: 0, day: "", sentToday: 0, seen: [], chatClearedAt: now });
+    return { ok: true };
+  },
+});
+
+/** The whole chat history goes, for good. A page at a time: call until it says 0. */
+export const forgetChat = mutation({
+  args: { ...secretArg, uid: v.id("users"), now: v.number() },
+  handler: async (ctx, { secret, uid, now }) => {
     assertService(secret);
     const rows = await ctx.db
       .query("ambientChat")
       .withIndex("by_user", (q) => q.eq("userId", uid))
-      .take(KEEP_CHAT * 2);
+      .take(HISTORY_PAGE);
     for (const m of rows) await ctx.db.delete(m._id);
+    const state = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    if (state) await ctx.db.patch(state._id, { chatClearedAt: now });
     return { removed: rows.length };
+  },
+});
+
+/** A page of the whole chat (search), newest first, before `before`. */
+export const chatHistory = query({
+  args: { ...secretArg, uid: v.id("users"), before: v.number(), after: v.number() },
+  handler: async (ctx, { secret, uid, before, after }) => {
+    assertService(secret);
+    const rows = await ctx.db
+      .query("ambientChat")
+      .withIndex("by_user", (q) => q.eq("userId", uid).gt("createdAt", after).lt("createdAt", before))
+      .order("desc")
+      .take(HISTORY_PAGE);
+    return rows.map((m) => ({ id: m._id, role: m.role, iv: m.iv, ct: m.ct, createdAt: m.createdAt }));
+  },
+});
+
+/**
+ * A page of a bot's thread (search, a run's wake-up), newest first, between `after` and `before`.
+ * The gateway has checked who may read it.
+ */
+export const threadHistory = query({
+  args: { ...secretArg, id: v.string(), before: v.number(), after: v.number(), limit: v.optional(v.number()) },
+  handler: async (ctx, { secret, id, before, after, limit }) => {
+    assertService(secret);
+    const rid = ctx.db.normalizeId("routines", id);
+    const r = rid ? await ctx.db.get(rid) : null;
+    if (!r?.bot) return null;
+    const rows = await ctx.db
+      .query("botMessages")
+      .withIndex("by_routine", (q) => q.eq("routineId", r._id).gt("createdAt", after).lt("createdAt", before))
+      .order("desc")
+      .take(Math.min(Math.max(limit ?? HISTORY_PAGE, 1), HISTORY_PAGE));
+    return { teamId: r.teamId ?? null, createdBy: r.userId, messages: rows.map(messageShape) };
+  },
+});
+
+/** Amb's nightly look at the day (docs/bots.md, "Amb's memory"): done for that day. */
+export const memoryDay = mutation({
+  args: { ...secretArg, uid: v.id("users"), day: v.string() },
+  handler: async (ctx, { secret, uid, day }) => {
+    assertService(secret);
+    const state = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    if (state?.memoryDay === day) return { first: false };
+    if (state) await ctx.db.patch(state._id, { memoryDay: day });
+    else await ctx.db.insert("ambientState", { userId: uid, lastBeatAt: 0, day: "", sentToday: 0, seen: [], memoryDay: day });
+    return { first: true };
   },
 });
 

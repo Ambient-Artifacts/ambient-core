@@ -330,3 +330,135 @@ Every 30 minutes between 08:00 and 21:00 (Europe/Vienna for now), code gathers w
 each person with bots: runs that failed, decisions waiting longer than two hours, approvals waiting.
 Only when that isn't empty does Ambient get a turn (an internal one, see "Ambient on a computer"); it writes a short message into the chat (with a
 push) or stays silent. Nothing twice, at most 6 such messages a day, none at night.
+
+## A bot's folder, its memory and its handoffs
+
+A bot is a folder of files that Ambient keeps for its owner (a person, or a team), sealed like
+everything else, with a version for every change: who made it (the owner, the bot itself, or Amb,
+the master agent), why, and when. Undo is restoring an earlier version. A team bot's folder can be
+mirrored into the team's git repo later; the store here stays the source, so a broken repo token
+never stops a bot.
+
+| File | What | Who writes it |
+|---|---|---|
+| `AGENTS.md` | What the bot does and how: its instructions (a loop's prompt, up to 20,000 characters) | the owner; Amb |
+| `skills/<name>/SKILL.md` (and other text files in `skills/<name>/`) | Know-how it uses when it fits, as Claude Code skills | the owner; Amb |
+| `memory.md` | What it has learned: the owner's preferences, corrections, lessons (up to 16 KB) | the bot, during its runs; the owner; Amb |
+
+Limits: text files only, 64 KB each, 60 files and 512 KB a bot. Paths: `AGENTS.md`, `memory.md`,
+or `skills/<name>/<file>` (`<name>`: lowercase letters, digits, dashes; one more folder level is
+allowed). Each file keeps its last 50 versions.
+
+`AGENTS.md` is the routine's prompt: editing the prompt (app or `update_routine`) is a new version
+of `AGENTS.md`, and the other way round.
+
+**Handoffs.** A run ends by writing a handoff for its next run: the first line `Status: done` or
+`Status: continue`, then what it did, what's open, what comes next and what it's waiting for (up
+to 8 KB). The last 30 are kept. A run that writes none gets its summary as its handoff.
+
+### How a bot wakes up
+
+Code decides, every run:
+
+1. **It continues its session** when the run starts with the owner's answer or message (as
+   before), or when its last handoff said `Status: continue`, that run ended less than 6 hours
+   ago, and its session is known. It's told what's new in its thread since.
+2. **Otherwise it starts fresh with a handoff:** its `AGENTS.md`, its `memory.md`, its last three
+   handoffs, and every message in its thread since its last run (the owner's, and Amb's answers
+   for them). Anything older it finds with `search_history`.
+
+So a bot knows what it did yesterday and what's next, without dragging weeks of transcript
+around: a wrong turn is fixed by correcting its memory or handoff, not by wiping it.
+
+### The app's API
+
+Paths go in the query (`?path=skills/release/SKILL.md`), since they hold slashes. Who may read and
+write is who may read and change the bot.
+
+- `GET /v1/app/routines/:id/files` →
+  `{ "files": [{ "path": "AGENTS.md", "size": 1834, "version": 4, "updatedAt": 1763380000000, "by": { "kind": "amb", "name": "Amb" } }] }`
+  (`by.kind`: `user`, `bot`, `amb`; `AGENTS.md` and `memory.md` are always listed, version 0 when
+  never written).
+- `GET /v1/app/routines/:id/files/content?path=…[&version=n]` →
+  `{ "path", "content", "version", "by", "why", "updatedAt" }`.
+- `PUT /v1/app/routines/:id/files/content?path=…` with `{ "content": "…", "why"?: "…" }` → the
+  file as above. Creates the file when it's new.
+- `DELETE /v1/app/routines/:id/files/content?path=…` → 204 (a version that deletes it; `AGENTS.md`
+  and `memory.md` can't be deleted, only emptied).
+- `GET /v1/app/routines/:id/files/history?path=…` →
+  `{ "versions": [{ "version": 4, "by", "why", "updatedAt", "size", "deleted": false }] }` (newest
+  first).
+- `POST /v1/app/routines/:id/files/revert` with `{ "path": "…", "version": 3 }` → the file: a new
+  version with version 3's content.
+- `GET /v1/app/routines/:id/handoffs?limit=10` →
+  `{ "handoffs": [{ "runId": "…", "status": "done" | "continue", "text": "…", "createdAt": 1763380000000 }] }`
+  (newest first).
+
+When Amb changes a bot's `AGENTS.md` or a skill, the bot's thread says so in an `ambient` message
+(what changed and why), so the owner sees it where they talk to the bot.
+
+### The computer's side
+
+`POST /v1/host/routines/:id/runs` for a bot also returns, from runner 0.8.0 on:
+
+```json
+"workspace": {
+  "system": "…the bot's instructions for this run; {{OUT}} stands for the run's out folder…",
+  "skills": [{ "path": "release/SKILL.md", "content": "…" }],
+  "memory": "…memory.md as it is now…"
+}
+```
+
+`routine.prompt` is what the run starts with: for a fresh run the wake-up message above (with
+`AGENTS.md` in it), for a continued one what's new. The runner:
+
+- writes `memory.md` (as given) and an empty `handoff.md` into the run's out folder (in a container
+  `/opt/ambient/out`), replaces `{{OUT}}` in `system` with that folder and appends `system` to
+  Claude Code's system prompt instead of its own;
+- puts `skills` into `~/.claude/skills/` (in a container; skills it put there before and that are
+  gone now are removed, skills the bot made itself stay). A bot that runs on the computer itself
+  (`isolation: host`) gets no skills: the runner never writes into the routine user's own
+  `~/.claude`;
+- after the run sends `memory` and `handoff` (the files' text) with the result:
+  `POST /v1/host/runs/:runId` `{ …, "memory"?: "…", "handoff"?: "…" }`.
+
+Older runners ignore `workspace` and run `routine.prompt` as before.
+
+The bot's `ask_owner` MCP server gets a second tool, `search_history` (run token):
+`GET /v1/bot/history?q=…&from=…&to=…&limit=20` → `{ "results": [{ "at", "who", "where", "text" }] }`
+over its own thread and handoffs (`at` in milliseconds, newest first; `from`/`to` a date,
+`YYYY-MM-DD`, meaning the whole day, or an ISO moment; every word of `q` must appear, case and
+accents don't matter). The run token works while the run is going.
+
+## History: nothing is forgotten
+
+Amb's chat and every bot's thread are kept in full (sealed), no longer cut at the newest 200 or 300
+messages. `DELETE /v1/app/ambient/chat` starts a new chat: Amb starts a new session and the app
+shows the chat from there, but the old messages stay findable. `DELETE /v1/app/ambient/chat?forget=1`
+deletes the whole history for good.
+
+`search_history` (an MCP tool for Amb and for AI apps with bots switched on) searches Amb's chat,
+the threads of every bot the person sees, and the bots' handoffs, by words and dates, newest first.
+The gateway opens and searches the messages; nothing is stored unsealed.
+
+## Amb's memory
+
+Amb, the master agent, has a `memory.md` of its own per person (16 KB, versioned the same way):
+what it knows about them that isn't in the brain (how they like things, what they decided in the
+chat, standing instructions). It's in Amb's instructions whenever a session starts, and Amb keeps
+it with the `update_amb_memory` tool.
+
+Code makes sure it's kept up: every night (03:00 Vienna) Amb gets a short background turn to go
+through the day's chat and threads and update it, and when a chat is started anew, Amb first gets
+a turn to save what's worth keeping from the old one.
+
+- `GET /v1/app/ambient/memory[?version=n]` → the file (as above; `by.name` is the person's name
+  for their own edits); `PUT` with `{ "content", "why"? }`; `GET /v1/app/ambient/memory/history`;
+  `POST /v1/app/ambient/memory/revert` with `{ "version" }`. Only the person reads and changes it.
+
+MCP tools (for Amb, and AI apps with bots switched on): `search_history`, `amb_memory`,
+`update_amb_memory`, `bot_files` (files and the last three handoffs), `read_bot_file` (a version,
+or `history: true`), `write_bot_file` (content, `delete`, or `restore_version`, always with a
+`why`). A change through them is by `amb` (`by.name` "Ambient" from Amb's chat, otherwise the AI
+app). A version that deleted a file has empty content and `deleted: true`; restoring the one before
+it brings the file back.

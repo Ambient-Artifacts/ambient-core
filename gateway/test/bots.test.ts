@@ -326,7 +326,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     expect(args).toContain("--allowedTools mcp__ambient-bot__ask_owner");
     expect(args).toContain('one of your owner\'s bots in Ambient');
     expect(args).not.toContain("--resume");
-    expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toBe("Fix the parser test.");
+    // A fresh run wakes up with its AGENTS.md (the prompt), its memory and its handoffs (docs/bots.md).
+    const woke = readFileSync(join(dir, "work", "prompt.txt"), "utf8");
+    expect(woke.startsWith("Fix the parser test.")).toBe(true);
+    expect(woke).toContain("Your memory (memory.md):");
     expect((await thread(id)).messages.at(-1)).toMatchObject({ kind: "result", text: "Fixed the parser test and pushed fix/parser." });
 
     await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "Open a PR for it." });
@@ -364,7 +367,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     expect(await reply(1)).toMatchObject({ serverInfo: { name: "ambient-bot" }, capabilities: { tools: {} } });
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
     send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    expect(((await reply(2)).tools as { name: string }[]).map((t) => t.name)).toEqual(["ask_owner"]);
+    expect(((await reply(2)).tools as { name: string }[]).map((t) => t.name)).toEqual(["ask_owner", "search_history"]);
     send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "ask_owner", arguments: { question: "Ship it?", choices: ["Yes", "Not yet"] } } });
     for (let i = 0; i < 100 && !(await one(id)).bot?.openQuestion; i++) await new Promise((r) => setTimeout(r, 50));
     await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "Yes" });

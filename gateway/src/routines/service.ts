@@ -22,6 +22,7 @@ import type { Team } from "../directory.ts";
 import type { Notifier, PushMessage } from "../push.ts";
 import type { Owner, RoutineKeys } from "./keys.ts";
 import type { CodeHasher } from "../auth/codes.ts";
+import type { Author, BotFolder } from "../bots/folder.ts";
 
 export const HOST_TOKEN_PREFIX = "ambient_host_";
 export const RUN_TOKEN_PREFIX = "ambient_run_";
@@ -126,6 +127,9 @@ export const RunResult = z.object({
   costUsd: z.number().min(0).max(10_000).optional(),
   turns: z.number().int().min(0).optional(),
   sessionId: z.string().max(200).optional(),
+  /** A bot's run (runner 0.8.0): its memory.md and its handoff as the run left them. */
+  memory: z.string().max(70_000).optional(),
+  handoff: z.string().max(70_000).optional(),
 });
 export type RunResult = z.infer<typeof RunResult>;
 
@@ -351,6 +355,8 @@ export class RoutineService {
       teamsOf?: (uid: string) => Promise<Team[]>;
       /** A team by slug (for whether a team's server runs Ambient). */
       teamBySlug?: (slug: string) => Promise<Team | undefined>;
+      /** Bots' folders, memory and handoffs (docs/bots.md, "A bot's folder"). */
+      folder?: BotFolder;
     },
   ) {}
 
@@ -630,7 +636,8 @@ export class RoutineService {
     return this.get(actor, String(out.routine.id));
   }
 
-  async update(actor: Actor, id: string, patch: RoutinePatch, source: string): Promise<Routine> {
+  /** `meta`: who changed a bot's prompt (its AGENTS.md) and why; by default the source says. */
+  async update(actor: Actor, id: string, patch: RoutinePatch, source: string, meta: { by?: Author; why?: string | null } = {}): Promise<Routine> {
     const { r } = await this.row(actor, id);
     const access = this.writeAccess(actor, r);
     if (r.teamId && patch.computer) throw refused("team_routine_computer");
@@ -653,13 +660,39 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    // A bot's prompt is its AGENTS.md: every change is a version of it (undo, who and why).
+    if (this.d.folder && patch.prompt !== undefined && (r.bot || patch.bot)) {
+      const owner = this.ownerOf(r);
+      const before = await this.d.keys.open(owner, "routine:prompt", r.promptIv, r.promptCt).catch(() => null);
+      if (before !== patch.prompt) {
+        const by: Author = meta.by ?? (source === "app" ? { kind: "user", name: null } : { kind: "amb", name: source });
+        await this.d.folder.recordAgents(owner, id, patch.prompt, before, by, meta.why ?? null).catch((err: Error) => console.warn(`[folder] AGENTS.md version not kept: ${err.message}`));
+      }
+    }
     return this.get(actor, id);
+  }
+
+  /**
+   * A bot's folder for someone (docs/bots.md, "A bot's folder"): its owner, and AGENTS.md (the
+   * prompt). `write`: only who may change the bot.
+   */
+  async folderOf(actor: Actor, id: string, write: boolean): Promise<{ owner: Owner; routineId: string; name: string; agents: string; teamId: string | null }> {
+    const { r } = await this.row(actor, id);
+    if (!r.bot) throw new RoutineError("no_such_bot", "There's no such bot.", 404);
+    if (!this.botsFor(actor, r)) throw refused("bots_not_enabled");
+    if (write) {
+      this.writeAccess(actor, r);
+      if (!r.teamId && r.createdBy !== actor.uid) throw refused("no_such_routine");
+    }
+    const owner = this.ownerOf(r);
+    return { owner, routineId: r.id, name: r.name, teamId: r.teamId, agents: await this.d.keys.open(owner, "routine:prompt", r.promptIv, r.promptCt) };
   }
 
   async remove(actor: Actor, id: string): Promise<{ name: string }> {
     const { r } = await this.row(actor, id);
     const out = await this.d.control.m(api.routines.remove, { ...this.writeAccess(actor, r), id });
     if (!out.ok) throw refused(out.error);
+    if (r.bot && this.d.folder) await this.d.folder.removeAll(this.ownerOf(r), id).catch((err: Error) => console.warn(`[folder] a deleted bot's files stayed: ${err.message}`));
     return { name: out.name };
   }
 
@@ -902,6 +935,8 @@ export class RoutineService {
     resume: { sessionId: string | null; message: string } | null;
     /** A bot's run: its token for asking the owner (POST /v1/bot/ask), valid while it runs. */
     runToken: string | null;
+    /** A bot's run (runner 0.8.0): its instructions, skills and memory (docs/bots.md, "A bot's folder"). */
+    workspace?: { system: string; skills: { path: string; content: string }[]; memory: string };
   }> {
     // Every run gets a token; only a bot's run stores (and so honours) it.
     const runToken = `${RUN_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
@@ -921,14 +956,39 @@ export class RoutineService {
         message: out.resume.kind === "answer" ? `${who} answered your question: ${body.text}` : `${who} wrote to you in the Ambient app: ${body.text}`,
       };
     }
+    let prompt = await this.d.keys.open(owner, "routine:prompt", r.promptIv, r.promptCt);
+    let workspace: { system: string; skills: { path: string; content: string }[]; memory: string } | undefined;
+    if (r.bot && this.d.folder) {
+      const previous = (out as unknown as { previous: { session: string | null; startedAt: number | null; finishedAt: number | null } | null }).previous;
+      const pendingId = (out.resume as { id?: string } | null)?.id ? String((out.resume as { id: string }).id) : null;
+      const thread = await this.threadSince(owner, r.id, previous?.startedAt ?? 0, pendingId);
+      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread });
+      prompt = woken.prompt;
+      resume = woken.resume;
+      workspace = woken.workspace;
+    }
     return {
       run: { id: String(out.runId), trigger: out.trigger },
-      routine: { id: r.id, name: r.name, prompt: await this.d.keys.open(owner, "routine:prompt", r.promptIv, r.promptCt), folder: r.folder },
+      routine: { id: r.id, name: r.name, prompt, folder: r.folder },
       env,
       bot: r.bot,
       resume,
       runToken: r.bot ? runToken : null,
+      ...(workspace ? { workspace } : {}),
     };
+  }
+
+  /** What the owner and Amb wrote in a bot's thread since `after` (a fresh run's wake-up), oldest first. */
+  private async threadSince(owner: Owner, id: string, after: number, skip: string | null): Promise<{ at: number; who: string; text: string }[]> {
+    const page = (await this.d.control.q(api.bots.threadHistory, { id, after, before: this.now() + 1, limit: 60 }).catch(() => null)) as { messages: { id: string; role: string; iv: string; ct: string; authorName: string | null; createdAt: number }[] } | null;
+    if (!page) return [];
+    const out: { at: number; who: string; text: string }[] = [];
+    for (const m of page.messages.reverse()) {
+      if (m.role === "bot" || String(m.id) === skip) continue;
+      const body = await openMessage(this.d.keys, owner, m.iv, m.ct).catch(() => null);
+      if (body?.text) out.push({ at: m.createdAt, who: m.authorName ?? (m.role === "ambient" ? "Ambient" : "Your owner"), text: body.text });
+    }
+    return out;
   }
 
   async finishRun(host: Host, runId: string, result: RunResult): Promise<void> {
@@ -954,6 +1014,11 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    // A bot's handoff and memory for its next run (docs/bots.md, "How a bot wakes up").
+    if (who.bot && this.d.folder) {
+      const w = who as unknown as { routineId: string; startedAt: number; name: string };
+      await this.d.folder.afterRun(owner, { routineId: String(w.routineId), name: w.name, runId, startedAt: w.startedAt }, { memory: result.memory, handoff: result.handoff, summary: clipped, failed: result.status === "failed" });
+    }
     // Not awaited: the computer's report doesn't wait for Apple.
     if (out.notice) void this.d.notifier?.notify(String(out.notice.uid), routineFailedPush({ ...out.notice, routineId: String(out.notice.routineId), runId: String(out.notice.runId) }));
   }

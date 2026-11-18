@@ -197,6 +197,7 @@ export async function startStack(
     ambient: stack.ambient,
     decisions: stack.decisions,
     heartbeat: stack.heartbeat,
+    folders: stack.folders,
     graphTokens,
     deliverer,
     close: async () => {
