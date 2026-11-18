@@ -811,7 +811,12 @@ template says which rights in words (no merge rights for any).
   → `{ "routine": Routine, "needs": { "secrets": ["GH_TOKEN"], "webhook": true } }`: made in the
   app it's on at once; `needs` says what's still missing (secrets not stored yet for that owner,
   and the webhook on its repos). `400 bad_request` for missing or wrong answers,
-  `no_such_template` for an unknown id.
+  `no_such_template` for an unknown id, `400 bot_needs_computer` for a bot of one's own without
+  a computer (the `computer` given, or the person's only ready one).
+
+A bot of one's own always has a computer: creating one without (here, `POST /v1/app/routines`,
+the MCP tools), making a loop without one a bot, or taking a bot's computer away answers
+`400 bot_needs_computer`. A team's bots run on the team's server.
 
 MCP tools: `bot_templates`, `create_bot_from_template` (made paused, as anything an AI app
 creates).
