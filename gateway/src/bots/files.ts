@@ -113,4 +113,8 @@ export interface Folders {
   automations?: import("./automations.ts").Automations;
   /** GitHub's events for bots and the PR gate (docs/bots.md, "GitHub events and the PR gate"). */
   github?: import("./github.ts").GitHubEvents;
+  /** How bots learn: signals, scorecards, lessons (docs/bots.md, "How bots learn"). */
+  learning?: import("./learning.ts").BotLearning;
+  /** Amb's settings per person (docs/bots.md, "Amb's settings"). */
+  ambSettings?: import("./amb-settings.ts").AmbSettings;
 }

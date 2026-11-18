@@ -619,6 +619,10 @@ A bot that works through pull requests only marks one ready for review when noth
 every review comment (review bots and people) fixed or answered, and every check green. It doesn't
 poll for that: GitHub's events on its pull request wake it.
 
+**How a bot works on its repos** (`on`, one or more): `own_prs` (its own pull requests and the
+gate below; the default), `all_prs` (it reviews every pull request: see "Bot templates"),
+`merges` (what's merged into the default branch starts it: a wiki keeper).
+
 **Which pull requests are a bot's.** A bot watches repos (`owner/name`, up to 10). Its branches
 start with `ambient/<bot>/` (its name as the git mirror spells it: `Blög Draft` →
 `ambient/blog-draft/`), and a pull request from such a branch is its own. Its instructions say
@@ -637,7 +641,7 @@ GitHub with `— <bot name> (Ambient)`.
 HMAC-SHA256; unsigned or wrongly signed: 401; an unknown or rotated hook: 404). In the repo:
 Settings → Webhooks → Add webhook, content type `application/json`, the secret, and "Let me
 select individual events": Pull requests, Pull request reviews, Pull request review comments,
-Issue comments, Check runs, Check suites. A delivery GitHub sends twice (`X-GitHub-Delivery`) is
+Issue comments, Check runs, Check suites, Pushes. A delivery GitHub sends twice (`X-GitHub-Delivery`) is
 taken once; everything that doesn't concern a bot gets 202 with what it was (`result`).
 
 **What wakes the bot**, gathered per pull request for 90 seconds into one message from "GitHub" in
@@ -660,8 +664,9 @@ stays what the run starts with; GitHub's comes along as new in its thread.
 - `GET /v1/app/github-hook[?team=<slug>]` → `{ "id", "url", "secret", "events": [..] }` (made on
   first use); `POST /v1/app/github-hook/rotate[?team=<slug>]` → the same with a new URL and
   secret (the old ones stop at once).
-- `GET /v1/app/routines/:id/github` → `{ "repos": ["owner/name"], "branchPrefix": "ambient/<bot>/" }`
-  (the prefix always, also before it watches a repo); `PUT` with `{ "repos": [..] }`: owner/name,
+- `GET /v1/app/routines/:id/github` → `{ "repos": ["owner/name"], "on": ["own_prs"], "branchPrefix": "ambient/<bot>/" }`
+  (the prefix always, also before it watches a repo); `PUT` with `{ "repos": [..], "on"?: [..] }`
+  (`on` left out: as it was): owner/name,
   or any github.com link to the repo (http or https, www., `git@github.com:`, `.git`, a link to a
   pull request or a branch in it); `400 bad_repo` otherwise; an empty list stops it. The same
   cleanup holds for the MCP tool. Everyone who sees the bot reads its repos; who may change it
@@ -669,15 +674,29 @@ stays what the run starts with; GitHub's comes along as new in its thread.
 - App link: `ambient://github-hook[?team=<slug>]` (the webhook's page with the secret).
 
 MCP tools for Amb: `github_webhook` (the URL and the events to tick; the secret only in the app)
-and `watch_github` (`{ id, repos }`).
+and `watch_github` (`{ id, repos, on? }`).
+
+**Every pull request (`all_prs`).** Opened, reopened, marked ready or new commits (not drafts, not
+its own branch) wake the bot with the pull request's number, title, author and head, gathered and
+capped like the gate's wake-ups. Its instructions: comments only on real problems, inline, then one
+review (`gh pr review`); never approve with red checks, never push or merge; every comment ends
+with its signature line.
+
+**Merges (`merges`).** A push to the default branch wakes it with the commits (id and first line)
+and the compare link. Left out: pushes that only change Markdown or `docs/`, and merges of its own
+work (the merge message names its branch prefix, or carries its signature).
 
 ## Automations
 
-Things Amb does for a person without being asked each time. One automation is **when** (a time,
-or an event) + **what** (instructions) + **where** (delivery), and Amb stays silent (`NOTHING`)
-when there's nothing worth saying. Code decides when; Amb decides what to say, in an internal
-turn of its own (a short session beside the chat). Personal (per person) in this version; stored
-as sealed records, so new templates need no Convex deploy.
+Things Amb does **for the person** without being asked each time. The rule: templates are for
+bots ("Bot templates"), automations are only for the person. Watching their bots is part of Amb's
+job (its settings, below), and every bot learns on its own ("How bots learn"); neither is an
+automation to find and switch on.
+
+One automation is **when** (a time, or an event) + **what** (instructions) + **where** (delivery),
+and Amb stays silent (`NOTHING`) when there's nothing worth saying. Code decides when; Amb decides
+what to say, in an internal turn of its own (a short session beside the chat). Personal (per
+person); stored as sealed records, so new templates need no Convex deploy.
 
 ### Templates
 
@@ -686,14 +705,13 @@ as sealed records, so new templates need no Convex deploy.
 | `morning_brief` | Morning brief | weekdays 08:00 | `chat` |
 | `waiting_on_me` | Waiting on me (decisions, bots asking, action items, approvals) | weekdays 12:30 | `chat` |
 | `after_meeting` | After every meeting | event `meeting_note` | `chat` |
-| `watch_bots` | Watch my bots (the heartbeat) | trigger `heartbeat` | `chat` |
 | `weekly_review` | Weekly review | Fridays 16:00 | `chat` |
-| `improve_bots` | Improve my bots (the reviewer) | events `bot_failed`, `bot_corrected`, `bot_asked_twice` | `chat_silent` |
 | `new_in_brain` | New in the brain | daily 18:00 | `chat_silent` |
 
-Times are in Europe/Vienna until changed. `watch_bots` is always there and on until switched off:
-it is the heartbeat (every half hour 08–21, at most six messages a day); switching it off stops the
-heartbeat's beats. It can't be deleted or given another trigger.
+Times are in Europe/Vienna until changed. "Watch my bots" and "Improve my bots" were templates
+once: stored ones are left out of the list and never run (`POST` with those ids: 400,
+`no_such_template`, saying where they went); a "Watch my bots" that was switched off becomes
+`notify: "never"` until Amb's settings are changed.
 
 ### An automation
 
@@ -714,14 +732,14 @@ heartbeat's beats. It can't be deleted or given another trigger.
 }
 ```
 
-- `trigger`: `{ "kind": "time", "schedule": <a loop's schedule> }`, `{ "kind": "event", "events": [..], "hours"?: n, "bot"?: id | null }`
-  or `{ "kind": "heartbeat" }` (only `watch_bots`). Events: `bot_failed` (a bot's run failed),
-  `bot_corrected` (the person wrote to a bot, not answering its question), `bot_asked_twice` (a
-  bot asked much the same question it asked before), `decision_waiting` (a decision waited `hours`,
-  default 4), `meeting_note` (a recorded meeting or call landed in their brain or a team's brain
-  they recorded for), `github_ci_failed` (CI failed on the default branch of a repo one of their
-  bots watches, through the owner's GitHub webhook; a team's webhook tells the team's people). `bot`
-  limits bot events to one bot.
+- `trigger`: `{ "kind": "time", "schedule": <a loop's schedule> }` or `{ "kind": "event", "events": [..], "hours"?: n, "bot"?: id | null }`.
+  Events: `bot_failed` (a bot's run failed), `bot_corrected` (the person wrote to a bot, not
+  answering its question), `bot_asked_twice` (a bot asked much the same question it asked before),
+  `decision_waiting` (a decision waited `hours`, default 4), `meeting_note` (a recorded meeting or
+  call landed in their brain or a team's brain they recorded for), `github_ci_failed` (CI failed on
+  the default branch of a repo one of their bots watches, through the owner's GitHub webhook; a
+  team's webhook tells the team's people). `bot` limits bot events to one bot. (Bot events are for
+  the person's own automations, "tell me when Blog fails"; the bot's learning gets them anyway.)
 - `delivery`: `chat` (a message in Amb's chat and a push, collapse id `automation-<id>`; no push
   22:00–07:00), `chat_silent` (the message, no push), `thread` (bot events: a note in the bot's
   thread).
@@ -742,25 +760,107 @@ event runs per automation a day. A person's automations run one at a time.
 - `PATCH /v1/app/automations/:id` with any of `name`, `enabled`, `trigger`, `instructions`,
   `delivery` → `{ "automation": Automation }`. A new time, or switching one on again, starts from
   now (nothing missed meanwhile runs).
-- `DELETE /v1/app/automations/:id` → 204 (`watch_bots`: 400, switch it off instead).
+- `DELETE /v1/app/automations/:id` → 204.
 - `POST /v1/app/automations/:id/run` → 202 `{ "status": "started" }`: runs now in the background;
   the result shows in `lastRun` and the runs.
 - `GET /v1/app/automations/:id/runs` → `{ "runs": [AutomationRun] }` (newest first, the last 20).
 
 MCP tools for Amb: `list_automations` (with an `id`: its instructions and runs), `create_automation`,
-`update_automation`, `delete_automation`, `run_automation` (waits for the result),
-`propose_bot_change`. Amb creates or changes automations only when the person asks.
+`update_automation`, `delete_automation`, `run_automation` (waits for the result). Amb creates or
+changes automations only when the person asks.
 
-### Improve my bots: what Amb changes, and what it proposes
+## Amb's settings
 
-The reviewer reads the bot's thread, handoffs and files. Code decides what it may do:
+Per person, a sealed record:
 
-- **Applied at once** (a version each, undo in Files, a note in the bot's thread): `memory.md`
-  and `skills/**`.
-- **Only proposed:** the bot's `AGENTS.md`, and its settings (schedule, on/off, isolation,
-  secrets, report, delegate, model, runtime). While the reviewer works on a bot, `write_bot_file`
-  for its `AGENTS.md` is refused (`propose_instead`). `propose_bot_change` makes a decision in the
-  chat with the options `Apply` / `Not now`, the proposed file or settings, and why.
+- `notify`: `"important"` (default: the heartbeat, every half hour 08–21, tells them when a bot
+  failed, a decision waited over two hours, or a command waits for approval; at most six messages
+  a day, none at night) or `"never"`.
+
+`GET /v1/app/ambient/settings` → `{ "notify": "important" }`; `PUT` with `{ "notify" }` → the same.
+MCP tool `ambient_settings` (`{ notify? }`), changed only when the person asks.
+
+## Bot templates
+
+A whole bot to set up in a minute: its `AGENTS.md`, skills, an optional `GOAL.md`, how it works
+on GitHub, the secrets it needs, and two or three questions whose answers fill it in. It learns on
+its own from the start (`learn: "auto"`).
+
+| id | Name | Face | GitHub | Runtime | Schedule (besides GitHub's events) |
+|---|---|---|---|---|---|
+| `review_bot` | Reviewer | round | `all_prs` | Codex when the computer has a Codex sign-in (a second model's eyes), else Claude Code | weekdays 09:00: pull requests nobody reviewed for a day |
+| `builder` | Builder | classic | `own_prs` | Claude Code | weekdays 09:00: labelled issues |
+| `wiki_keeper` | Wiki keeper | tall | `merges`, `own_prs` | Claude Code | Fridays 15:00: the week's merges |
+
+Questions (`id`, kind, default):
+
+- `review_bot`: `repos` (repos, required); `strictness` (choice `blockers_only` | `everything`,
+  default `blockers_only`); `focus` (text, optional: areas to watch closely).
+- `builder`: `repos`; `label` (text, default `ambient`: issues with this label; empty: only what
+  the owner writes to it); `goal` (text, optional: becomes its `GOAL.md`).
+- `wiki_keeper`: `repos`; `where` (choice `both` | `docs` | `wiki`, default `both`); `docs` (text,
+  default `docs/`).
+
+Skills: the Reviewer `review-checklist` (security, data, tests, migrations, performance, errors)
+and `brain-check` (search the brain for decisions and product pages the change touches, quote
+them, ask); the Builder `pr-gate`; the Wiki keeper `what-to-update`. Each needs `GH_TOKEN`; the
+template says which rights in words (no merge rights for any).
+
+- `GET /v1/app/bot-templates` → `{ "templates": [{ "id", "name", "face", "description", "runtime", "github": [..], "secrets": [{ "name", "why" }], "report", "delegate", "schedule", "questions": [{ "id", "label", "kind": "repos"|"choice"|"text", "options"?: [{ "id", "label" }], "default"?, "required", "hint"? }] }] }`
+- `POST /v1/app/bots/from-template` with `{ "template", "answers": { "<question id>": "…" | ["owner/name"] }, "team"?, "computer"?, "name"?, "schedule"? }`
+  → `{ "routine": Routine, "needs": { "secrets": ["GH_TOKEN"], "webhook": true } }`: made in the
+  app it's on at once; `needs` says what's still missing (secrets not stored yet for that owner,
+  and the webhook on its repos). `400 bad_request` for missing or wrong answers,
+  `no_such_template` for an unknown id.
+
+MCP tools: `bot_templates`, `create_bot_from_template` (made paused, as anything an AI app
+creates).
+
+## How bots learn
+
+Built into every bot, always on: nothing to switch on or find.
+
+**Signals** (kept per bot, the last 200, sealed records): a run failed; its owner corrected it (a
+message after a result); it asked the same thing twice; on GitHub, its pull request merged as it
+left it (`merged`), merged after a person pushed to it (`merged_edited`), closed without merging,
+reverted (a merged `Revert "…"` whose body says `Reverts owner/repo#N`), changes requested by a
+person, a person's push to its branch (the branch's first pusher is the bot), marked ready (with
+the hours since it was opened); for a reviewer, each of its comments when the pull request
+closes: followed by a change (a push after it) or a false alarm (no push after it, or the team
+answered "won't fix", "not a bug", "intended"…). Only people from the team count (GitHub's
+`author_association` OWNER, MEMBER or COLLABORATOR), never accounts ending in `[bot]`.
+
+**Lessons.** A few minutes after a negative signal (a failure, a correction, a question twice,
+closed, edited, reverted, changes requested, a person's push, a false alarm), Amb looks at what
+went wrong (its own short session) and improves the bot: with `learn: "auto"` (default) it writes
+`memory.md` and skills itself (a version each, undo in Files, a note in the thread for skills);
+with `"ask"` every improvement is a proposal. `AGENTS.md`, `GOAL.md` and settings are always
+proposals (`propose_bot_change`: a decision with Apply / Not now; while Amb works on a bot, writing
+them is refused). A lesson is one line in `memory.md`: `- <source> (<date>): <lesson>`, merged
+with one that says the same, dropped when no longer true.
+
+**The scorecard** (last 7 and 28 days): pull requests merged and closed, merge rate, merged after
+a person's edits (count and rate), median hours to ready, reverts, changes requested, failed runs,
+corrections; for a reviewer, comments that led to a change vs false alarms (precision).
+
+**Monday mornings** (08:00 Vienna, once a week per bot with something to say): a retro in the
+bot's thread, "This week: …" with its scorecard. And a lesson two to four weeks old after which
+things got worse (merge rate down 20 points or more, edits by people up 20 or more, a revert more,
+or a reviewer's precision down 20 points; at least two pull requests or three comments each side)
+is proposed for undoing: a decision to restore `memory.md` as it was before.
+
+- `GET /v1/app/routines/:id/learning` → `{ "learn": "auto"|"ask", "lessons": [{ "text", "source", "date" }], "scorecard": { "week": Scorecard, "month": Scorecard }, "signals": [{ "at", "kind", "text", "source"?, "hours"?, "count"? }] (newest first, 20), "changes": [{ "path", "version", "by": { "kind", "name" }, "why", "at" }] (memory.md and skills by Amb or the bot, newest 10) }`
+- `PUT /v1/app/routines/:id/learning` with `{ "learn": "auto"|"ask" }` → the same (who may change
+  the bot; everyone who sees it reads).
+- `Scorecard`: `{ "days", "prs", "merged", "closedUnmerged", "mergeRate", "humanEdits", "humanEditRate", "medianHoursToReady", "reverts", "changesRequested", "runsFailed", "corrections", "review": { "useful", "falseAlarms", "precision" } }`
+  (rates and the median null without data).
+
+MCP tool `bot_learning` (`{ id, learn? }`).
+
+Next: a team conventions page in the brain, where lessons that hold for every bot of a team (and
+for people and their AI apps) go instead of into one bot's memory.
+
+### Proposals
 
 A proposal is a decision like a bot's question, with `change` set:
 

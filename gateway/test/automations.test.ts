@@ -1,8 +1,8 @@
 // Automations end to end (docs/bots.md, "Automations"): templates and the app's API, the
-// scheduler (due times, time zones, restarts, once per due time), events (a bot fails, is
-// corrected, asks twice; a meeting note lands; a decision waits), NOTHING as silence, delivery
-// and pushes, "Watch my bots" as the heartbeat's switch, the reviewer (memory and skills applied,
-// AGENTS.md only proposed and applied on yes), and the MCP tools. Amb runs against a fake Anthropic.
+// scheduler (due times, time zones, restarts, once per due time), events (a meeting note lands; a
+// decision waits), NOTHING as silence, delivery and pushes, Amb's "notify" setting as the
+// heartbeat's switch, how a bot learns (memory and skills applied, AGENTS.md only proposed and
+// applied on yes; "ask" proposes everything), and the MCP tools. Amb runs against a fake Anthropic.
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { describeTrigger, dueAt, sameQuestion, type Automations } from "../src/bots/automations.ts";
@@ -39,7 +39,13 @@ const fakeAnthropic: typeof fetch = async (input, init) => {
   if (prompt.includes('automation "Quiet one"')) return say("NOTHING");
   if (prompt.includes('automation "After every meeting"')) return say(`Decisions from the meeting: ship on Friday. (${/“([^”]+)”/.exec(prompt)?.[1] ?? "?"})`);
   if (prompt.includes('automation "Decisions that wait"')) return say("A decision has waited a while.");
-  if (prompt.includes('automation "Improve my bots"')) {
+  if (prompt.includes("improving the bot")) {
+    if (prompt.includes("wants to see each improvement first")) {
+      const id = /\(id ([a-z0-9]+)\)/.exec(prompt)?.[1] ?? "";
+      if (steps.length === 0) return use("write_bot_file", { id, path: "memory.md", content: "- run (2026-11-18): use Node 24.", why: "it failed" });
+      if (steps.length === 1) return use("propose_bot_change", { id, path: "memory.md", content: "- run (2026-11-18): use Node 24.", why: "It failed on Node 20." });
+      return say("Proposed a lesson for its memory.");
+    }
     const id = /\(id ([a-z0-9]+)\)/.exec(prompt)?.[1] ?? "";
     if (steps.length === 0) return use("write_bot_file", { id, path: "memory.md", content: "- The repo needs Node 24.", why: "it failed on Node 20" });
     if (steps.length === 1) return use("write_bot_file", { id, path: "AGENTS.md", content: "Write the post. Use Node 24.", why: "should know" });
@@ -82,7 +88,7 @@ const setNow = (t: number | undefined) => {
 };
 
 beforeAll(async () => {
-  s = await startStack({ push: sender, bots: { users: [], teams: [] }, ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic } });
+  s = await startStack({ push: sender, bots: { users: [], teams: [] }, ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic }, learningAfterMs: 20 });
   lena = await signIn(s, "apple-lena", "Lena Vogel");
   s.config.bots!.users.push(lena.user.uid);
   auto = s.automations;
@@ -126,10 +132,13 @@ describe("when an automation is due", () => {
 });
 
 describe("the app's API", () => {
-  it("lists the templates, and Watch my bots is on from the start", async () => {
+  it("lists the templates for the person only: watching and improving bots aren't automations", async () => {
     const l = await list();
-    expect(l.templates.map((t) => t.id)).toEqual(["morning_brief", "waiting_on_me", "after_meeting", "watch_bots", "weekly_review", "improve_bots", "new_in_brain"]);
-    expect(l.automations).toEqual([expect.objectContaining({ id: "watch_bots", enabled: true, template: "watch_bots" })]);
+    expect(l.templates.map((t) => t.id)).toEqual(["morning_brief", "waiting_on_me", "after_meeting", "weekly_review", "new_in_brain"]);
+    expect(l.automations).toEqual([]);
+    const retired = await call("POST", "/v1/app/automations", { template: "improve_bots" });
+    expect(retired.json.error).toBe("no_such_template");
+    expect(String(retired.json.message)).toContain("every bot learns on its own");
   });
 
   it("creates from a template or from scratch, changes, and deletes", async () => {
@@ -141,9 +150,8 @@ describe("the app's API", () => {
     const quiet = (await call("POST", "/v1/app/automations", { name: "Quiet one", trigger: { kind: "time", schedule: daily }, instructions: "Say nothing.", delivery: "chat" })).json.automation as View;
     const off = (await call("PATCH", `/v1/app/automations/${quiet.id}`, { enabled: false })).json.automation as View;
     expect(off.enabled).toBe(false);
-    expect((await call("DELETE", "/v1/app/automations/watch_bots")).status).toBe(400);
     expect((await call("DELETE", `/v1/app/automations/${quiet.id}`)).status).toBe(204);
-    expect((await list()).automations.map((a) => a.name)).toEqual(["Watch my bots", "Morning brief"]);
+    expect((await list()).automations.map((a) => a.name)).toEqual(["Morning brief"]);
   });
 });
 
@@ -177,13 +185,14 @@ describe("the scheduler", () => {
   });
 });
 
-describe("Watch my bots", () => {
-  it("switches the heartbeat off and on", async () => {
-    await call("PATCH", "/v1/app/automations/watch_bots", { enabled: false });
+describe("Amb's settings", () => {
+  it("say whether Amb tells them about their bots (the heartbeat)", async () => {
+    expect((await call("GET", "/v1/app/ambient/settings")).json).toEqual({ notify: "important" });
+    expect((await call("PUT", "/v1/app/ambient/settings", { notify: "never" })).json).toEqual({ notify: "never" });
     expect(await s.heartbeat.beat(lena.user.uid, { force: true })).toBe("skipped");
-    await call("PATCH", "/v1/app/automations/watch_bots", { enabled: true });
+    await call("PUT", "/v1/app/ambient/settings", { notify: "important" });
     expect(await s.heartbeat.beat(lena.user.uid, { force: true })).not.toBe("skipped");
-    expect((await call("PATCH", "/v1/app/automations/watch_bots", { trigger: { kind: "time", schedule: daily } })).json.error).toBe("bad_request");
+    expect((await call("PUT", "/v1/app/ambient/settings", { notify: "sometimes" })).status).toBe(400);
   });
 });
 
@@ -222,20 +231,17 @@ describe("events", () => {
   });
 });
 
-describe("Improve my bots (the reviewer)", () => {
-  let reviewer: View;
+describe("how a bot learns", () => {
+  const learning = () => s.folders.learning!;
+  const learnOf = async () => (await call("GET", `/v1/app/routines/${bot}/learning`)).json as { learn: string; signals: { kind: string; text: string }[]; lessons: { text: string; source: string | null }[]; changes: { path: string; by: { kind: string } }[] };
 
-  it("improves a failed bot's memory, and only proposes its instructions", async () => {
-    reviewer = (await call("POST", "/v1/app/automations", { template: "improve_bots" })).json.automation as View;
+  it("improves a failed bot's memory on its own, and only proposes its instructions", async () => {
     toolResults.length = 0;
     const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "failed", summary: "npm ci failed: Node 20 is too old." });
-    const runs = await waitFor(async () => {
-      const r = await runsOf(reviewer.id);
-      return r.length ? r : undefined;
-    });
-    // chat_silent: what it did lands in the chat, without a push.
-    expect(runs[0]).toMatchObject({ by: "event", event: "bot failed", result: "sent", text: "Wrote a lesson into its memory and proposed new instructions." });
+    await waitFor(async () => (await learnOf()).signals.some((x) => x.kind === "run_failed") || undefined);
+    await waitFor(async () => toolResults.length >= 3 || undefined);
+    await learning().idle();
     expect(toolResults.map((t) => [t.name, t.isError])).toEqual([
       ["write_bot_file", false],
       ["write_bot_file", true],
@@ -245,6 +251,10 @@ describe("Improve my bots (the reviewer)", () => {
     const memory = (await call("GET", `/v1/app/routines/${bot}/files/content?path=memory.md`)).json;
     expect(memory).toMatchObject({ content: "- The repo needs Node 24.", by: { kind: "amb" } });
     expect((await call("GET", `/v1/app/routines/${bot}/files/content?path=AGENTS.md`)).json.content).toBe("Write the weekly post.");
+    const l = await learnOf();
+    expect(l.learn).toBe("auto");
+    expect(l.lessons).toEqual([{ text: "The repo needs Node 24.", source: null, date: null }]);
+    expect(l.changes[0]).toMatchObject({ path: "memory.md", by: { kind: "amb" } });
   });
 
   it("applies the proposed instructions when they say yes", async () => {
@@ -258,19 +268,33 @@ describe("Improve my bots (the reviewer)", () => {
     expect(r.prompt).toBe("Write the weekly post. Use Node 24.");
   });
 
-  it("listens for corrections and for the same question twice", async () => {
-    const before = (await runsOf(reviewer.id)).length;
+  it("counts corrections and the same question twice", async () => {
     await call("POST", `/v1/app/routines/${bot}/thread`, { text: "No, the post goes out on Fridays." });
-    await waitFor(async () => (await runsOf(reviewer.id)).length > before || undefined);
-    expect((await runsOf(reviewer.id))[0]).toMatchObject({ event: "bot corrected" });
-    // Its run asks the same question twice.
+    await waitFor(async () => (await learnOf()).signals.some((x) => x.kind === "corrected") || undefined);
     const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string };
     await hostCall(start.runToken, "POST", "/v1/bot/ask", { question: "Which repo should I use for the post?" });
-    const n = (await runsOf(reviewer.id)).length;
     await hostCall(start.runToken, "POST", "/v1/bot/ask", { question: "Which repo should I use for this post?" });
-    await waitFor(async () => (await runsOf(reviewer.id)).length > n || undefined);
-    expect((await runsOf(reviewer.id))[0]).toMatchObject({ event: "bot asked twice" });
+    await waitFor(async () => (await learnOf()).signals.some((x) => x.kind === "asked_twice") || undefined);
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "ok" });
+    await learning().idle();
+  });
+
+  it("with learn: ask, proposes even a lesson instead of writing it", async () => {
+    expect((await call("PUT", `/v1/app/routines/${bot}/learning`, { learn: "ask" })).json.learn).toBe("ask");
+    toolResults.length = 0;
+    const before = (await call("GET", `/v1/app/routines/${bot}/files/content?path=memory.md`)).json.version as number;
+    const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "failed", summary: "Node 20 again." });
+    await waitFor(async () => toolResults.length >= 2 || undefined);
+    await learning().idle();
+    expect(toolResults.map((t) => [t.name, t.isError])).toEqual([
+      ["write_bot_file", true],
+      ["propose_bot_change", false],
+    ]);
+    expect((await call("GET", `/v1/app/routines/${bot}/files/content?path=memory.md`)).json.version).toBe(before);
+    expect((await chat()).reverse().find((m) => m.decision?.change?.path === "memory.md")).toBeTruthy();
+    await call("PUT", `/v1/app/routines/${bot}/learning`, { learn: "auto" });
+    for (const d of (await call("GET", "/v1/app/decisions")).json.decisions as { id: string }[]) await call("POST", `/v1/app/decisions/${d.id}`, { option: "Not now" });
   });
 });
 
@@ -279,7 +303,7 @@ describe("over MCP", () => {
     const pat = String((await call("POST", "/v1/app/pats", { label: "Claude" })).json.token);
     const client = await mcpClient(`${s.origin}/mcp`, pat);
     const names = (await client.listTools()).tools.map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["list_automations", "create_automation", "update_automation", "delete_automation", "run_automation", "propose_bot_change"]));
+    expect(names).toEqual(expect.arrayContaining(["list_automations", "create_automation", "update_automation", "delete_automation", "run_automation", "propose_bot_change", "bot_templates", "create_bot_from_template", "bot_learning", "ambient_settings"]));
     expect(text(await client.callTool({ name: "list_automations", arguments: {} }))).toContain("Templates:\n- morning_brief: Morning brief.");
     const made = await client.callTool({ name: "create_automation", arguments: { template: "weekly_review", delivery: "chat_silent" } });
     const id = (made.structuredContent as { automation: { id: string } }).automation.id;

@@ -16,7 +16,10 @@ import { FolderError, type BotFolder } from "./folder.ts";
 import type { BotFiles } from "./files.ts";
 import type { HistorySearch } from "./history.ts";
 import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
-import { GitHubError, type GitHubEvents } from "./github.ts";
+import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
+import { LEARN, type BotLearning } from "./learning.ts";
+import { NOTIFY, type AmbSettings } from "./amb-settings.ts";
+import { FromTemplate, createFromTemplate, templateViews } from "./bot-templates.ts";
 
 function fail(res: Response, err: unknown) {
   if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError) {
@@ -40,6 +43,8 @@ export function botAppRoutes(
     folder?: BotFolder;
     automations?: () => Automations | undefined;
     github?: () => GitHubEvents | undefined;
+    learning?: () => BotLearning | undefined;
+    ambSettings?: () => AmbSettings | undefined;
     directory: Directory;
     auth: RequestHandler;
     json: RequestHandler;
@@ -239,7 +244,7 @@ export function botAppRoutes(
     if (!gh) return notEnabled(res);
     try {
       const f = await d.routines.folderOf(await actor(res), id(req), false);
-      res.json({ repos: await gh.watch(f.owner, f.routineId), branchPrefix: await gh.prefixOf(f.owner, f.routineId) });
+      res.json({ ...(await gh.watchOf(f.owner, f.routineId)), branchPrefix: await gh.prefixOf(f.owner, f.routineId) });
     } catch (err) {
       fail(res, err);
     }
@@ -248,15 +253,90 @@ export function botAppRoutes(
   r.put("/v1/app/routines/:id/github", d.auth, d.json, async (req, res) => {
     const gh = d.github?.();
     if (!gh) return notEnabled(res);
-    const body = z.object({ repos: z.array(z.string().max(200)).max(20) }).safeParse(req.body);
+    const body = z.object({ repos: z.array(z.string().max(200)).max(20), on: z.array(z.enum(WATCH_MODES)).min(1).max(3).optional() }).safeParse(req.body);
     if (!body.success) {
-      res.status(400).json({ error: "bad_request", message: "Send the repos as a list of owner/name." });
+      res.status(400).json({ error: "bad_request", message: `Send the repos as a list of owner/name, and optionally on: ${WATCH_MODES.join(", ")}.` });
       return;
     }
     try {
       const f = await d.routines.folderOf(await actor(res), id(req), true);
-      const repos = await gh.setWatch(f.owner, f.routineId, body.data.repos);
-      res.json({ repos, branchPrefix: await gh.prefixOf(f.owner, f.routineId) });
+      await gh.setWatch(f.owner, f.routineId, body.data.repos, body.data.on);
+      res.json({ ...(await gh.watchOf(f.owner, f.routineId)), branchPrefix: await gh.prefixOf(f.owner, f.routineId) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // ---- how a bot learns (docs/bots.md, "How bots learn") ----
+
+  r.get("/v1/app/routines/:id/learning", d.auth, async (req, res) => {
+    const l = d.learning?.();
+    if (!l) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), false);
+      res.json(await l.view(f.owner, f.routineId));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.put("/v1/app/routines/:id/learning", d.auth, d.json, async (req, res) => {
+    const l = d.learning?.();
+    if (!l) return notEnabled(res);
+    const body = z.object({ learn: z.enum(LEARN) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: `Send learn: ${LEARN.join(" or ")}.` });
+      return;
+    }
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      await l.setLearn(f.owner, f.routineId, body.data.learn);
+      res.json(await l.view(f.owner, f.routineId));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // ---- Amb's settings (docs/bots.md, "Amb's settings") ----
+
+  r.get("/v1/app/ambient/settings", d.auth, async (_req, res) => {
+    const a = await actor(res);
+    const st = d.ambSettings?.();
+    if (!d.routines.botsEnabled(a) || !st) return notEnabled(res);
+    res.json(await st.get(a.uid));
+  });
+
+  r.put("/v1/app/ambient/settings", d.auth, d.json, async (req, res) => {
+    const a = await actor(res);
+    const st = d.ambSettings?.();
+    if (!d.routines.botsEnabled(a) || !st) return notEnabled(res);
+    const body = z.object({ notify: z.enum(NOTIFY).optional() }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: `Send notify: ${NOTIFY.join(" or ")}.` });
+      return;
+    }
+    res.json(await st.set(a.uid, body.data));
+  });
+
+  // ---- bot templates (docs/bots.md, "Bot templates") ----
+
+  r.get("/v1/app/bot-templates", d.auth, async (_req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    res.json({ templates: templateViews() });
+  });
+
+  r.post("/v1/app/bots/from-template", d.auth, d.json, async (req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a) || !d.folder) return notEnabled(res);
+    const body = FromTemplate.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Pick a template and answer its questions.", issues: body.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
+      return;
+    }
+    try {
+      const name = (await d.directory.user(a.uid))?.name ?? null;
+      res.json(await createFromTemplate({ routines: d.routines, folder: d.folder, github: d.github?.(), learning: d.learning?.() }, a, body.data, { source: "app", enabled: true, by: { kind: "user", name } }));
     } catch (err) {
       fail(res, err);
     }

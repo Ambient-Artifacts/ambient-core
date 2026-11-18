@@ -12,6 +12,7 @@ import type { Folders } from "../bots/files.ts";
 import { FolderError, type Author } from "../bots/folder.ts";
 import { GitHubError } from "../bots/github.ts";
 import { historyLines } from "../bots/history.ts";
+import { FromTemplate, createFromTemplate, templateViews } from "../bots/bot-templates.ts";
 import { AutomationInput, EVENT_KINDS, ProposedSettings, TEMPLATES, type AutomationView } from "../bots/automations.ts";
 import type { Principal } from "../auth/bearer.ts";
 import { RoutineError, RoutineInput, RoutinePatch, SecretName, SecretValue, type Actor, type Computer, type Routine, type RoutineService, type Run } from "../routines/service.ts";
@@ -519,6 +520,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
 
   if (hasBots && folders) registerFolderTools(server, principal, actor, folders, source, guard);
   if (hasBots && folders?.github) registerGitHubTools(server, principal, actor, routines, folders.github, guard);
+  if (hasBots && folders) registerLearningTools(server, principal, actor, routines, folders, source, guard);
 
   if (!hasBots || !bots) return;
 
@@ -780,7 +782,7 @@ function registerAutomationTools(server: McpServer, actor: Actor, auto: import("
     "delete_automation",
     {
       title: "Delete an automation",
-      description: "Delete one of the user's automations, when they ask. Watch my bots can only be switched off (update_automation, enabled: false).",
+      description: "Delete one of the user's automations, when they ask.",
       inputSchema: { id: z.string().max(40) },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
@@ -874,13 +876,22 @@ function registerGitHubTools(
       title: "Which GitHub repos a bot works on",
       description:
         "Set the GitHub repos a bot works on through pull requests (owner/name; an empty list stops it). Its pull requests are then known by their branch (ambient/<bot>/…), GitHub's events on them start its runs, and it follows the PR gate: drafts first, ready for review only when every review comment is fixed or answered and CI is green. Only when the user asked.",
-      inputSchema: { id: z.string().max(64), repos: z.array(z.string().max(200)).max(20) },
+      inputSchema: {
+        id: z.string().max(64),
+        repos: z.array(z.string().max(200)).max(20),
+        on: z
+          .array(z.enum(["own_prs", "all_prs", "merges"]))
+          .min(1)
+          .max(3)
+          .optional()
+          .describe("How it works on them: own_prs (its own pull requests, the PR gate; the default), all_prs (reviews every pull request), merges (started by what's merged into the default branch). Left out: as before."),
+      },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id, repos }) =>
+    async ({ id, repos, on }) =>
       guard(async () => {
         const f = await routines.folderOf(actor, id, true);
-        const set = await github.setWatch(f.owner, f.routineId, repos);
+        const set = await github.setWatch(f.owner, f.routineId, repos, on);
         const run = await github.forRun(f.owner, f.routineId);
         return result(
           set.length
@@ -890,4 +901,111 @@ function registerGitHubTools(
         );
       }),
   );
+}
+
+// ---- bot templates, how bots learn, Amb's settings (docs/bots.md) ----
+
+function registerLearningTools(
+  server: McpServer,
+  principal: Principal,
+  actor: Actor,
+  routines: RoutineService,
+  folders: Folders,
+  source: string,
+  guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>,
+) {
+  const by = { kind: "amb" as const, name: principal.clientId?.startsWith("ambient") ? "Ambient" : source };
+
+  server.registerTool(
+    "bot_templates",
+    {
+      title: "Bot templates",
+      description: "The bots that can be set up in a minute (Reviewer, Builder, Wiki keeper): what each does, what it needs (a GitHub token), and the questions to ask the user before create_bot_from_template.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () =>
+      guard(async () => {
+        const list = templateViews();
+        return result(
+          list
+            .map((t) => `- ${t.id}: ${t.name}. ${t.description} Needs: ${t.secrets.map((x) => x.name).join(", ")}. Ask: ${t.questions.map((q) => `${q.id} (${q.label}${q.options ? ` ${q.options.map((o) => o.id).join("|")}` : ""}${q.default ? `, default ${q.default}` : ""}${q.required ? "" : ", optional"})`).join("; ")}.`)
+            .join("\n"),
+          { templates: list },
+        );
+      }),
+  );
+
+  server.registerTool(
+    "create_bot_from_template",
+    {
+      title: "Set up a bot from a template",
+      description:
+        "Set up a bot from a template (bot_templates lists them and their questions): its instructions, skills, goal and how it works on GitHub, from the user's answers. Only when the user asked for this bot and answered the questions. It's created paused; the user turns it on in the app. Say what it still needs (a GitHub token stored in the app, the webhook on each repo: github_webhook).",
+      inputSchema: {
+        template: z.string().max(40),
+        answers: z.record(z.string(), z.union([z.string().max(2_000), z.array(z.string().max(200)).max(10)])).describe("The answers by question id; repos as a list of owner/name."),
+        team: z.string().max(80).optional().describe("A team's slug: the bot is the team's and runs on its server."),
+        computer: z.string().max(80).optional(),
+        name: z.string().max(80).optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async (input) =>
+      guard(async () => {
+        const out = await createFromTemplate({ routines, folder: folders.folder, github: folders.github, learning: folders.learning }, actor, FromTemplate.parse(input), { source, enabled: false, by });
+        const needs = [out.needs.secrets.length ? `store ${out.needs.secrets.join(", ")} in the Ambient app (Settings → Loops → Secrets)` : "", out.needs.webhook ? "add the webhook on each repo (github_webhook)" : "", "turn it on in the app"].filter(Boolean);
+        return result(`Set up "${out.routine.name}" (id ${out.routine.id}), paused. Still to do: ${needs.join("; ")}.`, { routine: out.routine, needs: out.needs });
+      }),
+  );
+
+  if (folders.learning) {
+    const learning = folders.learning;
+    server.registerTool(
+      "bot_learning",
+      {
+        title: "How a bot is learning",
+        description:
+          "A bot's learning: its lessons (from its memory.md, with source and date), its scorecard for the last 7 and 28 days (merge rate, pull requests a person had to edit, time to ready, reverts; a reviewer's comments that led to a change vs false alarms), what happened recently, and whether it improves itself (learn: auto) or asks first (ask). learn changes that, only when the user asked.",
+        inputSchema: { id: z.string().max(64), learn: z.enum(["auto", "ask"]).optional() },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ id, learn }) =>
+        guard(async () => {
+          const f = await routines.folderOf(actor, id, learn !== undefined);
+          if (learn) await learning.setLearn(f.owner, f.routineId, learn);
+          const v = await learning.view(f.owner, f.routineId);
+          const pct = (x: number | null) => (x === null ? "–" : `${Math.round(x * 100)}%`);
+          const w = v.scorecard.week;
+          const m = v.scorecard.month;
+          return result(
+            [
+              `"${f.name}" ${v.learn === "auto" ? "improves itself (memory and skills); instructions, goal and settings come to the user as proposals" : "asks before every improvement"}.`,
+              `Last 7 days: ${w.merged}/${w.prs} PRs merged (${pct(w.mergeRate)}), ${w.humanEdits} after a person's edits, ${w.reverts} reverted, review comments ${w.review.useful} useful / ${w.review.falseAlarms} false alarms. Last 28 days: ${m.merged}/${m.prs} merged (${pct(m.mergeRate)}), ${m.humanEdits} edited, ${m.reverts} reverted.`,
+              `Lessons:\n${v.lessons.map((l) => `- ${l.source ? `${l.source} (${l.date}): ` : ""}${l.text}`).join("\n") || "(none yet)"}`,
+              `Recently:\n${v.signals.slice(0, 8).map((s) => `- ${new Date(s.at).toISOString().slice(0, 10)} ${s.kind.replace(/_/g, " ")}: ${s.text}`).join("\n") || "(nothing)"}`,
+            ].join("\n\n"),
+            v,
+          );
+        }),
+    );
+  }
+
+  if (principal.personal && folders.ambSettings) {
+    const settings = folders.ambSettings;
+    server.registerTool(
+      "ambient_settings",
+      {
+        title: "Ambient's settings",
+        description: 'Whether Ambient tells the user when one of their bots needs them (notify: "important": a failed run, a decision waiting long, an approval; "never"). Change it only when they ask.',
+        inputSchema: { notify: z.enum(["important", "never"]).optional() },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ notify }) =>
+        guard(async () => {
+          const v = notify ? await settings.set(actor.uid, { notify }) : await settings.get(actor.uid);
+          return result(v.notify === "never" ? "Ambient doesn't tell them about their bots on its own." : "Ambient tells them when a bot needs them (failed runs, decisions waiting, approvals).", { settings: v });
+        }),
+    );
+  }
 }

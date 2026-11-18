@@ -365,7 +365,7 @@ export class RoutineService {
   /** A bot's run failed: automations may listen (docs/bots.md, "Automations"). Set once they're up. */
   onBotEvent?: (e: AutomationEvent) => void;
   /** A bot that watches GitHub repos: its branch prefix and repos, for the PR gate in its instructions (app.ts sets it). */
-  githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[] } | null>;
+  githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[]; on?: import("../bots/github.ts").WatchMode[] } | null>;
 
   constructor(
     private d: {
