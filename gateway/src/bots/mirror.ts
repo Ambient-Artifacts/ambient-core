@@ -211,9 +211,10 @@ export class BotMirror {
     const slugs = slugsOf(out.bots);
     const bots: MirroredBot[] = [];
     for (const b of out.bots) {
-      const [agents, goal, memory, skills] = await Promise.all([
+      const [agents, goal, soul, memory, skills] = await Promise.all([
         this.d.keys.open(owner, "routine:prompt", b.promptIv, b.promptCt).catch(() => ""),
         this.d.folder.goal(owner, b.id),
+        this.d.folder.soul(owner, b.id),
         this.d.folder.memory(owner, b.id),
         this.d.folder.skills(owner, b.id),
       ]);
@@ -241,6 +242,8 @@ export class BotMirror {
           { path: "AGENTS.md", content: agents.endsWith("\n") ? agents : `${agents}\n` },
           // The outcome it owns, when it has one (docs/bots.md, "Outcomes, not tasks").
           ...(goal.trim() ? [{ path: "GOAL.md", content: goal.endsWith("\n") ? goal : `${goal}\n` }] : []),
+          // How it talks, when it has a SOUL.md (docs/bots.md, "One folder for every bot").
+          ...(soul.trim() ? [{ path: "SOUL.md", content: soul.endsWith("\n") ? soul : `${soul}\n` }] : []),
           { path: "memory.md", content: memory },
           { path: "bot.json", content: `${JSON.stringify(settings, null, 2)}\n` },
           ...skills.map((s) => ({ path: `skills/${s.path}`, content: s.content })),

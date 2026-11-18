@@ -605,36 +605,61 @@ function registerFolderTools(
 
   if (principal.personal) {
     server.registerTool(
-      "amb_memory",
+      "read_amb_file",
       {
-        title: "Ambient's memory of the user",
-        description: "What Ambient keeps about the user beyond the brain: their preferences, standing instructions, decisions from the chat. Ambient's own notes (memory.md), with its version.",
-        inputSchema: {},
+        title: "Read one of Ambient's own files",
+        description:
+          "Ambient's own folder for the user, like a bot's: SOUL.md (how Ambient talks and behaves: tone, length, language, style), AGENTS.md (the user's additions to how Ambient works), memory.md (what Ambient keeps about the user beyond the brain: preferences, standing instructions, decisions from the chat), skills/<name>/<file>. A file as it is now, an earlier version, or history: true for its versions (who, why, when). Without a path: the list of files.",
+        inputSchema: {
+          path: z.string().max(200).optional().describe("SOUL.md, AGENTS.md, memory.md or skills/<name>/<file>; leave out for the list."),
+          version: z.number().int().min(1).optional(),
+          history: z.boolean().optional(),
+        },
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async () =>
+      async ({ path, version, history }) =>
         guard(async () => {
-          const m = await folders.folder.ambMemory(actor.uid);
-          return result(m.content.trim() ? `${m.content}\n\n(version ${m.version})` : "Empty so far.", { memory: m });
+          if (!path) {
+            const files = await folders.folder.ambFiles(actor.uid);
+            return result(files.map((f) => `- ${f.path} (${f.size} bytes, version ${f.version})`).join("\n"), { files });
+          }
+          if (history) {
+            const versions = await folders.folder.ambFileHistory(actor.uid, path);
+            return result(versions.map((v) => `- version ${v.version}, ${new Date(v.updatedAt).toISOString().slice(0, 16).replace("T", " ")} UTC, by ${v.by.name ?? v.by.kind}${v.deleted ? " (deleted)" : ""}${v.why ? `: ${v.why}` : ""}`).join("\n") || "No versions yet.", { versions });
+          }
+          const f = await folders.folder.ambRead(actor.uid, path, version);
+          return result(f.content.trim() ? `${f.path} (version ${f.version}):\n\n${f.content}` : `${f.path}: empty so far.`, { file: f });
         }),
     );
 
     server.registerTool(
-      "update_amb_memory",
+      "write_amb_file",
       {
-        title: "Update Ambient's memory of the user",
+        title: "Change one of Ambient's own files",
         description:
-          "Replace Ambient's memory of the user (memory.md, up to 16 KB) with a new version: send the whole file. Keep lasting things only (preferences, standing instructions, decisions made in the chat, facts not in the brain), as short lines; merge instead of appending duplicates, drop what's no longer true. Never secrets. Every version is kept; the user can undo in the app.",
+          "Change one of Ambient's own files: send the whole file. SOUL.md for how Ambient talks (when the user asks for shorter, less formal, another language); memory.md for lasting things about the user (short lines; merge, don't append duplicates; drop what's no longer true; up to 16 KB); AGENTS.md only when the user asked for a change in how Ambient works; a skill for know-how Ambient uses again. delete: true removes a skill file; restore_version brings an earlier version back. Never secrets. Every version is kept; the user can undo in the app.",
         inputSchema: {
-          content: z.string().max(20_000),
+          path: z.string().max(200).describe("SOUL.md, AGENTS.md, memory.md or skills/<name>/<file>."),
+          content: z.string().max(70_000).optional(),
+          delete: z.boolean().optional(),
+          restore_version: z.number().int().min(1).optional(),
           why: z.string().min(1).max(300).describe("One short sentence: what changed and why."),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       },
-      async ({ content, why }) =>
+      async (a) =>
         guard(async () => {
-          const m = await folders.folder.writeAmbMemory(actor.uid, content, by, why);
-          return result(`Kept (version ${m.version}).`, { memory: { version: m.version, size: m.size } });
+          if (a.delete) {
+            await folders.folder.ambRemove(actor.uid, a.path, by, a.why);
+            return result(`Deleted ${a.path}.`);
+          }
+          if (a.restore_version !== undefined) {
+            const f = await folders.folder.ambRevert(actor.uid, a.path, a.restore_version, by);
+            return result(`Restored ${a.path} to version ${a.restore_version} (now version ${f.version}).`, { file: { path: f.path, version: f.version } });
+          }
+          if (a.content === undefined) return error("Send the file's content, delete: true, or restore_version.");
+          const f = await folders.folder.ambWrite(actor.uid, a.path, a.content, by, a.why);
+          return result(`Kept ${f.path} (version ${f.version}).`, { file: { path: f.path, version: f.version, size: f.size } });
         }),
     );
   }
@@ -646,7 +671,7 @@ function registerFolderTools(
     {
       title: "A bot's files and last runs",
       description:
-        "A bot's folder: AGENTS.md (what it does: its prompt), GOAL.md (the outcome it owns, with its metric), memory.md (what it learned; it updates it itself), skills/<name>/SKILL.md (know-how), with who changed each last; and its last three handoffs (what each run did and left open).",
+        "A bot's folder: SOUL.md (how it talks and behaves), AGENTS.md (what it does: its prompt), GOAL.md (the outcome it owns, with its metric), memory.md (what it learned; it updates it itself), skills/<name>/SKILL.md (know-how), with who changed each last; and its last three handoffs (what each run did and left open).",
       inputSchema: { id: z.string().max(64) },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -674,7 +699,7 @@ function registerFolderTools(
       description: "One of a bot's files as it is now, or an earlier version; history: true lists its versions (who, why, when) instead.",
       inputSchema: {
         id: z.string().max(64),
-        path: z.string().max(200).describe("AGENTS.md, GOAL.md, memory.md, or skills/<name>/<file>."),
+        path: z.string().max(200).describe("SOUL.md, AGENTS.md, GOAL.md, memory.md, or skills/<name>/<file>."),
         version: z.number().int().min(1).optional(),
         history: z.boolean().optional(),
       },
@@ -696,7 +721,7 @@ function registerFolderTools(
     {
       title: "Change a bot's file",
       description:
-        "Change one of a bot's files: a new version of memory.md (what it should remember), a skill (skills/<name>/SKILL.md: when to use it, then how), GOAL.md (the outcome it owns: only what the user agreed to), or AGENTS.md (its instructions; only when the user asked, or it's plainly broken). Send the whole file. delete: true removes a skill file; restore_version brings an earlier version back. Every change is a version the user can undo in the app, and changes to AGENTS.md or skills are posted in the bot's thread with your why. Never secrets.",
+        "Change one of a bot's files: a new version of memory.md (what it should remember), a skill (skills/<name>/SKILL.md: when to use it, then how), GOAL.md (the outcome it owns: only what the user agreed to), SOUL.md (how it talks and behaves: when the user asks for another tone), or AGENTS.md (its instructions; only when the user asked, or it's plainly broken). Send the whole file. delete: true removes a skill file; restore_version brings an earlier version back. Every change is a version the user can undo in the app, and changes to anything but memory.md are posted in the bot's thread with your why. Never secrets.",
       inputSchema: {
         id: z.string().max(64),
         path: z.string().max(200),

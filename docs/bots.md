@@ -427,6 +427,45 @@ each person with bots: runs that failed, decisions waiting longer than two hours
 Only when that isn't empty does Ambient get a turn (an internal one, see "Ambient on a computer"); it writes a short message into the chat (with a
 push) or stays silent. Nothing twice, at most 6 such messages a day, none at night.
 
+## One folder for every bot, Amb included
+
+Every bot has the same folder, and so has Amb, the master agent (one per person):
+
+| File | What goes in it | Bots | Amb |
+|---|---|---|---|
+| `SOUL.md` | How it talks and behaves: tone, length, language, style | ✓ | ✓ |
+| `AGENTS.md` | What it does and how | ✓ (its prompt) | ✓ (the person's additions; Amb's base rules stay in code and win) |
+| `GOAL.md` | What it should achieve | ✓ | – |
+| `memory.md` | What it learned: facts, corrections, lessons, with their source | ✓ | ✓ |
+| `skills/<name>/…` | Know-how it uses again | ✓ | ✓ |
+
+Where things go: how it talks goes in `SOUL.md`, what it does in `AGENTS.md`, what it should
+achieve in `GOAL.md`, what it learned in `memory.md`. "Text me short" is a line in Amb's
+`SOUL.md`, not in its memory; a bot's tone goes in that bot's `SOUL.md`.
+
+- A bot's `SOUL.md` is in its system text every run (it stays the same between runs, so the prompt
+  cache keeps it). The templates start with one each. While Amb improves a bot on its own, `SOUL.md`
+  is a proposal only, like `AGENTS.md` and `GOAL.md`. The git mirror writes it too.
+- Amb's `SOUL.md`, `AGENTS.md` and `memory.md` are in its instructions (each only when it has text);
+  its skills are written into the person's session folder on the computer as Claude Code project
+  skills (`<folder>/.claude/skills/`, runner 0.9.3; the ones Ambient put there last time are
+  replaced, ones made there by hand stay).
+
+Amb's folder in the app, with the same shapes as a bot's file endpoints (only the person themself):
+
+- `GET /v1/app/ambient/files` → `{ "files": [FileInfo] }` (`SOUL.md`, `AGENTS.md`, `memory.md`
+  always, then skills).
+- `GET /v1/app/ambient/files/content?path=…[&version=n]` → FileView; `PUT …?path=…` with
+  `{ "content", "why"? }` → FileView; `DELETE …?path=…` → 204 (skills only; the others are only
+  emptied: `bad_path`).
+- `GET /v1/app/ambient/files/history?path=…` → `{ "versions": [...] }`;
+  `POST /v1/app/ambient/files/revert` with `{ "path", "version" }` → FileView.
+- `GET /v1/app/ambient/learning` → `{ "lessons": [{ "text", "source", "date" }], "changes": [{ "path",
+  "version", "by": { "kind", "name" }, "why", "at" }] }`: the lessons in its memory.md and the
+  latest versions of its files.
+- Limits: `SOUL.md` 8 KB, `AGENTS.md` 20,000 characters, `memory.md` 16 KB, skills 64 KB a file;
+  60 files and 512 KB in all.
+
 ## A bot's folder, its memory and its handoffs
 
 A bot is a folder of files that Ambient keeps for its owner (a person, or a team), sealed like
@@ -437,6 +476,7 @@ never stops a bot.
 
 | File | What | Who writes it |
 |---|---|---|
+| `SOUL.md` | How it talks and behaves: tone, length, language, style (up to 8 KB; in its system text every run) | the owner; Amb when the owner asked for another tone |
 | `AGENTS.md` | What the bot does and how: its instructions (a loop's prompt, up to 20,000 characters) | the owner; Amb |
 | `GOAL.md` | The outcome it owns, if any: metric, target, by when, limits (see "Outcomes, not tasks") | the owner; Amb |
 | `skills/<name>/SKILL.md` (and other text files in `skills/<name>/`) | Know-how it uses when it fits, as Claude Code skills | the owner; Amb |
@@ -641,7 +681,7 @@ The gateway opens and searches the messages; nothing is stored unsealed.
 Amb, the master agent, has a `memory.md` of its own per person (16 KB, versioned the same way):
 what it knows about them that isn't in the brain (how they like things, what they decided in the
 chat, standing instructions). It's in Amb's instructions whenever a session starts, and Amb keeps
-it with the `update_amb_memory` tool.
+it with the `write_amb_file` tool (one of its files; see "One folder for every bot, Amb included").
 
 Code makes sure it's kept up: every night (03:00 Vienna) Amb gets a short background turn to go
 through the day's chat and threads and update it, and when a chat is started anew, Amb first gets
@@ -650,9 +690,11 @@ a turn to save what's worth keeping from the old one.
 - `GET /v1/app/ambient/memory[?version=n]` → the file (as above; `by.name` is the person's name
   for their own edits); `PUT` with `{ "content", "why"? }`; `GET /v1/app/ambient/memory/history`;
   `POST /v1/app/ambient/memory/revert` with `{ "version" }`. Only the person reads and changes it.
+  These stay for older apps; they're the same file as `memory.md` in `/v1/app/ambient/files`.
 
-MCP tools (for Amb, and AI apps with bots switched on): `search_history`, `amb_memory`,
-`update_amb_memory`, `bot_files` (files and the last three handoffs), `read_bot_file` (a version,
+MCP tools (for Amb, and AI apps with bots switched on): `search_history`, `read_amb_file`
+(one of Amb's files, a version, `history: true`, or the list without a path), `write_amb_file`
+(content, `delete` for a skill, or `restore_version`, always with a `why`), `bot_files` (files and the last three handoffs), `read_bot_file` (a version,
 or `history: true`), `write_bot_file` (content, `delete`, or `restore_version`, always with a
 `why`). A change through them is by `amb` (`by.name` "Ambient" from Amb's chat, otherwise the AI
 app). A version that deleted a file has empty content and `deleted: true`; restoring the one before

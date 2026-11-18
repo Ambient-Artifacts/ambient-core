@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.9.2";
+const VERSION = "0.9.3";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -525,6 +525,37 @@ async function ambientService() {
     own(dir);
     return dir;
   };
+  /**
+   * Amb's skills (docs/bots.md, "One folder for every bot, Amb included") as Claude Code project
+   * skills in the person's folder: <dir>/.claude/skills/<name>/…. The ones Ambient put there last
+   * time go first (.ambient-managed lists them); skills made there by hand stay. Nothing is
+   * touched when the job carries none (an older gateway, or no skills).
+   */
+  const placeSkills = (dir, skills) => {
+    if (!Array.isArray(skills)) return;
+    const root = join(dir, ".claude", "skills");
+    mkdirSync(root, { recursive: true });
+    own(join(dir, ".claude"));
+    own(root);
+    const managed = join(root, ".ambient-managed");
+    if (existsSync(managed)) {
+      for (const name of readFileSync(managed, "utf8").split("\n")) {
+        if (/^[a-z0-9][a-z0-9-]{0,47}$/.test(name)) rmSync(join(root, name), { recursive: true, force: true });
+      }
+    }
+    const names = new Set();
+    for (const sk of skills) {
+      const path = skillPath(sk?.path);
+      if (!path || typeof sk.content !== "string") continue;
+      const file = join(root, path);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, sk.content, { mode: 0o644 });
+      names.add(path.split("/")[0]);
+    }
+    writeFileSync(managed, [...names].join("\n"), { mode: 0o644 });
+    if (as) for (const n of names) spawnSync(sys("chown"), ["-R", `${as.uid}:${as.gid}`, join(root, n)]);
+    own(managed);
+  };
   /** Ambient's tools for the person: an MCP config with their token, readable by the session only. */
   const mcpConfig = (name, token) => {
     const file = join(confDir, `${name}.json`);
@@ -599,7 +630,10 @@ async function ambientService() {
       p.token = job.token;
       stop();
     }
-    if (!p.child) start(uid, p, job.instructions);
+    if (!p.child) {
+      placeSkills(folderOf(uid), job.skills);
+      start(uid, p, job.instructions);
+    }
     const history = job.fresh && job.history?.length ? `Earlier in this chat:\n${job.history.map((t) => `${t.role === "user" ? job.name : "You"}: ${t.text}`).join("\n")}\n\n` : "";
     // Files that came with the message go in the person's folder here; Claude Code reads them.
     const saved = [];
@@ -635,6 +669,7 @@ async function ambientService() {
    */
   const internal = async (job) => {
     const dir = folderOf(job.uid);
+    placeSkills(dir, job.skills);
     const args = ["-p", "--output-format", "stream-json", "--verbose", ...sessionArgs(mcpConfig(`${safe(job.uid)}-internal`, job.token), job.instructions)];
     const proc = claudeProc(args, dir);
     let result = null;
