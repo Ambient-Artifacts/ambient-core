@@ -523,7 +523,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
   }
 
   if (hasBots && folders) registerFolderTools(server, principal, actor, folders, source, guard);
-  if (hasBots && folders?.github) registerGitHubTools(server, principal, actor, routines, folders.github, guard);
+  if (hasBots && folders?.github) registerGitHubTools(server, principal, actor, routines, folders.github, guard, folders.githubApp);
   if (hasBots && folders) registerLearningTools(server, principal, actor, routines, folders, source, guard);
 
   if (!hasBots || !bots) return;
@@ -879,6 +879,7 @@ function registerGitHubTools(
   routines: RoutineService,
   github: import("../bots/github.ts").GitHubEvents,
   guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>,
+  app?: import("../bots/github-app.ts").GitHubApp,
 ) {
   const teamArg: Record<string, z.ZodTypeAny> = principal.teams.length ? { team: z.string().max(80).optional().describe("A team's slug, for the team's webhook; leave out for the user's own.") } : {};
 
@@ -894,6 +895,14 @@ function registerGitHubTools(
     async (args: Record<string, unknown>) =>
       guard(async () => {
         const a = { team: typeof args.team === "string" ? args.team : undefined };
+        // With Ambient's GitHub App there's nothing to set up by hand: Connect GitHub instead.
+        if (app) {
+          routines.botOwner(actor, a.team ?? null);
+          return result(
+            "No webhook to set up by hand here: Ambient has a GitHub App. Use connect_github and give the user the link (or they tap Connect GitHub in the app); GitHub's events then reach the bots on the repos they pick, and bots get their GitHub access from it too.",
+            { app: app.slug },
+          );
+        }
         const h = await github.hook(routines.botOwner(actor, a.team ?? null));
         const link = `ambient://github-hook${a.team ? `?team=${encodeURIComponent(a.team)}` : ""}`;
         return result(
@@ -902,6 +911,28 @@ function registerGitHubTools(
         );
       }),
   );
+
+  if (app) {
+    server.registerTool(
+      "connect_github",
+      {
+        title: "Connect GitHub",
+        description:
+          "The link to install Ambient's GitHub App on the user's (or a team's) GitHub repos: GitHub's events then wake the bots working on them, and bots get a GitHub token for just their repos. Give it to the user as a Markdown link, [Connect GitHub](<url>); it works for 30 minutes, once. Which repos are connected: the result lists them.",
+        inputSchema: teamArg,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args: Record<string, unknown>) =>
+        guard(async () => {
+          const team = typeof args.team === "string" ? args.team : null;
+          const owner = routines.botOwner(actor, team);
+          const url = app.connectUrl(owner, actor.uid);
+          const list = await app.installations(owner);
+          const now = list.length ? ` Connected now: ${list.map((i) => (i.repos === "all" ? `all of ${i.account}` : i.repos.join(", "))).join("; ")}.` : " Nothing is connected yet.";
+          return result(`[Connect GitHub](${url})${now}`, { url, installations: list });
+        }),
+    );
+  }
 
   server.registerTool(
     "watch_github",
@@ -986,7 +1017,7 @@ function registerLearningTools(
     },
     async (input) =>
       guard(async () => {
-        const out = await createFromTemplate({ routines, folder: folders.folder, github: folders.github, learning: folders.learning }, actor, FromTemplate.parse(input), { source, enabled: false, by });
+        const out = await createFromTemplate({ routines, folder: folders.folder, github: folders.github, learning: folders.learning, githubApp: folders.githubApp }, actor, FromTemplate.parse(input), { source, enabled: false, by });
         const needs = [out.needs.secrets.length ? `store ${out.needs.secrets.join(", ")} in the Ambient app (Settings → Loops → Secrets)` : "", out.needs.webhook ? "add the webhook on each repo (github_webhook)" : "", "turn it on in the app"].filter(Boolean);
         return result(`Set up "${out.routine.name}" (id ${out.routine.id}), paused. Still to do: ${needs.join("; ")}.`, { routine: out.routine, needs: out.needs });
       }),

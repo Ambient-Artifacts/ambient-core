@@ -2,6 +2,7 @@
 // for bots; automations are for the person. A template is a bot's folder (AGENTS.md, skills, an
 // optional GOAL.md), how it works on GitHub, the secrets it needs, and two or three questions;
 // the answers fill it in. The bot it makes learns on its own from the start (learning.ts).
+import type { Owner } from "../routines/keys.ts";
 import { z } from "zod";
 import type { BotColor, BotFace, BotInput, BotWear, RoutineSchedule } from "@brain/spec";
 import { RoutineError, type Actor, type Routine, type RoutineService } from "../routines/service.ts";
@@ -284,7 +285,7 @@ export function templateViews() {
  * works on GitHub. `enabled`: an app-made bot may start right away; one an AI app made waits.
  */
 export async function createFromTemplate(
-  d: { routines: RoutineService; folder: BotFolder; github?: GitHubEvents; learning?: BotLearning },
+  d: { routines: RoutineService; folder: BotFolder; github?: GitHubEvents; learning?: BotLearning; githubApp?: { covers(owner: Owner, repos: string[]): Promise<boolean> } },
   actor: Actor,
   input: FromTemplate,
   o: { source: string; enabled: boolean; by: Author },
@@ -332,5 +333,8 @@ export async function createFromTemplate(
   if (d.github && repoList.length) await d.github.setWatch(f.owner, f.routineId, repoList, t.github);
   if (d.learning) await d.learning.setLearn(f.owner, f.routineId, "auto");
   const have = new Set((await d.routines.secrets(actor, team).catch(() => [])).map((s) => s.name));
-  return { routine: await d.routines.get(actor, routine.id), needs: { secrets: t.secrets.map((s) => s.name).filter((n) => !have.has(n)), webhook: Boolean(d.github && repoList.length) } };
+  // Connected through the GitHub App: events come without a webhook, and each run gets a token.
+  const viaApp = Boolean(d.githubApp && repoList.length && (await d.githubApp.covers(f.owner, repoList)));
+  const secrets = t.secrets.map((s) => s.name).filter((n) => !have.has(n) && !(viaApp && n === "GH_TOKEN"));
+  return { routine: await d.routines.get(actor, routine.id), needs: { secrets, webhook: Boolean(d.github && repoList.length) && !viaApp } };
 }

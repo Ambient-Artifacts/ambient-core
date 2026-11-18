@@ -188,6 +188,42 @@ docker compose exec gateway admin computer-code you@example.com --name "Build bo
 
 It prints two commands to run on that computer. The runner it downloads already points at your server.
 
+## Connect GitHub
+
+Bots work on GitHub through Ambient's own GitHub App: people tap Connect GitHub and pick their
+repos, and bots get GitHub's events and a short-lived token for just those repos
+([bots.md](bots.md#connect-github)). Set it up once per Ambient server:
+
+1. On GitHub: your organization's (or your own) Settings → Developer settings → GitHub Apps →
+   New GitHub App.
+   - **Name:** e.g. "Ambient Bots" (its URL name, the slug, is what `github.com/apps/<slug>` shows).
+   - **Homepage URL:** your gateway, e.g. `https://ambient.example.com`.
+   - **Callback URL:** leave empty; **Request user authorization (OAuth) during installation:** off.
+   - **Setup URL:** `https://<gateway>/v1/github/installed`, with **Redirect on update** on.
+   - **Webhook:** active; **Webhook URL** `https://<gateway>/v1/hooks/github-app`; **Webhook
+     secret:** a long random string (`openssl rand -hex 32`).
+   - **Repository permissions:** Contents read and write, Pull requests read and write, Issues
+     read and write, Checks read-only, Commit statuses read-only, Metadata read-only.
+   - **Subscribe to events:** Pull request, Pull request review, Pull request review comment,
+     Issue comment, Check run, Check suite, Push, Issues.
+   - **Where can this GitHub App be installed?** Any account (so your teams can install it on
+     theirs), or only this account.
+2. After creating it: note the **App ID**, and under Private keys **Generate a private key**
+   (a `.pem` file downloads).
+3. On the gateway's machine: put the key where only the gateway reads it, e.g.
+   `install -m 600 -o brain app.pem /etc/brain/github-app.pem`, and add to `/etc/brain/gateway.env`:
+
+   ```
+   BRAIN_GITHUB_APP_ID=<App ID>
+   BRAIN_GITHUB_APP_SLUG=<slug>
+   BRAIN_GITHUB_APP_KEY_FILE=/etc/brain/github-app.pem
+   BRAIN_GITHUB_APP_WEBHOOK_SECRET=<the webhook secret>
+   ```
+
+   then restart the gateway. `GET /v1/app/github` now answers `"app": { "slug": …, "configured": true }`.
+4. Check: in the app, a bot → GitHub → Connect GitHub; pick a repo on GitHub; you land on
+   "Connected". The App's page on GitHub (Advanced → Recent Deliveries) shows the deliveries.
+
 ## Operating it
 
 **Logs:** `docker compose logs -f gateway`, `docker compose logs -f jobs team team-jobs`. Each job's output is prefixed with its name (`[sessions]`, `[personal]`, `[health]`, `[consolidate]`).

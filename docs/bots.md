@@ -773,6 +773,38 @@ with its signature line.
 and the compare link. Left out: pushes that only change Markdown or `docs/`, and merges of its own
 work (the merge message names its branch prefix, or carries its signature).
 
+## Connect GitHub
+
+Ambient's own GitHub App, instead of a webhook per owner and a GitHub token made by hand. A person
+(or a team's owner or admin) taps Connect GitHub, picks the repos on GitHub, and that's all: GitHub's
+events on those repos reach the bots working on them, and each bot's run gets a GitHub token for
+just its repos. The owner's own webhook ([above](#github-events-and-the-pr-gate)) keeps working
+next to it, and is what's left when the server has no App (`app: null`).
+
+- `GET /v1/app/github[?team=<slug>]` → `{ "app": { "slug": "ambient-bots", "configured": true } | null,
+  "installations": [{ "id": 123, "account": "Ambient-Artifacts", "repos": ["Ambient-Artifacts/ambient-core"] | "all", "connectedAt": 1763380000000 }] }`
+  (403 for someone who may not change that owner's bots).
+- `POST /v1/app/github/connect[?team=<slug>]` → `{ "url": "https://github.com/apps/<slug>/installations/new?state=…" }`:
+  open it in the browser. The state says whose installation it will be; it's signed, lasts
+  30 minutes and works once. 404 `not_set_up` without the App.
+- `GET /v1/github/installed?installation_id=…&setup_action=install|update&state=…`: where GitHub
+  sends the browser back. It checks the state, links the installation to its owner, reads which
+  repos it covers, and shows a short "Connected" page that goes on to `ambient://github/connected`
+  (the app then reloads `GET /v1/app/github`). A link that expired or was used shows why.
+- `DELETE /v1/app/github/installations/:id[?team=]` → 204: unlinks it in Ambient. Uninstalling
+  the App on GitHub (the account's Settings → Applications) is separate; GitHub then tells
+  Ambient, which unlinks it too.
+- `POST /v1/hooks/github-app`: the App's deliveries, signed with its webhook secret. An
+  installation's added or removed repos keep its list current; a deleted or suspended one is
+  unlinked. Everything else goes to the owner's bots exactly as a delivery to their own webhook
+  does (watch modes, the PR gate, batching, the hourly cap, learning signals).
+- **Tokens:** a bot that watches repos an installation covers gets, for each run, a GitHub
+  installation token narrowed to those repos (contents, pull requests and issues to write; checks,
+  statuses and metadata to read), as `GH_TOKEN` and `GITHUB_TOKEN`. It lasts an hour and isn't
+  stored. A bot with a `GH_TOKEN` of its own granted keeps using that one.
+- MCP: `connect_github` gives Amb the link to hand over; `github_webhook` points to it when the
+  App is there.
+
 ## Automations
 
 Things Amb does **for the person** without being asked each time. The rule: templates are for

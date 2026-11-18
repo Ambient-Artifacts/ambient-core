@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { exportJWK, generateKeyPair, type JWK } from "jose";
+import type { GitHubAppConfig } from "./bots/github-app.ts";
 import type { AppleRevokeConfig } from "./auth/apple-revoke.ts";
 import { parseMasterKey, type MasterKey } from "./crypto.ts";
 import { loadMicrosoftConnect, type MicrosoftConnectConfig } from "./microsoft-connect.ts";
@@ -77,6 +79,11 @@ export interface GatewayConfig {
   bots?: BotsAccess;
   /** The model Ambient's chat answers with (BRAIN_AMBIENT_MODEL). */
   ambientModel?: string;
+  /**
+   * Ambient's GitHub App (docs/bots.md, "Connect GitHub"): BRAIN_GITHUB_APP_ID, _SLUG, _KEY_FILE,
+   * _WEBHOOK_SECRET. Absent: Connect GitHub answers `app: null`, owners' own webhooks still work.
+   */
+  githubApp?: GitHubAppConfig;
 }
 
 export interface BotsAccess {
@@ -168,6 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     msteamsBots: parseMsTeamsBots(env.BRAIN_MSTEAMS_BOTS),
     bots: parseBotsAccess(env.BRAIN_BOTS),
     ambientModel: env.BRAIN_AMBIENT_MODEL || undefined,
+    githubApp: loadGitHubApp(env),
     apns:
       env.BRAIN_APNS_KEY_ID && env.BRAIN_APNS_PRIVATE_KEY
         ? {
@@ -178,4 +186,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
           }
         : undefined,
   };
+}
+
+/** Ambient's GitHub App, when all four settings are there (a half-set App is a mistake: said at start). */
+export function loadGitHubApp(env: Record<string, string | undefined>): GitHubAppConfig | undefined {
+  const { BRAIN_GITHUB_APP_ID: appId, BRAIN_GITHUB_APP_SLUG: slug, BRAIN_GITHUB_APP_KEY_FILE: keyFile, BRAIN_GITHUB_APP_WEBHOOK_SECRET: webhookSecret } = env;
+  const given = [appId, slug, keyFile, webhookSecret].filter(Boolean).length;
+  if (given === 0) return undefined;
+  if (given < 4) throw new Error("The GitHub App needs BRAIN_GITHUB_APP_ID, BRAIN_GITHUB_APP_SLUG, BRAIN_GITHUB_APP_KEY_FILE and BRAIN_GITHUB_APP_WEBHOOK_SECRET together.");
+  return { appId: appId!, slug: slug!, privateKey: readFileSync(keyFile!, "utf8"), webhookSecret: webhookSecret! };
 }
