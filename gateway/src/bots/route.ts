@@ -373,7 +373,7 @@ export function botAppRoutes(
     }
     try {
       const name = (await d.directory.user(a.uid))?.name ?? null;
-      res.json(await createFromTemplate({ routines: d.routines, folder: d.folder, github: d.github?.(), learning: d.learning?.() }, a, body.data, { source: "app", enabled: true, by: { kind: "user", name } }));
+      res.json(await createFromTemplate({ routines: d.routines, folder: d.folder, github: d.github?.(), learning: d.learning?.(), githubApp: d.githubApp?.() }, a, body.data, { source: "app", enabled: true, by: { kind: "user", name } }));
     } catch (err) {
       fail(res, err);
     }

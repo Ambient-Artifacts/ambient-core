@@ -1017,7 +1017,7 @@ function registerLearningTools(
     },
     async (input) =>
       guard(async () => {
-        const out = await createFromTemplate({ routines, folder: folders.folder, github: folders.github, learning: folders.learning }, actor, FromTemplate.parse(input), { source, enabled: false, by });
+        const out = await createFromTemplate({ routines, folder: folders.folder, github: folders.github, learning: folders.learning, githubApp: folders.githubApp }, actor, FromTemplate.parse(input), { source, enabled: false, by });
         const needs = [out.needs.secrets.length ? `store ${out.needs.secrets.join(", ")} in the Ambient app (Settings → Loops → Secrets)` : "", out.needs.webhook ? "add the webhook on each repo (github_webhook)" : "", "turn it on in the app"].filter(Boolean);
         return result(`Set up "${out.routine.name}" (id ${out.routine.id}), paused. Still to do: ${needs.join("; ")}.`, { routine: out.routine, needs: out.needs });
       }),

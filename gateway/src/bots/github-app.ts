@@ -283,6 +283,16 @@ export class GitHubApp {
    * A token for a bot's run: an installation that covers the repos it watches, narrowed to those
    * repos. null when none does (it watches nothing, or nothing installed covers it).
    */
+  /** Whether the owner's installations reach every one of these repos (no webhook or key needed then). */
+  async covers(owner: Owner, repos: string[]): Promise<boolean> {
+    if (!repos.length) return false;
+    const list = await this.installations(owner).catch(() => []);
+    return repos.every((r) => {
+      const [acct] = r.split("/");
+      return list.some((inst) => (inst.repos === "all" ? acct?.toLowerCase() === inst.account.toLowerCase() : inst.repos.some((x) => x.toLowerCase() === r.toLowerCase())));
+    });
+  }
+
   async tokenFor(owner: Owner, repos: string[]): Promise<string | null> {
     if (!repos.length) return null;
     const list = await this.installations(owner);
