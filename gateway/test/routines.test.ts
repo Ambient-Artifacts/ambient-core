@@ -324,7 +324,8 @@ describe("the runner on a computer", () => {
   /** Run the real runner script with a stand-in systemctl and claude. */
   const runner = (args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; out: string }> =>
     new Promise((resolve) => {
-      const p = spawn(process.execPath, [RUNNER, ...args], { env: { ...env, ...extra } });
+      const p = spawn(process.execPath, [RUNNER, ...args], { env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner", ...env, ...extra } });
       let out = "";
       p.stdout.on("data", (d) => (out += d));
       p.stderr.on("data", (d) => (out += d));

@@ -305,7 +305,8 @@ describe("the runner with a bot", () => {
 
   const runner = (args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; out: string }> =>
     new Promise((resolve) => {
-      const p = spawn(process.execPath, [RUNNER, ...args], { env: { ...env, ...extra } });
+      const p = spawn(process.execPath, [RUNNER, ...args], { env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner", ...env, ...extra } });
       let out = "";
       p.stdout.on("data", (d) => (out += d));
       p.stderr.on("data", (d) => (out += d));
@@ -321,7 +322,7 @@ describe("the runner with a bot", () => {
       join(bin, "claude"),
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
-cat > prompt.txt
+if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > prompt.txt; else cat > prompt.txt; fi
 echo "$@" > args.txt
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Looking at the parser."}]}}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the parser test and pushed fix/parser.","total_cost_usd":0.3,"num_turns":4,"session_id":"sess-9"}'
@@ -377,7 +378,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Asker", prompt: "x", schedule: daily, bot: { isolation: "host" } });
     const id = (made.json.routine as R).id;
     const start = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
-    const p = spawn(process.execPath, [RUNNER, "bot-mcp"], { env: { PATH: process.env.PATH ?? "", AMBIENT_SERVER: s.origin, AMBIENT_RUN_TOKEN: String(start.json.runToken), AMBIENT_ASK_WAIT_S: "20" } });
+    const p = spawn(process.execPath, [RUNNER, "bot-mcp"], { env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner", PATH: process.env.PATH ?? "", AMBIENT_SERVER: s.origin, AMBIENT_RUN_TOKEN: String(start.json.runToken), AMBIENT_ASK_WAIT_S: "20" } });
     const replies = new Map<number, unknown>();
     createInterface({ input: p.stdout }).on("line", (l) => {
       const m = JSON.parse(l) as { id: number; result?: unknown };
@@ -401,11 +403,36 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     p.kill();
   }, 30_000);
 
+  it("gives a run what came into its thread while it works, so no second run starts, and takes its answers in between", async () => {
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Steered", prompt: "x", schedule: daily, bot: { isolation: "host" } });
+    const id = (made.json.routine as R).id;
+    const run = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    const token = String(run.json.runToken);
+    expect((await hostCall(token, "GET", "/v1/bot/inbox")).json).toMatchObject({ messages: [] });
+    await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "r u sure?" });
+    expect((await one(id)).runRequested).toBe(true);
+    const first = await hostCall(token, "GET", "/v1/bot/inbox");
+    expect((first.json.messages as { text: string; who: string }[]).map((m) => [m.who, m.text])).toEqual([["Lena Vogel", "r u sure?"]]);
+    // Taken in: it doesn't start another run once this one ends, and isn't handed over twice.
+    expect((await one(id)).runRequested).toBe(false);
+    expect((await hostCall(token, "GET", `/v1/bot/inbox?after=${first.json.cursor as number}`)).json).toMatchObject({ messages: [] });
+    // Its answer reaches the thread now, not only with the run's result.
+    expect((await hostCall(token, "POST", "/v1/bot/reply", { text: "Yes: Opus 5.5." })).status).toBe(204);
+    expect((await thread(id)).messages.map((m) => m.text)).toContain("Yes: Opus 5.5.");
+    // An answer to the run's own question comes back through ask_owner, not the inbox.
+    await hostCall(token, "POST", "/v1/bot/ask", { question: "Which repo?" });
+    await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "ambient-core" });
+    expect((await hostCall(token, "GET", `/v1/bot/inbox?after=${first.json.cursor as number}`)).json).toMatchObject({ messages: [] });
+    await hostCall(host, "POST", `/v1/host/runs/${(run.json.run as { id: string }).id}`, { status: "succeeded", summary: "Done." });
+    expect((await hostCall(token, "GET", "/v1/bot/inbox")).status).toBe(409);
+  }, 30_000);
+
   it("hands something to its owner without waiting, and an old open question doesn't swallow a later run's result", async () => {
     const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Hander", prompt: "x", schedule: daily, bot: { isolation: "host" } });
     const id = (made.json.routine as R).id;
     const first = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
-    const p = spawn(process.execPath, [RUNNER, "bot-mcp"], { env: { PATH: process.env.PATH ?? "", AMBIENT_SERVER: s.origin, AMBIENT_RUN_TOKEN: String(first.json.runToken), AMBIENT_ASK_WAIT_S: "20" } });
+    const p = spawn(process.execPath, [RUNNER, "bot-mcp"], { env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner", PATH: process.env.PATH ?? "", AMBIENT_SERVER: s.origin, AMBIENT_RUN_TOKEN: String(first.json.runToken), AMBIENT_ASK_WAIT_S: "20" } });
     const replies = new Map<number, unknown>();
     createInterface({ input: p.stdout }).on("line", (l) => {
       const m = JSON.parse(l) as { id: number; result?: unknown };
@@ -442,7 +469,7 @@ describe("signing in", () => {
 # --version (sync asks) runs in the runner's own folder: write nothing there.
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 env > env.txt
-cat > /dev/null
+if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > /dev/null; else cat > /dev/null; fi
 echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'
 exit 1
 `,
@@ -453,6 +480,7 @@ exit 1
     const out = await new Promise<{ code: number | null; out: string }>((resolve) => {
       const p = spawn(process.execPath, [RUNNER, "run", id], {
         env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner",
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
           HOME: dir,
@@ -523,7 +551,7 @@ describe("whose Claude a computer uses", () => {
 # --version (sync asks) runs in the runner's own folder: write nothing there.
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 env > env.txt
-cat > /dev/null
+if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > /dev/null; else cat > /dev/null; fi
 echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'
 exit 1
 `,
@@ -539,6 +567,7 @@ exit 1
       AMBIENT_STATE_DIR: join(dir, "state"),
       AMBIENT_UNIT_DIR: dir,
       AMBIENT_CLAUDE_ENV: join(dir, "claude.env"),
+      AMBIENT_CONFIG_DIR: join(dir, "etc"),
       ANTHROPIC_API_KEY: "sk-ant-api-the-servers-own",
     };
     const runner = (args: string[]) =>

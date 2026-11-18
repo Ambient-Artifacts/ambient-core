@@ -20,6 +20,9 @@ type Start = Record<string, unknown>;
 let start: Start = {};
 let finished: Record<string, unknown> | null = null;
 let history: { query: string; auth: string | undefined } | null = null;
+/** What the stand-in gateway hands a run on its next inbox call, and the answers it posted. */
+let inbox: { text: string; who: string; at: number }[] = [];
+let replies: string[] = [];
 let server: Server;
 let origin = "";
 let dir = "";
@@ -39,6 +42,13 @@ beforeAll(async () => {
         finished = JSON.parse(body) as Record<string, unknown>;
         res.writeHead(204).end();
       } else if (req.method === "PATCH" && url.pathname.startsWith("/v1/host/runs/")) {
+        res.writeHead(204).end();
+      } else if (req.method === "GET" && url.pathname === "/v1/bot/inbox") {
+        const messages = inbox;
+        inbox = [];
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ messages, cursor: Date.now() }));
+      } else if (req.method === "POST" && url.pathname === "/v1/bot/reply") {
+        replies.push((JSON.parse(body) as { text: string }).text);
         res.writeHead(204).end();
       } else if (req.method === "GET" && url.pathname === "/v1/bot/history") {
         history = { query: url.search, auth: req.headers.authorization };
@@ -64,7 +74,7 @@ beforeAll(async () => {
     `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 printf '%s\\n' "$@" > args.txt
-cat > prompt.txt
+if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > prompt.txt; else cat > prompt.txt; fi
 out=""
 for a in "$@"; do case "$a" in OUTDIR=*) out="\${a#OUTDIR=}" ;; esac; done
 if [ -n "$out" ]; then
@@ -82,7 +92,7 @@ ${result("Did it.")}
     `#!/bin/sh
 if [ "$1" = "image" ]; then exit 0; fi
 printf '%s\\n' "$@" > "${join(dir, "podman-args.txt")}"
-cat > /dev/null
+if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > /dev/null; else cat > /dev/null; fi
 ${result("Boxed run done.")}
 `,
   );
@@ -96,11 +106,12 @@ beforeEach(() => {
   history = null;
 });
 
-const runner = (args: string[]): Promise<{ code: number | null; out: string }> =>
+const runner = (args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; out: string }> =>
   new Promise((resolve) => {
     const p = spawn(process.execPath, [RUNNER, ...args], {
       cwd: join(dir, "work"),
       env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner",
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
         HOME: dir,
@@ -109,6 +120,7 @@ const runner = (args: string[]): Promise<{ code: number | null; out: string }> =
         AMBIENT_CLAUDE: join(bin, "claude"),
         AMBIENT_STATE_DIR: join(dir, "state"),
         AMBIENT_FOLDER: join(dir, "work"),
+        ...extra,
       },
     });
     let out = "";
@@ -236,7 +248,8 @@ describe("a bot's folder in its container", () => {
 
 describe("bot-mcp", () => {
   it("serves search_history with the run token", async () => {
-    const p = spawn(process.execPath, [RUNNER, "bot-mcp"], { env: { PATH: process.env.PATH ?? "", AMBIENT_SERVER: origin, AMBIENT_RUN_TOKEN: RUN_TOKEN } });
+    const p = spawn(process.execPath, [RUNNER, "bot-mcp"], { env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner", PATH: process.env.PATH ?? "", AMBIENT_SERVER: origin, AMBIENT_RUN_TOKEN: RUN_TOKEN } });
     const replies = new Map<number, Record<string, unknown>>();
     createInterface({ input: p.stdout }).on("line", (l) => {
       const m = JSON.parse(l) as { id: number; result: Record<string, unknown> };
@@ -259,4 +272,46 @@ describe("bot-mcp", () => {
     expect(await reply(4)).toMatchObject({ isError: true });
     p.kill();
   });
+});
+
+describe("messages while a bot works", () => {
+  it("takes a message that came in into the same session, answers it in between, and starts no second run", async () => {
+    // A stand-in Claude Code that streams: one result per message it reads, until stdin ends.
+    const streaming = join(dir, "bin-stream");
+    mkdirSync(streaming, { recursive: true });
+    writeFileSync(
+      join(streaming, "claude"),
+      `#!/usr/bin/env node
+const rl = require("node:readline").createInterface({ input: process.stdin });
+let n = 0;
+console.log(JSON.stringify({ type: "system", subtype: "init" }));
+rl.on("line", (l) => {
+  const text = JSON.parse(l).message.content[0].text;
+  n++;
+  console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "On it." }] } }));
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: n === 1 ? "Answer one: " + text : "Answer two: " + text, session_id: "sess-s", usage: { input_tokens: 5, cache_read_input_tokens: 40000, cache_creation_input_tokens: 100, output_tokens: 20 } }));
+});
+rl.on("close", () => process.exit(0));
+`,
+    );
+    chmodSync(join(streaming, "claude"), 0o755);
+    start = {
+      run: { id: "run00000009", trigger: "manual" },
+      routine: { id: "bot00000009", name: "Blog draft", prompt: "which model?", folder: join(dir, "work") },
+      env: {},
+      bot: { face: "classic", runtime: "claude-code", isolation: "host", report: "news" },
+      resume: { sessionId: "sess-s", message: "which model?" },
+      runToken: RUN_TOKEN,
+    };
+    replies = [];
+    inbox = [{ text: "r u sure?", who: "Lena Vogel", at: Date.now() }];
+    const out = await runner(["run", "bot00000009"], { AMBIENT_CLAUDE: join(streaming, "claude"), AMBIENT_INBOX_EVERY_S: "0.2", AMBIENT_BOT_STAY_S: "1" });
+    expect(out.code, out.out).toBe(0);
+    // The first answer went to the thread as soon as the next message was taken in…
+    expect(replies).toEqual(["Answer one: which model?"]);
+    // …and the run's result is the answer to the message that came in while it worked.
+    expect(finished).toMatchObject({ status: "succeeded", summary: "Answer two: Lena Vogel wrote to you in the Ambient app: r u sure?" });
+    expect(out.out).toContain("Took in a message from Lena Vogel while working");
+    expect(out.out).toMatch(/Timing: api [0-9.]+s, spawn [0-9.]+s, ready [0-9.]+s, text [0-9.]+s, result [0-9.]+s, end [0-9.]+s; tokens in 5, cache read 40000, cache write 100, out 20; took in 1 message/);
+  }, 20_000);
 });

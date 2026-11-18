@@ -137,6 +137,7 @@ const runner = (args: string[], timeoutMs?: number): Promise<{ code: number | nu
     const p = spawn(process.execPath, [RUNNER, ...args], {
       cwd: work,
       env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner",
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
         HOME: dir,
