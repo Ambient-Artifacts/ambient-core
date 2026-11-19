@@ -93,8 +93,8 @@ describe("admin CLI", () => {
     expect(await admin("server", "add", "pool-2", "http://team-2:8090")).toBe("Updated team server pool-2 at http://team-2:8090 (free).");
     await expect(admin("server", "add", "pool-3", "team-3")).rejects.toThrow(/isn't a URL/);
     const out = await admin("computer-code", "ada@example.com", "--name", "Build box");
-    expect(out).toContain(`curl -fsSL ${s.origin}/runner/ambient-runner.mjs -o ambient-runner.mjs`);
-    expect(out).toMatch(/sudo node ambient-runner\.mjs setup [A-Z2-9]{4}-[A-Z2-9]{4}/);
+    expect(out).toContain(`curl -fsSL ${s.origin}/install.sh | sudo bash -s `);
+    expect(out).toMatch(/sudo bash -s [A-Z2-9]{4}-[A-Z2-9]{4}$/);
   });
 
   it("takes people out of a team, but never its last owner", async () => {

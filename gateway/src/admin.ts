@@ -253,7 +253,7 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     });
     const teams = await new Directory(d.control, 0).teamsOf(u.uid);
     const out = await routines.addComputer({ uid: u.uid, teams, personal: true, canWritePersonal: true, canWriteTeams: true }, text(flags, "name") ?? "Server");
-    return [`Setup code for ${u.name}'s computer "${out.computer.name}", valid 30 minutes. On that computer (Linux, systemd, Claude Code signed in):`, out.commands].join("\n");
+    return [`Setup code for ${u.name}'s computer "${out.computer.name}", valid 30 minutes. On that computer (Linux with systemd), as root:`, out.commands].join("\n");
   }
 
   if (cmd === "team" && sub === "create") {

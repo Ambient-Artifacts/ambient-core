@@ -96,15 +96,16 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 
 ## Routine runner
 
-`runner/ambient-runner.mjs setup <code>` writes `/etc/ambient-runner/runner.env`. Variables there or in the environment override it:
+`runner/install.sh` (or `runner/ambient-runner.mjs setup <code>` by hand) writes `/etc/ambient-runner/runner.env`. Variables there or in the environment override it:
 
 | Variable | Default | |
 |---|---|---|
 | `AMBIENT_SERVER` | the server it was downloaded from | |
 | `AMBIENT_HOST_TOKEN` | set by `setup` | The computer's own token. |
-| `AMBIENT_USER` | `root` | The user routines run as (`setup --user`). |
+| `AMBIENT_USER` | `ambient` (install.sh), else `root` | The user Ambient's sessions, bots and routines run as (`--user`). |
 | `AMBIENT_CLAUDE`, `AMBIENT_CLAUDE_ARGS` | `claude`, `--permission-mode auto` | How Claude Code is started (`setup --claude-args`). |
 | `AMBIENT_FOLDER` | `~/ambient-routines` | Where routines run unless they name a folder. |
+| `AMBIENT_CLAUDE_CONFIG` | `isolated` | `own`: runs use the user's own Claude Code settings (`~/.claude`) even with a sign-in from Ambient. See [What the setup leaves alone](self-hosting.md#what-the-setup-leaves-alone). |
 
 ## Claude Code plugin
 
