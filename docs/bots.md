@@ -1040,7 +1040,7 @@ them, ask); the Builder `pr-gate`; the Wiki keeper `what-to-update`. Each needs 
 template says which rights in words (no merge rights for any).
 
 - `GET /v1/app/bot-templates` → `{ "templates": [{ "id", "name", "face", "color", "wear", "description", "runtime", "github": [..], "secrets": [{ "name", "why" }], "report", "delegate", "schedule", "questions": [{ "id", "label", "kind": "repos"|"choice"|"text", "options"?: [{ "id", "label" }], "default"?, "required", "hint"? }] }] }`
-- `POST /v1/app/bots/from-template` with `{ "template", "answers": { "<question id>": "…" | ["owner/name"] }, "team"?, "computer"?, "name"?, "schedule"? }`
+- `POST /v1/app/bots/from-template` with `{ "template", "answers": { "<question id>": "…" | ["owner/name"] }, "team"?, "computer"?, "name"?, "look"?: { "face"?, "color"?, "wear"? }, "schedule"? }`
   → `{ "routine": Routine, "needs": { "secrets": ["GH_TOKEN"], "webhook": true } }`: made in the
   app it's on at once; `needs` says what's still missing (secrets not stored yet for that owner,
   and the webhook on its repos). `400 bad_request` for missing or wrong answers,

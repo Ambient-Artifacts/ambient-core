@@ -4,7 +4,7 @@
 // the answers fill it in. The bot it makes learns on its own from the start (learning.ts).
 import type { Owner } from "../routines/keys.ts";
 import { z } from "zod";
-import type { BotColor, BotFace, BotInput, BotWear, RoutineSchedule } from "@brain/spec";
+import { BotInput, type BotColor, type BotFace, type BotWear, type RoutineSchedule } from "@brain/spec";
 import { RoutineError, type Actor, type Routine, type RoutineService } from "../routines/service.ts";
 import type { Author, BotFolder } from "./folder.ts";
 import type { GitHubEvents, WatchMode } from "./github.ts";
@@ -275,6 +275,8 @@ export const FromTemplate = z.object({
   computer: z.string().max(80).nullable().optional(),
   schedule: z.unknown().optional(),
   name: z.string().trim().min(1).max(80).optional(),
+  /** Its look, picked when it's made (the app's first step); the template's own otherwise. */
+  look: BotInput.pick({ face: true, color: true, wear: true }).optional(),
 });
 export type FromTemplate = z.infer<typeof FromTemplate>;
 
@@ -315,7 +317,7 @@ export async function createFromTemplate(
   const target = team ? computers.find((c) => c.team?.slug === team) : input.computer ? computers.find((c) => c.id === input.computer || c.name.toLowerCase() === input.computer!.toLowerCase()) : computers.filter((c) => !c.team && c.ready).length === 1 ? computers.find((c) => !c.team && c.ready) : undefined;
   const codex = target?.openaiAccount && (target.openaiAccount.signedIn === "chatgpt" || target.openaiAccount.signedIn === "api_key" || (target.openaiAccount.use === "key" && target.openaiAccount.key));
   const runtime = t.runtime === "auto" && codex ? "codex" : "claude-code";
-  const bot: BotInput = { face: t.face, color: t.color, wear: t.wear, runtime, isolation: "container", secrets: t.secrets.map((s) => s.name), report: t.report, delegate: t.delegate } as BotInput;
+  const bot: BotInput = { face: input.look?.face ?? t.face, color: input.look?.color ?? t.color, wear: input.look?.wear ?? t.wear, runtime, isolation: "container", secrets: t.secrets.map((s) => s.name), report: t.report, delegate: t.delegate } as BotInput;
   const routine = await d.routines.create(
     actor,
     {

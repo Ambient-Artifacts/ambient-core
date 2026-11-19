@@ -1048,6 +1048,10 @@ function registerLearningTools(
         team: z.string().max(80).optional().describe("A team's slug: the bot is the team's and runs on its server."),
         computer: z.string().max(80).optional(),
         name: z.string().max(80).optional(),
+        look: z
+          .object({ face: z.enum(BOT_FACES).optional(), color: z.enum(BOT_COLORS).optional(), wear: z.array(z.enum(BOT_WEAR)).max(3).optional() })
+          .optional()
+          .describe("Its look, if the user picked one: a face shape, a colour and what it wears; the template's own otherwise."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },

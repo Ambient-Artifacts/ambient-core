@@ -123,6 +123,18 @@ describe("a bot from a template", () => {
     expect((await call("POST", "/v1/app/bots/from-template", { template: "nope", answers: {} })).json.error).toBe("no_such_template");
   });
 
+  it("takes the name and look picked when it's made", async () => {
+    const out = (await call("POST", "/v1/app/bots/from-template", { template: "builder", name: "Fixie", look: { face: "cloud", color: "clay", wear: ["cap"] }, answers: { repos: [REPO], label: "" } })).json as {
+      routine: { name: string; bot: { faceName?: string; face?: string; color: string; wear: string[] }; schedule: { every: string } };
+    };
+    expect(out.routine.name).toBe("Fixie");
+    expect(out.routine.bot).toMatchObject({ color: "clay", wear: ["cap"] });
+    expect(JSON.stringify(out.routine.bot)).toContain("cloud");
+    // No label: on request only.
+    expect(out.routine.schedule.every).toBe("needed");
+    expect((await call("POST", "/v1/app/bots/from-template", { template: "builder", look: { face: "square" }, answers: { repos: [REPO] } })).status).toBe(400);
+  });
+
   it("over MCP: listed, and made paused", async () => {
     const pat = String((await call("POST", "/v1/app/pats", { label: "Claude" })).json.token);
     const client = await mcpClient(`${s.origin}/mcp`, pat);
