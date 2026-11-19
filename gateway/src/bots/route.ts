@@ -766,13 +766,13 @@ export function botRunRouter(d: { bots: BotService; history?: HistorySearch }): 
 
   r.post("/v1/bot/ask", json, async (req, res) => {
     if (slowDown(req, res)) return;
-    const body = z.object({ question: z.string().trim().min(1).max(2_000), choices: z.array(z.string().max(120)).max(6).optional() }).safeParse(req.body);
+    const body = z.object({ question: z.string().trim().min(1).max(2_000), choices: z.array(z.string().max(120)).max(6).optional(), details: z.string().max(20_000).optional() }).safeParse(req.body);
     if (!body.success) {
-      res.status(400).json({ error: "bad_request", message: "Ask a question (up to 2,000 characters), with up to 6 choices." });
+      res.status(400).json({ error: "bad_request", message: "Ask a question (up to 2,000 characters), with up to 6 choices and up to 20,000 characters of details." });
       return;
     }
     try {
-      res.json(await d.bots.ask(req.headers.authorization, body.data.question, body.data.choices));
+      res.json(await d.bots.ask(req.headers.authorization, body.data.question, body.data.choices, body.data.details));
     } catch (err) {
       fail(res, err);
     }

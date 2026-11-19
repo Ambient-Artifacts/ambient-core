@@ -47,13 +47,13 @@ const until = async <T>(get: () => Promise<T>, ok: (v: T) => boolean): Promise<T
 };
 
 /** A bot that's running and asks `question`; returns its id and run token. */
-async function botAsks(name: string, question: string, choices: string[], delegate?: string) {
+async function botAsks(name: string, question: string, choices: string[], delegate?: string, details?: string) {
   const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name, prompt: "x", schedule: daily, bot: { isolation: "host", ...(delegate ? { delegate } : {}) } });
   const id = (made.json.routine as { id: string }).id;
   const start = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
   const token = String(start.json.runToken);
-  const asked = await hostCall(token, "POST", "/v1/bot/ask", { question, choices });
-  return { id, token, questionId: String(asked.json.id) };
+  const asked = await hostCall(token, "POST", "/v1/bot/ask", { question, choices, ...(details ? { details } : {}) });
+  return { id, token, questionId: String(asked.json.id), runId: String((start.json.run as { id: string }).id) };
 }
 
 beforeAll(async () => {
@@ -114,6 +114,45 @@ describe("a bot's question goes to Ambient first", () => {
     const filed = await client.callTool({ name: "answer_decision", arguments: { id: open[0]!.id, answer: "Tuesday" } });
     expect(text(filed)).toContain("Word bot carries on with it");
     await client.close();
+  });
+});
+
+describe("a question shows the work", () => {
+  it("carries the draft to the thread, Ambient's look and the decision, and the run's result shows before it", async () => {
+    triageReply = '{"action":"ask","suggest":"Approved","why":"The draft follows the voice rules."}';
+    const draft = "207 cancellations read since October.\n\nThe churn bot reads every one...\n\n[PR #412](https://github.com/acme/app/pull/412)";
+    const before = prompts.length;
+    const b = await botAsks("Linki", "Post 1 is ready. Approve it?", ["Approved", "Changes"], "brain", draft);
+    // Ambient looked at the work itself before suggesting anything.
+    const look = await until(async () => prompts.slice(before).find((p) => p.includes("[Not from")) ?? "", (p) => p.length > 0);
+    expect(look).toContain("207 cancellations read since October.");
+    const open = await until(async () => (await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as (Decision & { details: string | null })[], (d) => d.length > 0);
+    expect(open[0]).toMatchObject({ question: "Post 1 is ready. Approve it?", details: draft });
+    const chat = (await appCall(s, lena.access_token, "GET", "/v1/app/ambient/chat")).json.messages as { text: string }[];
+    expect(chat.at(-1)!.text).toContain("[PR #412](https://github.com/acme/app/pull/412)");
+    const q = (await thread(b.id)).find((m) => m.kind === "question") as Msg & { details: string | null };
+    expect(q.details).toBe(draft);
+
+    // The run finishes with a long result: it shows too, before the question it may be about.
+    const report = `Post 1 draft:\n\n${"A plain short sentence. ".repeat(30)}`;
+    await hostCall(host, "POST", `/v1/host/runs/${b.runId}`, { status: "succeeded", summary: report });
+    const t = await thread(b.id);
+    const result = t.findIndex((m) => m.kind === "result");
+    expect(result, JSON.stringify(t.map((m) => m.kind))).toBeGreaterThanOrEqual(0);
+    expect(result).toBeLessThan(t.findIndex((m) => m.kind === "question"));
+    await appCall(s, lena.access_token, "POST", `/v1/app/decisions/${open[0]!.id}`, { option: "Approved" });
+  });
+
+  it("without the work, Ambient is told not to suggest approving it; a short result stays held back", async () => {
+    triageReply = JSON.stringify({ action: "ask", suggest: "", why: "I haven't seen the draft." });
+    const before = prompts.length;
+    const b = await botAsks("Vague bot", "The draft is in my last message. Approve it?", ["Approved", "Changes"]);
+    const look = await until(async () => prompts.slice(before).find((p) => p.includes("[Not from")) ?? "", (p) => p.length > 0);
+    expect(look).toContain("don't suggest approving work you haven't seen");
+    await hostCall(host, "POST", `/v1/host/runs/${b.runId}`, { status: "succeeded", summary: "Asked for approval." });
+    expect((await thread(b.id)).some((m) => m.kind === "result")).toBe(false);
+    const open = await until(async () => (await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as Decision[], (d) => d.length > 0);
+    await appCall(s, lena.access_token, "POST", `/v1/app/decisions/${open[0]!.id}`, { option: "Changes" });
   });
 });
 

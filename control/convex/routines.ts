@@ -571,7 +571,12 @@ export const finishRun = mutation({
     turns: v.optional(v.number()),
     sessionId: v.optional(v.string()),
     /** A bot's run: what its thread gets (the gateway sealed it), and a hash to tell news from a repeat. */
-    message: v.optional(v.object({ iv: v.string(), ct: v.string(), hash: v.string() })),
+    /**
+     * `keep`: a result with substance of its own (a draft, a report), shown even when the run also
+     * asked something: the question may well be about it (2026-11-19: "the draft is in my last
+     * message", and that message was held back).
+     */
+    message: v.optional(v.object({ iv: v.string(), ct: v.string(), hash: v.string(), keep: v.optional(v.boolean()) })),
     now: v.number(),
   },
   handler: async (ctx, { secret, hostId, runId, now, message, ...fields }) => {
@@ -622,7 +627,7 @@ async function botRunMessage(
   run: Doc<"routineRuns">,
   status: "running" | "succeeded" | "failed",
   sessionId: string | undefined,
-  message: { iv: string; ct: string; hash: string } | undefined,
+  message: { iv: string; ct: string; hash: string; keep?: boolean } | undefined,
   now: number,
 ) {
   const patch: Partial<Doc<"routines">> = {};
@@ -630,13 +635,16 @@ async function botRunMessage(
   if (sessionId) patch.lastSessionId = sessionId;
   // A run that failed without a session (its session to resume was gone, say) starts the next one afresh.
   else if (failed) patch.lastSessionId = undefined;
-  // Held back only for a question this run asked (its question is the news then). A question left
-  // open from an earlier run must not swallow what this run did.
+  // Held back only for a question this run asked, and only when it's short (the question is the
+  // news then). A result with substance (`keep`) shows; a question left open from an earlier run
+  // must not swallow what this run did.
   const question = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
   const asked = Boolean(question && !question.answeredAt && question.runId === run._id);
   const fresh = message && message.hash !== r.lastResultHash;
-  if (message && (failed || r.bot?.report === "every_run" || (fresh && !asked))) {
-    await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "bot", kind: failed ? "failure" : "result", iv: message.iv, ct: message.ct, runId: run._id, createdAt: now });
+  if (message && (failed || r.bot?.report === "every_run" || (fresh && (!asked || message.keep)))) {
+    // Before the question it may be about, in the thread's order.
+    const at = asked && question ? Math.min(now, question.createdAt - 1) : now;
+    await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "bot", kind: failed ? "failure" : "result", iv: message.iv, ct: message.ct, runId: run._id, createdAt: at });
     if (!failed) patch.lastResultHash = message.hash;
   }
   if (Object.keys(patch).length) await ctx.db.patch(r._id, patch);

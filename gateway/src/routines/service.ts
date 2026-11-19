@@ -28,6 +28,8 @@ import type { FileRef } from "../bots/attachments.ts";
 
 export const HOST_TOKEN_PREFIX = "ambient_host_";
 export const RUN_TOKEN_PREFIX = "ambient_run_";
+/** A bot's result longer than this has substance of its own (control/convex/routines.ts, botRunMessage). */
+const KEEP_RESULT_CHARS = 400;
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
 const CODE_TTL_MS = 30 * 60_000;
 const SUMMARY_MAX = 4_000;
@@ -1218,7 +1220,8 @@ export class RoutineService {
     const clipped = text && text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX)}…` : text;
     const sealed = clipped ? await this.d.keys.seal(owner, "routine:run", clipped) : undefined;
     // A bot's thread gets the result too (Convex decides whether it's news).
-    const message = who.bot && clipped ? { ...(await sealMessage(this.d.keys, owner, { text: clipped })), hash: resultHash(clipped) } : undefined;
+    // Substance of its own (a draft, a report): shown even when the run also asked something.
+    const message = who.bot && clipped ? { ...(await sealMessage(this.d.keys, owner, { text: clipped })), hash: resultHash(clipped), keep: clipped.length > KEEP_RESULT_CHARS } : undefined;
     const out = await this.d.control.m(api.routines.finishRun, {
       hostId: host.id as never,
       runId,
