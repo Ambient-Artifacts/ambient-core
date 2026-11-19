@@ -4,7 +4,8 @@
 // team's (with `team:write`), the user's own with `personal:write`. Ambient is built for agents as
 // much as for people (product/architecture.md, "Agents first"): what the app can change, this can.
 // The user's voice fingerprint is read and forgotten here too (voices.ts); only the device makes one.
-// Not here: what needs a browser or the device (signing in, Microsoft's admin consent, recording).
+// Not here: what needs a browser or the device (signing in, recording); computers, teams and the
+// person's profile are in account-tools.ts.
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Principal } from "../auth/bearer.ts";
@@ -72,7 +73,11 @@ async function describeVoice(voices: Voices, uid: string): Promise<{ line: strin
   return { line: `- Voice fingerprint (lets the apps name you in recordings): stored, updated ${data.updated_at!.slice(0, 10)}; ${teams}`, data };
 }
 
-export function registerSettingsTools(server: McpServer, principal: Principal, settings: SettingsService, voices?: Voices) {
+/**
+ * `account`: the person's name, about you, computers, work-session routing and upkeep for
+ * get_settings (account-tools.ts), on their own connection.
+ */
+export function registerSettingsTools(server: McpServer, principal: Principal, settings: SettingsService, voices?: Voices, account?: () => Promise<{ text: string; data: Record<string, unknown> }>) {
   const canChangeTeams = principal.scopes.has("team:write");
   const canChangeOwn = principal.personal && principal.scopes.has("personal:write");
 
@@ -106,7 +111,7 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
     {
       title: "Read settings",
       description:
-        "The user's Ambient settings: their own preferences and whether their voice fingerprint is stored (and which teams get it), and for each of their teams who writes meeting notes, where transcripts and work logs go, the Microsoft 365 connection and the team's repo (and what Ambient may write in it). Read this before changing anything with change_team_settings or change_preferences.",
+        "The user's Ambient settings: their own preferences, whether their voice fingerprint is stored (and which teams get it), their name and about you, their computers (online, Claude signed in), where their work sessions go and whether their brain is kept current, and for each of their teams who writes meeting notes, where transcripts and work logs go, the Microsoft 365 connection and the team's repo (and what Ambient may write in it). Read this before changing anything with change_team_settings, change_preferences, update_profile, set_session_rules or the computer and team tools.",
       inputSchema: { team: z.string().max(80).optional().describe("A team's slug or name, for that team only.") },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
@@ -123,6 +128,11 @@ export function registerSettingsTools(server: McpServer, principal: Principal, s
         );
         data.preferences = { keep_brain_current_with_claude: p.consolidate, morning_digest: p.digest, apple_private_cloud_compute: p.pcc };
         if (voice) data.voice = voice.data;
+        if (account) {
+          const a = await account();
+          parts.push(a.text);
+          data.account = a.data;
+        }
       }
       const described = await Promise.all(teams.map(describeTeam));
       parts.push(...described.map((d) => d.text));

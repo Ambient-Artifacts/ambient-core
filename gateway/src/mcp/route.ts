@@ -11,6 +11,8 @@ import type { Folders } from "../bots/files.ts";
 import { personalInstructions } from "./context.ts";
 import { buildMcpServer, type ReaderSource } from "./tools.ts";
 import { addressKey, strikes } from "../limiter.ts";
+import type { PeopleService } from "../people.ts";
+import type { UpkeepState } from "../upkeep.ts";
 
 export const MCP_SCOPES = ["personal:read", "personal:write", "team:read", "team:write"];
 export const TEAM_MCP_SCOPES = ["team:read", "team:write"];
@@ -52,6 +54,9 @@ export function mcpRouter(deps: {
   version: string;
   /** The user's name, for the instructions an app gets when it connects. */
   userName?: (uid: string) => Promise<string | undefined>;
+  /** Teams and the person's profile, and their upkeep (account-tools.ts). */
+  people?: PeopleService;
+  upkeep?: (uid: string) => Promise<UpkeepState>;
 }): Router {
   const router = express.Router();
 
@@ -114,7 +119,7 @@ export function mcpRouter(deps: {
     const personal = connecting
       ? await personalInstructions(principal, deps.readers, { name: await deps.userName?.(principal.uid).catch(() => undefined) })
       : null;
-    const server = buildMcpServer({ principal, readers: deps.readers, routines: deps.routines, bots: deps.bots, admin: deps.admin, decisions: deps.decisions, folders: deps.folders, settings: deps.settings, voices: deps.voices, version: deps.version, personal });
+    const server = buildMcpServer({ principal, readers: deps.readers, routines: deps.routines, bots: deps.bots, admin: deps.admin, decisions: deps.decisions, folders: deps.folders, settings: deps.settings, voices: deps.voices, people: deps.people, upkeep: deps.upkeep, userName: deps.userName, version: deps.version, personal });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       void transport.close();

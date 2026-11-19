@@ -20,6 +20,9 @@ import type { Voices } from "../voices.ts";
 import { TeamServerError } from "../teams.ts";
 import { registerRoutineTools } from "./routine-tools.ts";
 import { registerSettingsTools } from "./settings-tools.ts";
+import { describeAccount, registerAccountTools } from "./account-tools.ts";
+import type { PeopleService } from "../people.ts";
+import type { UpkeepState } from "../upkeep.ts";
 
 const MAX_TEXT = 25_000;
 
@@ -79,6 +82,10 @@ export interface ToolDeps {
   settings?: SettingsService;
   /** The user's voice fingerprint: whether one is stored and who gets it, and forgetting it. */
   voices?: Voices;
+  /** Teams and the person's profile (people.ts), with their upkeep, for the account tools. */
+  people?: PeopleService;
+  upkeep?: (uid: string) => Promise<UpkeepState>;
+  userName?: (uid: string) => Promise<string | undefined>;
   version: string;
   /** Who the user is and what their wikis hold (context.ts), sent when an app connects. */
   personal?: string | null;
@@ -255,7 +262,7 @@ function interleave<T>(lists: T[][], limit: number): T[] {
   return out;
 }
 
-export function buildMcpServer({ principal, readers, routines, bots, admin, decisions, folders, settings, voices, version, personal }: ToolDeps): McpServer {
+export function buildMcpServer({ principal, readers, routines, bots, admin, decisions, folders, settings, voices, people, upkeep, userName, version, personal }: ToolDeps): McpServer {
   // Claude Code with the Ambient plugin sends whole sessions itself (sessions:write): no log_work there.
   const canLog = Boolean(readers.logWork) && !principal.scopes.has("sessions:write");
   // Teams this connection writes to when no team is named (it also has a personal wiki for private work).
@@ -1017,7 +1024,13 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
   );
 
   if (routines && (principal.personal || principal.teams.length > 0)) registerRoutineTools(server, principal, routines, bots, admin, decisions, folders);
-  if (settings && (principal.personal || principal.teams.length > 0)) registerSettingsTools(server, principal, settings, voices);
+  // Computers, teams, the person's profile and where work sessions go (account-tools.ts).
+  const account = people ? { people, routines, upkeep, userName } : undefined;
+  const actor = { uid: principal.uid, teams: principal.teams, personal: principal.personal, canWritePersonal: principal.personal && principal.scopes.has("personal:write"), canWriteTeams: principal.scopes.has("team:write") };
+  if (settings && (principal.personal || principal.teams.length > 0)) {
+    registerSettingsTools(server, principal, settings, voices, account && principal.personal ? () => describeAccount(principal, account, actor) : undefined);
+  }
+  if (account) registerAccountTools(server, principal, account);
 
   return server;
 }
