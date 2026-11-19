@@ -343,6 +343,11 @@ export function createApp(deps: AppDeps) {
       codes: codeHasher,
       signInNonces,
       clientName: async (clientId) => (await provider.Client.find(clientId))?.clientName,
+      clientInfo: async (clientId) => {
+        const c = await provider.Client.find(clientId);
+        return c ? { name: c.clientName, redirectUris: [...(c.redirectUris ?? [])] } : undefined;
+      },
+      origin: config.origin,
       personal,
       teams,
       pats,

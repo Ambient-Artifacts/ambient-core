@@ -132,6 +132,8 @@ describe("disconnecting an AI app in the app", () => {
     const listed = (await appCall(s, lena.access_token, "GET", "/v1/app/connections")).json.connections as { id: string; clientId: string; name: string }[];
     const mine = listed.find((c) => c.clientId === clientId)!;
     expect(mine.name).toBe("Test MCP Client");
+    // Which AI app it is (docs/connect-agents.md): a loopback redirect and an unknown name say nothing.
+    expect(mine).toMatchObject({ kind: "other", via: "oauth", lastUsedAt: null });
     const other = await signIn(s, "apple-someone-else", "Someone Else");
     expect((await appCall(s, other.access_token, "DELETE", `/v1/app/connections/${encodeURIComponent(mine.id)}`)).status).toBe(404);
     expect((await appCall(s, lena.access_token, "DELETE", `/v1/app/connections/${encodeURIComponent(mine.id)}`)).status).toBe(204);
