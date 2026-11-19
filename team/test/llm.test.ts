@@ -24,6 +24,8 @@ describe("Llm", () => {
   it("sends the shape as JSON Schema", () => {
     const wire = toWire({ model: "haiku", maxTokens: 100, system: "s", user: "u", schema: z.object({ a: z.array(z.string()) }), what: "x" });
     expect(wire.schema).toMatchObject({ type: "object", properties: { a: { type: "array" } }, required: ["a"] });
+    // Claude Code refuses a schema that names its draft (tried for real: draft 2020-12 isn't known to it).
+    expect(wire.schema).not.toHaveProperty("$schema");
     const args = claudeCodeArgs(wire);
     for (const [flag, value] of [["--tools", ""], ["--setting-sources", ""], ["--model", "haiku"], ["--system-prompt", "s"]] as const) expect(args[args.indexOf(flag) + 1]).toBe(value);
     expect(args).toContain("--strict-mcp-config");

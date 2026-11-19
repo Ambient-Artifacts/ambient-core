@@ -45,7 +45,10 @@ export interface WireRequest {
 }
 
 export function toWire(req: LlmRequest): WireRequest {
-  return { model: req.model, maxTokens: req.maxTokens, system: req.system, user: req.user, schema: z.toJSONSchema(req.schema) as Record<string, unknown>, what: req.what };
+  // Without "$schema": zod names draft 2020-12, which Claude Code's --json-schema refuses ("no schema
+  // with key or ref"); the shape itself is plain JSON Schema either way.
+  const { $schema: _draft, ...schema } = z.toJSONSchema(req.schema) as Record<string, unknown>;
+  return { model: req.model, maxTokens: req.maxTokens, system: req.system, user: req.user, schema, what: req.what };
 }
 
 /** An answer checked against the shape; a wrong one is an error saying what it was for. */
