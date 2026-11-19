@@ -129,13 +129,15 @@ export const HostInfo = z.object({
   codexLogin: z.enum(["chatgpt", "api_key", "none"]).optional(),
   /** Whether Claude Code can run there: a sign-in from Ambient, or the computer's own (runner 0.10.0 on). */
   claudeSignedIn: z.boolean().optional(),
+  /** A team's computer: its team brain's version, and whether it answers there (runner 0.11.0 on). */
+  teamBrain: z.object({ version: z.string().max(40), ok: z.boolean() }).optional(),
 });
 export type HostInfo = z.infer<typeof HostInfo>;
 
 /** What Convex keeps of a computer's info: claudeSignedIn stays with the gateway (RoutineService.signedIn). */
 function storedInfo(info: HostInfo | undefined) {
   if (!info) return undefined;
-  const { claudeSignedIn: _signedIn, ...rest } = info;
+  const { claudeSignedIn: _signedIn, teamBrain: _brain, ...rest } = info;
   return rest;
 }
 
@@ -351,6 +353,15 @@ export interface Host {
   name: string;
 }
 
+/** The team brain a team's computer runs: which team, and the bundle (GET /runner/ambient-team.mjs). */
+export interface TeamBrainSpec {
+  teamId: string;
+  teamName: string;
+  slug: string;
+  version: string;
+  sha256: string;
+}
+
 /** What a computer's sync gets: enough to write the systemd units. */
 export interface HostRoutine {
   id: string;
@@ -413,6 +424,10 @@ export class RoutineService {
       teamBySlug?: (slug: string) => Promise<Team | undefined>;
       /** Bots' folders, memory and handoffs (docs/bots.md, "A bot's folder"). */
       folder?: BotFolder;
+      /** The team brain a team's computer runs (team-bundle.ts): its version and checksum. */
+      teamBundle?: () => Promise<{ version: string; sha256: string }>;
+      /** A team's brain moved to its computer: cached team lookups forget it. */
+      onTeamServer?: (teamId: string) => void;
     },
   ) {}
 
@@ -461,9 +476,10 @@ export class RoutineService {
     return new Set(teams.filter((t): t is Team => !!t && t.status === "active").map((t) => t.id));
   }
 
-  /** Whether a computer runs Ambient: a person's own, always (upkeep and bots); a team's server, when the team has bots. */
+  /** Whether a computer runs Ambient: a person's own and a team's, always (upkeep, the team's brain, bots). */
   async ambientOn(host: Host): Promise<boolean> {
-    if (host.teamId) return this.d.bots?.teams.includes("*") || (await this.botTeamIds()).has(host.teamId);
+    // A team's computer keeps it too: the team's brain may be reached through it (relay.ts).
+    if (host.teamId) return true;
     // A person's own computer always keeps its connection: their brain's upkeep runs there
     // (upkeep.ts), bots or not.
     return host.uid !== null;
@@ -867,17 +883,20 @@ export class RoutineService {
   // ---- the user's own computers ----
 
   /** A new computer of the user's: a one-time code for `ambient-runner setup`, valid 30 minutes. */
-  async addComputer(actor: Actor, name: string): Promise<{ computer: Computer; code: string; expiresAt: number; commands: string }> {
-    this.assertPersonalWrite(actor);
+  /**
+   * A new computer: one-time code for `ambient-runner setup`, valid 30 minutes. With `team` (its
+   * owner or an admin), the team's computer: it runs the team's brain when the team has no server
+   * of its own (docs/architecture.md, "A team on its own computer"), and the team's bots.
+   */
+  async addComputer(actor: Actor, name: string, team?: string): Promise<{ computer: Computer; code: string; expiresAt: number; commands: string }> {
+    const forTeam = team ? this.managedTeam(actor, team) : null;
+    if (!forTeam) this.assertPersonalWrite(actor);
     const code = newSetupCode();
     const expiresAt = this.now() + CODE_TTL_MS;
-    const out = await this.d.control.m(api.routines.addHost, {
-      uid: actor.uid as never,
-      name,
-      codeHash: this.d.codes.hash("host-setup", setupCode(code)),
-      expiresAt,
-      now: this.now(),
-    });
+    const codeHash = this.d.codes.hash("host-setup", setupCode(code));
+    const out = forTeam
+      ? await this.d.control.m(api.routines.addTeamHost, { uid: actor.uid as never, teamId: forTeam.id as never, name, codeHash, expiresAt, now: this.now() })
+      : await this.d.control.m(api.routines.addHost, { uid: actor.uid as never, name, codeHash, expiresAt, now: this.now() });
     if (!out.ok) throw refused(out.error);
     return { computer: this.computer(out.host as unknown as HostRow), code, expiresAt, commands: setupCommands(this.d.origin, code) };
   }
@@ -1054,7 +1073,7 @@ export class RoutineService {
   async sync(
     host: Host,
     info?: HostInfo,
-  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null; openai: string | null; model: StoredModel | null }> {
+  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null; openai: string | null; model: StoredModel | null; teamBrain: TeamBrainSpec | null }> {
     const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info: storedInfo(info), now: this.now() });
     if (!out) throw new RoutineError("unauthorized", "This computer was removed.", 401);
     if (info?.claudeSignedIn !== undefined) this.signedIn.set(host.id, info.claudeSignedIn);
@@ -1076,7 +1095,28 @@ export class RoutineService {
       openai: await this.openaiVersion(host),
       // The default model for its runs (a bot's own wins; startRun says).
       model: (out as unknown as { model?: StoredModel | null }).model ?? null,
+      // A team's computer runs the team's brain when the team has no server of its own.
+      teamBrain: await this.teamBrain(host, info),
     };
+  }
+
+  /**
+   * What a team's computer should run of the team's brain (docs/architecture.md, "A team on its own
+   * computer"): for a team with no server, or one already on this computer; never for a hosted team.
+   * Once the computer says the brain answers there, the team's address becomes `computer://<host>`.
+   */
+  private async teamBrain(host: Host, info: HostInfo | undefined): Promise<TeamBrainSpec | null> {
+    if (!host.teamId || !this.d.teamBundle) return null;
+    const team = (await this.d.control.q(api.teams.byId, { teamId: host.teamId as never })) as unknown as Team | null;
+    if (!team || team.status !== "active") return null;
+    const here = `computer://${host.id}`;
+    if (team.serverUrl && team.serverUrl !== here) return null;
+    const bundle = await this.d.teamBundle();
+    if (info?.teamBrain?.ok && team.serverUrl !== here) {
+      const set = await this.d.control.m(api.teams.setComputerServer, { teamId: host.teamId as never, hostId: host.id as never });
+      if (set.ok) this.d.onTeamServer?.(host.teamId);
+    }
+    return { teamId: team.id, teamName: team.name, slug: team.slug, version: bundle.version, sha256: bundle.sha256 };
   }
 
   /** A run starts: what to run, its owner's secrets as environment variables, and the run's id. */

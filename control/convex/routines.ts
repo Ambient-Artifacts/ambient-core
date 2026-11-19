@@ -291,6 +291,23 @@ export const addHost = mutation({
   },
 });
 
+/**
+ * A computer for a team (its owner or an admin adds it): it runs the team's brain when the team has
+ * no server of its own (docs/architecture.md, "A team on its own computer"), and the team's bots.
+ */
+export const addTeamHost = mutation({
+  args: { ...secretArg, uid: v.id("users"), teamId: v.id("teams"), name: v.string(), codeHash: v.string(), expiresAt: v.number(), now: v.number() },
+  handler: async (ctx, { secret, uid, teamId, name, codeHash, expiresAt, now }) => {
+    assertService(secret);
+    if (!(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
+    const hosts = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(MAX_HOSTS * 2);
+    for (const h of hosts) if (!h.tokenHash && (h.codeExpiresAt ?? 0) < now) await ctx.db.delete(h._id);
+    if (hosts.filter((h) => h.tokenHash).length >= MAX_HOSTS) return { ok: false as const, error: "too_many_computers" };
+    const id = await ctx.db.insert("routineHosts", { teamId, name, codeHash, codeExpiresAt: expiresAt, createdAt: now });
+    return { ok: true as const, host: hostShape((await ctx.db.get(id))!) };
+  },
+});
+
 /** Remove one of the user's computers. Its routines stay, without a computer, until they're given another. */
 export const removeHost = mutation({
   args: { ...secretArg, uid: v.id("users"), id: v.string(), now: v.number() },

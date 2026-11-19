@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Directory } from "../directory.ts";
 import { ClaudeToken, HostInfo, RoutineError, RoutineInput, RoutinePatch, RunProgress, RunResult, SecretName, SecretValue, type Actor, type Host, type RoutineService } from "./service.ts";
 import { addressKey, limiter } from "../limiter.ts";
+import type { TeamBundle } from "../team-bundle.ts";
 
 function fail(res: Response, err: unknown) {
   if (err instanceof RoutineError) {
@@ -119,13 +120,13 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
   });
 
   r.post("/v1/app/computers", d.auth, d.json, async (req, res) => {
-    const body = z.object({ name: z.string().trim().min(1).max(60) }).safeParse(req.body);
+    const body = z.object({ name: z.string().trim().min(1).max(60), team: z.string().regex(/^[a-z0-9-]{1,40}$/).optional() }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Give the computer a name." });
       return;
     }
     try {
-      res.json(await d.routines.addComputer(await actor(res), body.data.name));
+      res.json(await d.routines.addComputer(await actor(res), body.data.name, body.data.team));
     } catch (err) {
       fail(res, err);
     }
@@ -209,7 +210,7 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
 }
 
 /** The computers' API, and the runner script itself (public: it holds no secrets). */
-export function hostRouter(d: { routines: RoutineService; directory: Directory; runnerSource?: string; installSource?: string }): Router {
+export function hostRouter(d: { routines: RoutineService; directory: Directory; runnerSource?: string; installSource?: string; teamBundle?: () => Promise<TeamBundle> }): Router {
   const r = express.Router();
   const json = express.json({ limit: "256kb" });
   // limiter() prunes only old entries: clearing the map when it filled up let anyone reset every
@@ -223,6 +224,22 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
       return;
     }
     res.type("text/javascript").set("cache-control", "no-store").send(d.runnerSource);
+  });
+
+  // The team's brain for a team's own computer (team-bundle.ts): open source, so not behind a token;
+  // the runner checks its sha256 from sync before running it.
+  r.get("/runner/ambient-team.mjs", async (_req, res) => {
+    if (!d.teamBundle) {
+      res.status(404).end();
+      return;
+    }
+    try {
+      const b = await d.teamBundle();
+      res.type("text/javascript").set({ "cache-control": "no-store", "x-ambient-sha256": b.sha256, "x-ambient-version": b.version }).send(b.source);
+    } catch (err) {
+      console.error(`[gateway] building the team brain failed: ${(err as Error).message}`);
+      res.status(503).json({ error: "unavailable", message: "The team's brain couldn't be built here." });
+    }
   });
 
   // The one-line setup: curl -fsSL <origin>/install.sh | sudo bash -s <code> (runner/install.sh).

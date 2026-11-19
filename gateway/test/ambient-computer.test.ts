@@ -170,7 +170,9 @@ describe("Ambient on the team's server", () => {
     const codeHash = createHash("sha256").update("host-setup:TEAM-AMB1").digest("hex");
     await s.t.mutation(s.internal.routines.staffAddHost, { team: slug, name: "Team server", codeHash, expiresAt: Date.now() + 60_000 });
     const teamHost = String((await hostCall("", "POST", "/v1/host/setup", { code: "TEAM-AMB1", info })).json.token);
-    expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(false);
+    // A team's computer keeps its connection (the team's brain may be reached through it); Ambient
+    // answers the team's people there once the team has bots.
+    expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
     s.config.bots!.teams.push(slug);
     expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
 

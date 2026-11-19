@@ -13,6 +13,7 @@ import { z } from "zod";
 import { toWire, type Llm, type LlmAnswer, type WireRequest } from "@brain/team";
 import { ComputerUnavailable, type AmbientComputers } from "./bots/computer.ts";
 import type { RoutineService } from "./routines/service.ts";
+import type { Relay, RelayRequest } from "./relay.ts";
 
 /**
  * Whether the server's own ANTHROPIC_API_KEY may pay for the brain's upkeep, work-session notes and
@@ -100,7 +101,7 @@ const Wire = z.object({
 });
 
 /** The worker's way to the computers: only with the service secret (the worker has it, nobody else). */
-export function internalRouter(d: { secret: string; upkeep: UpkeepComputers }): Router {
+export function internalRouter(d: { secret: string; upkeep: UpkeepComputers; relay?: Relay }): Router {
   const r = express.Router();
   const want = Buffer.from(`Bearer ${d.secret}`);
   r.use("/v1/internal", (req, res, next) => {
@@ -132,6 +133,24 @@ export function internalRouter(d: { secret: string; upkeep: UpkeepComputers }): 
     } catch (err) {
       if (err instanceof ComputerUnavailable) res.status(409).json({ error: err.reason, message: err.message });
       else res.status(502).json({ error: "failed", message: (err as Error).message.slice(0, 500) });
+    }
+  });
+  // The worker's requests for a team's brain on its computer (relay.ts), answered as is.
+  r.post("/v1/internal/relay", json, async (req, res) => {
+    const hostId = typeof req.body?.hostId === "string" ? req.body.hostId : "";
+    const rq = req.body?.request as RelayRequest | undefined;
+    if (!d.relay || !hostId || !rq || typeof rq.path !== "string" || !rq.path.startsWith("/") || typeof rq.method !== "string") {
+      res.status(400).json({ error: "bad_request" });
+      return;
+    }
+    const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs) || 60_000, 1000), 300_000);
+    try {
+      const out = await d.relay(hostId, { method: rq.method, path: rq.path, headers: rq.headers ?? {}, body: rq.body ?? null }, timeoutMs);
+      res.setHeader("x-ambient-status", String(out.status));
+      res.setHeader("x-ambient-headers", Buffer.from(JSON.stringify(out.headers)).toString("base64"));
+      res.status(200).end(out.body);
+    } catch (err) {
+      res.status(err instanceof ComputerUnavailable ? 409 : 502).json({ error: err instanceof ComputerUnavailable ? err.reason : "failed", message: (err as Error).message.slice(0, 300) });
     }
   });
   return r;

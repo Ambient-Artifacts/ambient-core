@@ -37,6 +37,11 @@ export class Directory {
     return value;
   }
 
+  /** Every cached team and membership: a team's server changed (it moved to its computer). */
+  forgetTeams(): void {
+    for (const k of [...this.cache.keys()]) if (k.startsWith("teams:") || k.startsWith("team:")) this.cache.delete(k);
+  }
+
   invalidate(uid: string): void {
     this.cache.delete(`user:${uid}`);
     this.cache.delete(`teams:${uid}`);

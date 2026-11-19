@@ -35,6 +35,7 @@ import type { MicrosoftConnectFlow } from "./microsoft-connect.ts";
 import type { SignInNonces } from "./auth/signin-nonce.ts";
 import { VoiceBody, Voices } from "./voices.ts";
 import { upkeepState, type UpkeepComputers } from "./upkeep.ts";
+import { serverKind } from "./relay.ts";
 
 export interface AppApiDeps {
   /** An AI app's name, by its client id (oidc-provider's registered clients). */
@@ -252,7 +253,8 @@ export function appApiRouter(d: AppApiDeps): Router {
     ]);
     res.json({
       user,
-      teams: teams.map((t) => ({ slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug })),
+      // Where each team's brain runs: Ambient's server ("hosted"), the team's computer, or nowhere yet.
+      teams: teams.map((t) => ({ slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: serverKind(t.serverUrl) })),
       // Claude upkeep is opt-in: the app asks once (consolidateAsked) and it's off until then.
       prefs: { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true, pcc: record?.pcc ?? true },
       // What's left to set up (the app's reminder dot).
@@ -562,11 +564,15 @@ export function appApiRouter(d: AppApiDeps): Router {
       return;
     }
     const user = await d.directory.user(uid);
+    // A new team runs on a computer of its own (relay.ts), connected by its owner; Ambient's pool
+    // of hosted servers only with BRAIN_TEAM_POOL=true (self-hosting with spare servers).
+    const pool = process.env.BRAIN_TEAM_POOL === "true";
     const made = await d.control.m(api.teams.createOwned, {
       uid: uid as never,
       name,
       peopleSlug: `people/${slugify(user?.name ?? "member") || "member"}`,
       now: Date.now(),
+      pool,
     });
     if (!made.ok) {
       if (made.error === "no_server") {
@@ -579,11 +585,18 @@ export function appApiRouter(d: AppApiDeps): Router {
       }
       return;
     }
+    const server = made.server;
+    if (!server) {
+      d.directory.invalidate(uid);
+      const t = made.team;
+      res.json({ team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: "none" } });
+      return;
+    }
     try {
-      await d.teams.claim(made.server, { id: made.team.id, name: made.team.name });
+      await d.teams.claim(server, { id: made.team.id, name: made.team.name });
     } catch (err) {
       const claim = err instanceof TeamServerError ? err.claim : undefined;
-      console.error(`[gateway] claiming pool server ${made.server.serverId} failed (${claim ?? "error"}): ${(err as Error).message}`);
+      console.error(`[gateway] claiming pool server ${server.serverId} failed (${claim ?? "error"}): ${(err as Error).message}`);
       // It may have taken the claim before the answer was lost: keep the team, as when the server
       // is slow to restart. Freeing it then would hand a server that now serves a deleted team to
       // the next team, and every creation after would fail on it.
@@ -597,9 +610,9 @@ export function appApiRouter(d: AppApiDeps): Router {
     }
     d.directory.invalidate(uid);
     // Best effort: the server restarts as the team's; notes queue on the phone until it's up.
-    await d.teams.ready(made.server.url);
+    await d.teams.ready(server.url);
     const t = made.team;
-    res.json({ team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug } });
+    res.json({ team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: "hosted" } });
   });
 
   const managed = async (req: Request, res: Response) => {

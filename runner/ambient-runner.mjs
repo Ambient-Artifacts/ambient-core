@@ -20,7 +20,7 @@
 // One file, no dependencies, Node 18 or newer. The gateway serves it at /runner/ambient-runner.mjs
 // and `sync` replaces it when the gateway has a newer one.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createHash, createPublicKey, verify } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { chmodSync, chownSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, release, tmpdir, type } from "node:os";
 import { dirname, join } from "node:path";
@@ -199,7 +199,7 @@ function info(cfg, state) {
   // A sign-in from Ambient counts at once (claude.env changes with sync); Claude Code's own login as last checked.
   const env = runEnv(cfg);
   const claudeSignedIn = Boolean(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY) || state.claude.login === true;
-  return { hostname: hostname().slice(0, 120), os: `${type()} ${release()}`.slice(0, 120), runner: VERSION, claude: state.claude.version, claudeSignedIn, ...codexInfo(cfg, state) };
+  return { hostname: hostname().slice(0, 120), os: `${type()} ${release()}`.slice(0, 120), runner: VERSION, claude: state.claude.version, claudeSignedIn, ...codexInfo(cfg, state), ...(state.teamBrain ? { teamBrain: { version: String(state.teamBrain.version).slice(0, 40), ok: state.teamBrain.ok === true } } : {}) };
 }
 
 // ---- Codex (docs/bots.md, "Codex next to Claude Code") ----
@@ -447,6 +447,7 @@ async function sync() {
   ambientUnit(cfg, out.ambient === true);
   await claudeSync(cfg, state, out.claude ?? null);
   await openaiSync(cfg, state, out.openai ?? null);
+  await teamBrainSync(cfg, state, out.teamBrain ?? null);
   const model = out.model ?? null;
   if (JSON.stringify(state.model ?? null) !== JSON.stringify(model)) {
     state.model = model;
@@ -455,6 +456,200 @@ async function sync() {
   }
   writeState(state);
   if (out.runner?.sha256 && (await selfUpdate(cfg, out.runner)) && out.ambient === true) systemctl("restart", AMBIENT_UNIT);
+}
+
+// ---- A team's brain on the team's computer ----
+//
+// A team without a server of its own runs its brain here (docs/architecture.md, "A team on its own
+// computer"): the team server as one file from the gateway (checked against the sha256 sync gives),
+// on 127.0.0.1 only, as the routine user, with its data in /var/lib/ambient-team, and its nightly
+// upkeep on this computer's Claude. Nothing listens outside: the gateway's requests for it come over
+// the long poll (http jobs) and go back the same way. Sync stops it when the team no longer runs here
+// (its data stays).
+
+const TEAM_UNIT = "ambient-team.service";
+const TEAM_UPKEEP = "ambient-team-upkeep";
+const TEAM_PORT = Number(process.env.AMBIENT_TEAM_PORT || 18790);
+const TEAM_BUNDLE = join(INSTALL_DIR, "ambient-team.mjs");
+const TEAM_ENV = join(CONFIG_DIR, "team.env");
+const TEAM_DATA = process.env.AMBIENT_TEAM_DATA || "/var/lib/ambient-team";
+
+/** Node's own SQLite (the team brain's search index) needs Node 22.13 or newer. */
+function nodeForTeamBrain() {
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  return major > 22 || (major === 22 && minor >= 13);
+}
+
+async function teamBrainHealthy() {
+  try {
+    return (await fetch(`http://127.0.0.1:${TEAM_PORT}/health`, { signal: AbortSignal.timeout(3000) })).ok;
+  } catch {
+    return false;
+  }
+}
+
+async function teamBrainSync(cfg, state, spec) {
+  const units = [TEAM_UNIT, `${TEAM_UPKEEP}.service`, `${TEAM_UPKEEP}.timer`];
+  if (!spec) {
+    if (existsSync(join(UNIT_DIR, TEAM_UNIT))) {
+      systemctl("disable", "--now", `${TEAM_UPKEEP}.timer`);
+      systemctl("disable", "--now", TEAM_UNIT);
+      for (const u of units) rmSync(join(UNIT_DIR, u), { force: true });
+      systemctl("daemon-reload");
+      log(`Stopped the team's brain here (its data stays in ${TEAM_DATA})`);
+    }
+    delete state.teamBrain;
+    return;
+  }
+  if (!nodeForTeamBrain()) {
+    if (state.teamBrain?.error !== "node") log(`The team's brain needs Node 22.13 or newer here (this is ${process.versions.node}). Install a newer Node, then run setup again.`);
+    state.teamBrain = { version: spec.version, ok: false, error: "node" };
+    return;
+  }
+  let changed = false;
+  const have = existsSync(TEAM_BUNDLE) ? createHash("sha256").update(readFileSync(TEAM_BUNDLE)).digest("hex") : null;
+  if (have !== spec.sha256) {
+    let buf;
+    try {
+      const res = await fetch(`${cfg.server}/runner/ambient-team.mjs`, { headers: { authorization: `Bearer ${cfg.token}`, "user-agent": `ambient-runner/${VERSION}` }, signal: AbortSignal.timeout(120_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      buf = Buffer.from(await res.arrayBuffer());
+    } catch (err) {
+      log(`Couldn't fetch the team's brain: ${err.message}`);
+      state.teamBrain = { version: spec.version, ok: await teamBrainHealthy() };
+      return;
+    }
+    if (createHash("sha256").update(buf).digest("hex") !== spec.sha256) {
+      log("The team's brain from the gateway didn't match its checksum; not installed.");
+      state.teamBrain = { version: spec.version, ok: await teamBrainHealthy() };
+      return;
+    }
+    mkdirSync(INSTALL_DIR, { recursive: true });
+    writeFileSync(`${TEAM_BUNDLE}.new`, buf, { mode: 0o644 });
+    renameSync(`${TEAM_BUNDLE}.new`, TEAM_BUNDLE);
+    changed = true;
+    log(`Installed the team's brain ${spec.version} for ${spec.teamName}`);
+  }
+  const clean = (v) => String(v).replace(/[\r\n]/g, " ").slice(0, 200);
+  const secret = readEnvFile(TEAM_ENV).BRAIN_TEAM_SECRET || randomBytes(32).toString("base64url");
+  const env = {
+    BRAIN_TEAM_ID: clean(spec.teamId),
+    BRAIN_TEAM_NAME: clean(spec.teamName),
+    BRAIN_DATA_DIR: TEAM_DATA,
+    BRAIN_GATEWAY_ISSUER: cfg.server,
+    BRAIN_LISTEN_HOST: "127.0.0.1",
+    PORT: String(TEAM_PORT),
+    BRAIN_TEAM_SECRET: secret,
+    BRAIN_VERSION: clean(spec.version),
+  };
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  if (writeIfChanged(TEAM_ENV, Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n")) {
+    chmodSync(TEAM_ENV, 0o600);
+    changed = true;
+  }
+  const as = cfg.user && cfg.user !== "root" ? asUser(cfg.user) : null;
+  mkdirSync(TEAM_DATA, { recursive: true, mode: 0o750 });
+  if (as) chownSync(TEAM_DATA, as.uid, as.gid);
+  const runAs = as ? `User=${cfg.user}\nGroup=${as.gid}\n` : "";
+  const path = process.env.PATH || SYSTEM_PATH.join(":");
+  const claudeConfig = runEnv(cfg).CLAUDE_CONFIG_DIR;
+  const serve = `# Written by ambient-runner; changes here are overwritten.
+[Unit]
+Description=Ambient: the team's brain for ${env.BRAIN_TEAM_NAME} (127.0.0.1:${TEAM_PORT} only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+${runAs}EnvironmentFile=${TEAM_ENV}
+Environment=PATH=${path}
+ExecStart=${cfg.node} ${TEAM_BUNDLE} serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`;
+  const upkeep = `# Written by ambient-runner; changes here are overwritten.
+[Unit]
+Description=Ambient: the team's nightly upkeep, with this computer's Claude
+
+[Service]
+Type=oneshot
+${runAs}EnvironmentFile=${TEAM_ENV}
+EnvironmentFile=-${CLAUDE_ENV}
+Environment=PATH=${path}
+Environment=HOME=${as ? home(cfg.user) : "/root"}
+Environment=BRAIN_CLAUDE=${cfg.claude}
+${claudeConfig ? `Environment=CLAUDE_CONFIG_DIR=${claudeConfig}\n` : ""}ExecStart=${cfg.node} ${TEAM_BUNDLE} consolidate
+TimeoutStartSec=2h
+`;
+  const timer = `# Written by ambient-runner; changes here are overwritten.
+[Unit]
+Description=Ambient: the team's upkeep, nightly
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`;
+  const unitsChanged = [writeIfChanged(join(UNIT_DIR, TEAM_UNIT), serve), writeIfChanged(join(UNIT_DIR, `${TEAM_UPKEEP}.service`), upkeep), writeIfChanged(join(UNIT_DIR, `${TEAM_UPKEEP}.timer`), timer)].some(Boolean);
+  if (unitsChanged) systemctl("daemon-reload");
+  if (unitsChanged || changed) {
+    systemctl("enable", TEAM_UNIT);
+    systemctl("restart", TEAM_UNIT);
+    systemctl("enable", "--now", `${TEAM_UPKEEP}.timer`);
+  } else if (systemctl("is-active", TEAM_UNIT).stdout.trim() !== "active") {
+    systemctl("start", TEAM_UNIT);
+  }
+  let ok = await teamBrainHealthy();
+  for (let i = 0; !ok && (unitsChanged || changed) && i < 10; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    ok = await teamBrainHealthy();
+  }
+  if (ok && !state.teamBrain?.ok) log(`The team's brain for ${spec.teamName} answers here`);
+  state.teamBrain = { version: spec.version, ok };
+}
+
+/** A request for the team's brain from the gateway (relay.ts): passed to 127.0.0.1, answered as is. */
+async function relayJob(cfg, job) {
+  let status = 502;
+  let headers = {};
+  let body = Buffer.alloc(0);
+  let error = null;
+  try {
+    const path = String(job.path ?? "");
+    if (!path.startsWith("/") || path.startsWith("//")) throw new Error("not a path on the team's brain");
+    const method = String(job.method ?? "GET").toUpperCase();
+    const res = await fetch(`http://127.0.0.1:${TEAM_PORT}${path}`, {
+      method,
+      headers: job.headers && typeof job.headers === "object" ? job.headers : {},
+      body: job.body && method !== "GET" && method !== "HEAD" ? Buffer.from(String(job.body), "base64") : undefined,
+      redirect: "manual",
+      signal: AbortSignal.timeout(280_000),
+    });
+    status = res.status;
+    for (const [k, v] of res.headers) if (!["connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding"].includes(k)) headers[k] = v;
+    body = Buffer.from(await res.arrayBuffer());
+  } catch (err) {
+    error = `The team's brain on this computer didn't answer: ${err.message}`;
+  }
+  await fetch(`${cfg.server}/v1/host/relay/${job.id}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${cfg.token}`,
+      "user-agent": `ambient-runner/${VERSION}`,
+      "content-type": "application/octet-stream",
+      "x-ambient-status": String(status),
+      "x-ambient-headers": Buffer.from(JSON.stringify(headers)).toString("base64"),
+      ...(error ? { "x-ambient-error": Buffer.from(error.slice(0, 400)).toString("base64") } : {}),
+    },
+    body,
+    signal: AbortSignal.timeout(120_000),
+  }).catch((err) => log(`Couldn't send the team brain's answer back: ${err.message}`));
 }
 
 // ---- Ambient on this computer ----
@@ -828,6 +1023,7 @@ async function ambientService() {
     else if (job?.kind === "codex-login") void codexLoginJob(cfg, job);
     else if (job?.kind === "start") startJob(job);
     else if (job?.kind === "complete") void complete(job);
+    else if (job?.kind === "http") void relayJob(cfg, job);
     else if (job?.uid && job.token) {
       // One person's messages one after another in their session; Ambient's own turns (a bot's
       // question, the heartbeat) one after another in short sessions of their own, beside it.
@@ -2124,6 +2320,8 @@ async function claudeToken() {
 
 function uninstall() {
   if (process.getuid?.() !== 0) die("Run uninstall with sudo.");
+  // A team's brain here stops too; its data stays in TEAM_DATA (the team's wiki, until it has a new home).
+  for (const u of [`${TEAM_UPKEEP}.timer`, TEAM_UNIT]) systemctl("disable", "--now", u);
   for (const f of existsSync(UNIT_DIR) ? readdirSync(UNIT_DIR) : []) {
     if (f.startsWith(PREFIX) && f.endsWith(".timer")) systemctl("disable", "--now", f);
   }
@@ -2131,13 +2329,13 @@ function uninstall() {
   // Ambient's chat service too (its unit is ambient-runner-ambient.service).
   systemctl("disable", "--now", AMBIENT_UNIT);
   for (const f of readdirSync(UNIT_DIR)) {
-    if (f.startsWith(PREFIX) || f.startsWith("ambient-runner.") || f === AMBIENT_UNIT) rmSync(join(UNIT_DIR, f), { force: true });
+    if (f.startsWith(PREFIX) || f.startsWith("ambient-runner.") || f === AMBIENT_UNIT || f.startsWith("ambient-team")) rmSync(join(UNIT_DIR, f), { force: true });
   }
   systemctl("daemon-reload");
   rmSync(CONFIG_DIR, { recursive: true, force: true });
   rmSync(STATE_DIR, { recursive: true, force: true });
   rmSync(INSTALL_DIR, { recursive: true, force: true });
-  log("Removed. Remove the computer in the Ambient app too. The user it ran as stays (an \"ambient\" user made by install.sh: sudo userdel -r ambient).");
+  log(`Removed. Remove the computer in the Ambient app too. The user it ran as stays (an "ambient" user made by install.sh: sudo userdel -r ambient)${existsSync(TEAM_DATA) ? `, and so does the team brain's data in ${TEAM_DATA}` : ""}.`);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);

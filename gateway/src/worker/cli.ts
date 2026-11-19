@@ -25,6 +25,7 @@ import { alerts, checkHealth, loadState, post, saveState, systemdUnit } from "./
 import { runPersonalWorker } from "./personal.ts";
 import { runDigest } from "../digest.ts";
 import { computerLlm, GatewayUpkeep, useServerKey } from "../upkeep.ts";
+import { gatewayRelay, relayingFetch } from "../relay.ts";
 import { apnsSender, Notifier } from "../push.ts";
 
 const [cmd, ...flags] = process.argv.slice(2);
@@ -38,6 +39,11 @@ const control = new Control({ query: (fn, args) => convex.query(fn, args), mutat
  */
 function upkeepMode(): "computer" | "key" {
   return useServerKey() ? "key" : "computer";
+}
+
+/** fetch for team servers: a team on its own computer is reached through the gateway's relay (relay.ts). */
+function teamFetch(): typeof fetch {
+  return relayingFetch(gatewayRelay(process.env.BRAIN_HEALTH_GATEWAY_URL || `http://127.0.0.1:${process.env.PORT ?? 8080}`, config.serviceSecret));
 }
 
 /** The gateway's way to people's computers (its internal routes, with the service secret). */
@@ -90,7 +96,7 @@ if (cmd === "personal") {
   const personal = new PersonalStore(control, config.masterKey);
   const directory = new Directory(control, 60_000);
   const revisions = new Revisions(control);
-  const teams = new TeamLink(config.origin, config.signingKeys[0]!, fetch, (team) => revisions.teamChanged(team.id));
+  const teams = new TeamLink(config.origin, config.signingKeys[0]!, teamFetch(), (team) => revisions.teamChanged(team.id));
   const sessions = new SessionService({ control, personal, directory, teams });
   // Each session's note is written on its person's computer (upkeep.ts); BRAIN_USE_SERVER_KEY=true: on the key.
   const key = process.env.ANTHROPIC_API_KEY;
@@ -114,7 +120,7 @@ if (cmd === "personal") {
   // The morning push of open action items, in each user's time zone (digest.ts).
   const personal = new PersonalStore(control, config.masterKey);
   const directory = new Directory(control, 60_000);
-  const teams = new TeamLink(config.origin, config.signingKeys[0]!, fetch);
+  const teams = new TeamLink(config.origin, config.signingKeys[0]!, teamFetch());
   const notifier = new Notifier({ control, send: apnsSender(config.apns) });
   const runs = await runDigest({ control, personal, teams, directory, notifier });
   const sent = runs.filter((r) => r.status === "sent").length;
@@ -129,7 +135,10 @@ if (cmd === "personal") {
     gatewayUrl: process.env.BRAIN_HEALTH_GATEWAY_URL || `http://127.0.0.1:${process.env.PORT ?? 8080}`,
     now,
     unit: systemdUnit,
-    teamToken: (team) => new TeamLink(config.origin, config.signingKeys[0]!, fetch).token(team, "health"),
+    teamToken: (team) => new TeamLink(config.origin, config.signingKeys[0]!, teamFetch()).token(team, "health"),
+    // A team on its own computer is checked through the gateway's relay (relay.ts).
+    fetchImpl: teamFetch(),
+    poolInUse: process.env.BRAIN_TEAM_POOL === "true",
   });
   const out = alerts(await loadState(stateFile), problems, now, flags.includes("--daily"), summary);
   for (const m of out.messages) await post(process.env.BRAIN_ALERT_WEBHOOK, m).catch((err) => console.error(`alert failed: ${(err as Error).message}`));

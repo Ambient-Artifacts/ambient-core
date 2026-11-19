@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { PatService } from "../auth/pats.ts";
 import type { Turn } from "../ai/loop.ts";
 import type { LlmAnswer, WireRequest } from "@brain/team";
+import type { RelayRequest, RelayResponse } from "../relay.ts";
 
 /** Work for the computer that isn't a chat message: a root command, or a bot run to start now. */
 export type ControlJob =
@@ -25,7 +26,9 @@ export type ControlJob =
    * One structured answer from Claude Code there, for the brain's upkeep (docs/architecture.md,
    * "Upkeep on your computer"): no tools, no MCP, no settings, no saved session.
    */
-  | ({ id: string; kind: "complete" } & WireRequest);
+  | ({ id: string; kind: "complete" } & WireRequest)
+  /** A request for the team's brain on this computer (relay.ts): the runner passes it to 127.0.0.1. */
+  | ({ id: string; kind: "http" } & RelayRequest);
 
 export interface ComputerJob {
   id: string;
@@ -80,6 +83,7 @@ export class AmbientComputers {
   private seen = new Map<string, number>();
   private pending = new Map<string, { hostId: string; resolve: (text: string) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
   private tokens = new Map<string, { token: string; expiresAt: number }>();
+  private relays = new Map<string, { hostId: string; resolve: (r: RelayResponse) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
 
   constructor(
     private d: {
@@ -208,6 +212,36 @@ export class AmbientComputers {
     if (out.output === undefined) throw new Error(`the computer sent no ${req.what}`);
     const u = out.usage ?? {};
     return { output: out.output, usage: { input_tokens: Number(u.input_tokens) || 0, output_tokens: Number(u.output_tokens) || 0, cache_read_tokens: Number(u.cache_read_tokens) || 0 } };
+  }
+
+  /**
+   * A request for the team's brain on the computer (relay.ts), answered as the team server answered
+   * it. Rejects when the computer isn't connected or doesn't answer within `timeoutMs`.
+   */
+  relay(hostId: string, req: RelayRequest, timeoutMs: number): Promise<RelayResponse> {
+    if (!this.connected(hostId)) return Promise.reject(new ComputerUnavailable("offline"));
+    const job: ControlJob = { id: randomUUID(), kind: "http", ...req };
+    return new Promise<RelayResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.relays.delete(job.id);
+        this.unqueue(hostId, job.id);
+        reject(new ComputerUnavailable("timeout"));
+      }, timeoutMs);
+      timer.unref();
+      this.relays.set(job.id, { hostId, resolve, reject, timer });
+      this.hand(hostId, job);
+    });
+  }
+
+  /** The team server's answer to a relayed request, from the computer. */
+  relayed(hostId: string, jobId: string, res: RelayResponse | { error: string }): boolean {
+    const p = this.relays.get(jobId);
+    if (!p || p.hostId !== hostId) return false;
+    this.relays.delete(jobId);
+    clearTimeout(p.timer);
+    if ("error" in res) p.reject(new Error(res.error));
+    else p.resolve(res);
+    return true;
   }
 
   /** A job that timed out before the computer took it leaves its queue. */

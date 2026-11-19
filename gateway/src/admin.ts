@@ -275,10 +275,11 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
       name,
       peopleSlug: `people/${slugify(owner.name) || "member"}`,
       now: now(),
+      pool: true,
     });
-    if (!made.ok) {
-      if (made.error === "no_server") throw new AdminError("No free team server. Start one and add it with: admin server add <server-id> <url>");
-      throw new AdminError("Give the team a name.");
+    if (!made.ok || !made.server) {
+      if (!made.ok && made.error !== "no_server") throw new AdminError("Give the team a name.");
+      throw new AdminError("No free team server. Start one and add it with: admin server add <server-id> <url>");
     }
     const link = new TeamLink(origin, d.config.signingKeys[0]!, d.fetchImpl, (team) => new Revisions(d.control).teamChanged(team.id));
     try {

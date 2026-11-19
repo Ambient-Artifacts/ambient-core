@@ -11,12 +11,18 @@ let owner: string;
 let ownerUid: string;
 
 beforeAll(async () => {
+  // These tests are about Ambient's pool of hosted servers (self-hosting with spare servers); new
+  // teams otherwise run on their own computer (team-computer.test.ts).
+  process.env.BRAIN_TEAM_POOL = "true";
   s = await startStack();
   const signedIn = await signIn(s, "apple-owner", "Lena Vogel");
   owner = signedIn.access_token;
   ownerUid = signedIn.user.uid;
 });
-afterAll(() => s.close());
+afterAll(() => {
+  delete process.env.BRAIN_TEAM_POOL;
+  s.close();
+});
 
 describe("teams from the app", () => {
   let code: string;
@@ -24,7 +30,7 @@ describe("teams from the app", () => {
   let maya: string;
 
   it("creates a team on the free pool server, which then serves it", async () => {
-    const health = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() }) });
+    const health = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() }), poolInUse: true });
     expect(health.problems).toEqual([]);
 
     const made = await appCall(s, owner, "POST", "/v1/app/teams", { name: "Ambient Artifacts" });
@@ -43,7 +49,7 @@ describe("teams from the app", () => {
     const again = await appCall(s, owner, "POST", "/v1/app/teams", { name: "Second Team" });
     expect(again.status).toBe(503);
     expect(again.json.error).toBe("no_server");
-    const health = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() }) });
+    const health = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() }), poolInUse: true });
     expect(health.problems.map((p) => p.key)).toContain("pool:empty");
   });
 

@@ -71,6 +71,15 @@ Scopes are `personal:read`, `personal:write`, `team:read`, `team:write` and `ses
 - So Convex, its backups and anyone with only database access see ciphertext. The gateway decrypts in memory to serve MCP and sync.
 - Team wikis are plain git on the team's own server, readable by the team's tools by design. In Ambient Cloud, each team server is a separate VM that only the gateway can reach.
 
+## A team on its own computer
+
+Ambient's own servers don't host new teams: a team runs on a computer of its own, a Linux server its owner or an admin connects with the same one-line command as a personal computer (`POST /v1/app/computers` with `team`). Creating a team never waits for a server: it starts with none (`server: "none"` in the apps), its people can join, and its brain switches on once the computer is there.
+
+- **What runs there.** The team server (the team's wiki in git, its search index, delivery to OneDrive or a repo) as one file, `ambient-team.mjs`: the gateway builds it from this checkout with esbuild (`gateway/src/team-bundle.ts`, Node's own SQLite in place of better-sqlite3, so the computer needs Node 22.13 or newer) and serves it at `/runner/ambient-team.mjs`. The team computer's sync names it with its sha256 (`teamBrain`); the runner fetches it, checks the checksum, and runs it as the routine user on **127.0.0.1 only** (`ambient-team.service`, data in `/var/lib/ambient-team`, a secret of its own for what it seals). Its nightly upkeep (`ambient-team-upkeep.timer`) runs `consolidate` with the computer's Claude (`claudeCodeLlm`, the runner's isolated Claude settings). The team's bots run there too.
+- **How the gateway reaches it.** Not over the internet: through the runner's long poll, the connection Ambient's chat and upkeep already use (`gateway/src/relay.ts`). Once the runner says the brain answers (`info.teamBrain.ok`), the team's address becomes `computer://<hostId>`; `TeamLink` fetches it like any team server, and the request goes to the computer as an `http` job, which the runner passes to 127.0.0.1 and answers with the response as is (`POST /v1/host/relay/:jobId`). The worker relays through the gateway (`/v1/internal/relay`, service secret only). So the computer needs no domain, no open port and no certificate, and can sit behind NAT; the team server still checks the gateway's signed token on every request.
+- **Never a hosted team's.** A team with a server of Ambient's keeps it; a computer only takes a team without one (`teams.setComputerServer`). Ambient's pool of hosted servers is still there for self-hosting (`BRAIN_TEAM_POOL=true`); without it, an empty pool isn't a problem.
+- **When the computer is off,** the team's brain is unreachable: reads fail with the team server unavailable, and notes queue on the phones as they do for a restarting server. The health check notes it without alerting; it's the team's to see in the app.
+
 ## Deployments
 
 | | Ambient Cloud | Self-hosted |

@@ -135,7 +135,9 @@ The default, `none`, lets in only the people you add. The server takes Sign in w
 
 ## Teams
 
-The compose file runs one team server, `team-1`. It waits in a pool until a team claims it, either from the app (**Settings → Teams → Create a team**, then invite people from there) or with the admin CLI:
+A team created in the app runs on a computer of its own, which its owner connects after creating it ([architecture](architecture.md), "A team on its own computer"). To give new teams a server from your own pool instead, set `BRAIN_TEAM_POOL=true` on the gateway and its jobs (the compose file does, for its `team-1`).
+
+The compose file runs one team server, `team-1`. It waits in a pool until a team claims it, either from the app (with `BRAIN_TEAM_POOL=true`: **Settings → Teams → Create a team**, then invite people from there) or with the admin CLI:
 
 ```sh
 docker compose exec gateway admin team create "Acme" --owner you@example.com
@@ -267,7 +269,7 @@ repos, and bots get GitHub's events and a short-lived token for just those repos
 
 **Overview:** `docker compose exec gateway admin list` shows accounts, teams and team servers.
 
-**Health alerts:** set `BRAIN_ALERT_WEBHOOK` to a Slack-compatible incoming webhook. The health job posts new problems, recoveries and a daily summary. Problems it watches for include work sessions that keep failing, team copies that don't get through, notes waiting too long for upkeep, failing repo syncs and an empty team server pool. That last one is expected once your only team server is claimed; it only means `admin team create` has nowhere to put a new team.
+**Health alerts:** set `BRAIN_ALERT_WEBHOOK` to a Slack-compatible incoming webhook. The health job posts new problems, recoveries and a daily summary. Problems it watches for include work sessions that keep failing, team copies that don't get through, notes waiting too long for upkeep, failing repo syncs and, with `BRAIN_TEAM_POOL=true`, an empty team server pool. That last one is expected once your only team server is claimed; it only means a new team has nowhere to go.
 
 **Database dashboard:** `docker compose --profile dashboard up -d dashboard`, then open `http://127.0.0.1:6791` (over an SSH tunnel from your laptop: `ssh -L 6791:127.0.0.1:6791 -L 3210:127.0.0.1:3210 you@server`). Sign in with `CONVEX_SELF_HOSTED_ADMIN_KEY` from `.env`. Personal pages are encrypted there, as intended.
 

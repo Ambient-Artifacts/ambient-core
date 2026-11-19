@@ -104,6 +104,10 @@ if [ -n "$NODE" ]; then
   major=$(node_major "$NODE")
   [ "$major" -ge "$MIN_NODE" ] || die "$NODE is Node $major, and the runner needs $MIN_NODE or newer. Upgrade that Node (the setup doesn't replace an installed one), then run this again."
   say "Node: $("$NODE" --version), already here ($NODE)"
+  # A team's brain on its own computer uses Node's own SQLite (docs/architecture.md, "A team on its own computer").
+  if ! "$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=13)?0:1)'; then
+    warn "for a team's computer, the team's brain needs Node 22.13 or newer (this is $("$NODE" --version)). Bots and your own chat work as it is."
+  fi
 else
   say "Node: installing Node $NODE_MAJOR for the whole system"
   case "$PKG" in

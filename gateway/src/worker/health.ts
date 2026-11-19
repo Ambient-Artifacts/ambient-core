@@ -24,6 +24,8 @@ export interface HealthDeps {
   unit?: (name: string) => Promise<{ result: string; lastRunAt: number | null } | null>;
   /** A team server's health token (TeamLink, purpose "health"): only with it does /health say more than "ok". */
   teamToken?: (team: { id: string; slug: string }) => Promise<string>;
+  /** New teams take a server from the pool (BRAIN_TEAM_POOL=true): an empty pool is then a problem. */
+  poolInUse?: boolean;
 }
 
 const HOUR = 3_600_000;
@@ -77,7 +79,10 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
       }
       summary.push(`${team.slug}: ${h.pages} pages, last run ${c?.lastStatus ?? "never"}${c?.lastRunAt ? ` ${c.lastRunAt.slice(0, 16)}` : ""}, ${c?.pendingNotes ?? 0} pending`);
     } catch (err) {
-      problems.push({ key: `team:${team.slug}:down`, text: `Team ${team.name} server unreachable: ${(err as Error).message}` });
+      // A team on its own computer (relay.ts): that computer being off is the team's to see in the
+      // app, not an alert of ours.
+      if (team.serverUrl.startsWith("computer://")) summary.push(`${team.slug}: its computer isn't connected`);
+      else problems.push({ key: `team:${team.slug}:down`, text: `Team ${team.name} server unreachable: ${(err as Error).message}` });
     }
   }
 
@@ -88,8 +93,9 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
   if (sessions.overdueShares) problems.push({ key: "sessions:shares", text: `${sessions.overdueShares} work session(s) held for a team aren't getting through.` });
 
   // The pool of unclaimed team servers: creating a team in the app needs one.
+  // Only when new teams take one (BRAIN_TEAM_POOL=true); otherwise they run on their own computer.
   const pool = await d.control.q(api.teams.freeServers, {});
-  if (!pool.length) problems.push({ key: "pool:empty", text: "No free team servers left: creating a team in the app fails until one is registered." });
+  if (!pool.length && d.poolInUse) problems.push({ key: "pool:empty", text: "No free team servers left: creating a team in the app fails until one is registered." });
   for (const server of pool) {
     try {
       const r = await get(`${server.url}/health`, { signal: AbortSignal.timeout(10_000) });
