@@ -47,9 +47,8 @@ beforeAll(async () => {
 afterAll(() => s.close());
 
 describe("Ambient on the person's computer", () => {
-  it("is only for accounts with bots, and sync says so", async () => {
-    expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(false);
-    expect((await hostCall(host, "GET", "/v1/host/ambient/next")).status).toBe(403);
+  it("keeps a person's own computer connected (upkeep runs there, bots or not), and sync says so", async () => {
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
     s.config.bots!.users.push(lena.user.uid);
     expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
   });

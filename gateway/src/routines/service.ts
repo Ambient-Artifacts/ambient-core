@@ -445,10 +445,12 @@ export class RoutineService {
     return new Set(teams.filter((t): t is Team => !!t && t.status === "active").map((t) => t.id));
   }
 
-  /** Whether a computer runs Ambient: a person's own, when they have bots; a team's server, when the team has. */
+  /** Whether a computer runs Ambient: a person's own, always (upkeep and bots); a team's server, when the team has bots. */
   async ambientOn(host: Host): Promise<boolean> {
     if (host.teamId) return this.d.bots?.teams.includes("*") || (await this.botTeamIds()).has(host.teamId);
-    return host.uid !== null && (await this.botsForUser(host.uid));
+    // A person's own computer always keeps its connection: their brain's upkeep runs there
+    // (upkeep.ts), bots or not.
+    return host.uid !== null;
   }
 
   /**

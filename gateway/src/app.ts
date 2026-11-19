@@ -59,6 +59,7 @@ import { personalInstructions } from "./mcp/context.ts";
 import { MsTeamsBot } from "./msteams/bot.ts";
 import { BotClient, InboundVerifier } from "./msteams/botframework.ts";
 import { msteamsRouter } from "./msteams/route.ts";
+import { internalRouter, Upkeep, useServerKey } from "./upkeep.ts";
 
 export const VERSION = "0.1.0";
 
@@ -187,7 +188,7 @@ export function createApp(deps: AppDeps) {
       new MsTeamsBot({
         config: b,
         client: new BotClient(b, deps.msteams?.fetchImpl ?? deps.fetchImpl),
-        apiKey: deps.msteams?.apiKey ?? process.env.ANTHROPIC_API_KEY,
+        apiKey: deps.msteams?.apiKey ?? (useServerKey() ? process.env.ANTHROPIC_API_KEY : undefined),
         fetchImpl: deps.msteams?.fetchImpl ?? deps.fetchImpl,
         // The team's members with their sign-in email (Convex has no lookup by email; a team is small).
         accounts: async () => {
@@ -237,6 +238,8 @@ export function createApp(deps: AppDeps) {
   // Ambient on a person's own computer (their Claude plan) when one is connected; the server's key otherwise.
   const computers = new AmbientComputers({ pats, scopes: MCP_SCOPES });
   startNow = (hostId, routineId) => computers.start(hostId, routineId);
+  // The brain's upkeep and work-session notes, written by Claude on the person's own computer.
+  const upkeep = new Upkeep({ routines, computers });
   // Root commands Ambient asks for, run by the computer's runner after an approval (or at once on full access).
   const admin = new AdminService({ control, keys: routines.keys, routines, computers, notifier });
   const ambient: AmbientChat = new AmbientChat({
@@ -247,7 +250,8 @@ export function createApp(deps: AppDeps) {
       const personal = await personalInstructions(principal, readers, { name: await userName(uid).catch(() => undefined) });
       return buildMcpServer({ principal, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, personal });
     },
-    apiKey: deps.ambient?.apiKey ?? process.env.ANTHROPIC_API_KEY,
+    // Without a computer, the server's key answers only where the operator pays (upkeep.ts, useServerKey).
+    apiKey: deps.ambient ? deps.ambient.apiKey : useServerKey() ? process.env.ANTHROPIC_API_KEY : undefined,
     model: config.ambientModel ?? "claude-sonnet-5-5",
     fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
     computers,
@@ -333,10 +337,12 @@ export function createApp(deps: AppDeps) {
   app.use(botRunRouter({ bots, history: folders.history }));
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(ambientHostRouter({ routines, directory, computers }));
+  app.use(internalRouter({ secret: config.serviceSecret, upkeep }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
   app.use(
     appApiRouter({
       control,
+      upkeep,
       directory,
       access: appAccess(config.origin, config.signingKeys),
       pairing,

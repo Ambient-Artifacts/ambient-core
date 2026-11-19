@@ -82,7 +82,7 @@ Your server lets in only the people you add. Accounts are made with the admin CL
 docker compose exec gateway admin user add you@example.com --name "Your Name" --upkeep
 ```
 
-`--upkeep` lets Claude keep this person's wiki current (it needs `ANTHROPIC_API_KEY`). Leave it out for anyone who hasn't agreed to their notes going to Anthropic. `docker compose exec gateway admin` lists all commands.
+`--upkeep` lets Claude keep this person's wiki current (on their computer, or on the server's key with `BRAIN_USE_SERVER_KEY=true`). Leave it out for anyone who hasn't agreed to their notes going to Anthropic. `docker compose exec gateway admin` lists all commands.
 
 Use the email of the person's Apple ID: when they sign in from the app, that's how the server knows the account is theirs (see [the iPhone and Mac apps](#the-iphone-and-mac-apps)).
 
@@ -105,7 +105,7 @@ claude plugin marketplace add Ambient-Artifacts/ambient-core
 claude plugin install ambient@ambient
 ```
 
-Claude Code asks for the token. Set **Ambient server** to `https://ambient.example.com` under `/plugin` → ambient → configure (it defaults to Ambient Cloud). On a machine without a terminal prompt, put `{"token":"ambient_pat_…","server":"https://ambient.example.com"}` in a file only you can read and run `claude plugin configure ambient@ambient --values-stdin < that-file`. Session notes are written by Claude, so they need `ANTHROPIC_API_KEY` on the server.
+Claude Code asks for the token. Set **Ambient server** to `https://ambient.example.com` under `/plugin` → ambient → configure (it defaults to Ambient Cloud). On a machine without a terminal prompt, put `{"token":"ambient_pat_…","server":"https://ambient.example.com"}` in a file only you can read and run `claude plugin configure ambient@ambient --values-stdin < that-file`. Session notes are written by Claude on the person's connected computer (or on the server's key with `BRAIN_USE_SERVER_KEY=true`).
 
 To skip session capture and use MCP alone: `claude mcp add --transport http ambient https://ambient.example.com/mcp`.
 
@@ -152,10 +152,16 @@ To run more than one team, see [More teams](#more-teams).
 
 ## Claude: notes, upkeep, consolidation
 
-Put an Anthropic API key in `.env` and restart:
+By default each person's upkeep and work-session notes run on **their own computer**, with their
+Claude plan ([architecture](architecture.md), "Upkeep on your computer"): nothing to set up on the
+server, and the server never pays. Their notes wait while no computer is connected.
+
+To let the server's own key do it instead (everyone's upkeep, session notes, and Ambient's chat for
+people without a computer), put an Anthropic API key in `.env`, opt in, and restart:
 
 ```sh
 echo 'ANTHROPIC_API_KEY=sk-ant-…' >> .env
+echo 'BRAIN_USE_SERVER_KEY=true' >> .env
 docker compose up -d
 ```
 
@@ -341,6 +347,6 @@ Found a vulnerability? See [SECURITY.md](../SECURITY.md).
 | An AI app says the sign-in failed | Codes work once, for 5 minutes, and ten wrong codes from one address lock it for a while. Make a new one with `admin connect-code`. |
 | `admin team create` says there's no free team server | The pool is empty: add a team server ([More teams](#more-teams)). |
 | Team notes don't show up | Claude Code sessions shared by a folder rule reach the team wiki after a 30-minute hold; `save_note` and `log_work` arrive at once, but stay personal in a private project or when the app didn't say which project. Then check `docker compose logs jobs team`. |
-| Session notes never appear | `ANTHROPIC_API_KEY` set? `docker compose logs jobs \| grep sessions`. The plugin logs to `~/.claude/plugins/data/ambient-ambient/capture.log`. |
+| Session notes never appear | Is the person's computer connected (or `BRAIN_USE_SERVER_KEY=true` with `ANTHROPIC_API_KEY`)? `docker compose logs jobs \| grep sessions`. The plugin logs to `~/.claude/plugins/data/ambient-ambient/capture.log`. |
 
 Still stuck? Open an issue with the output of `docker compose ps` and the relevant logs. Remove secrets and note text first.

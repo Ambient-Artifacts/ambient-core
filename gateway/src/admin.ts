@@ -69,6 +69,11 @@ Bots
       With bots, every loop is a bot: turn the person's plain loops (or, with --team, the team's,
       as that person, who must own or admin it) into bots that run exactly as before: on the
       computer itself, with all of the owner's keys, reporting news. Safe to run again.
+
+Work sessions
+  sessions retry
+      Work sessions that ran out of attempts (an outage, a key out of credit) are summarized
+      again, each on its person's computer.
 `;
 
 export class AdminError extends Error {}
@@ -199,6 +204,12 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
       made.token,
       `Shown once. Send it as "Authorization: Bearer <token>" to ${origin}${slug ? `/t/${slug}` : ""}/mcp.`,
     ].join("\n");
+  }
+
+  // Work sessions that ran out of attempts (an outage, a key out of credit) get them back.
+  if (cmd === "sessions" && sub === "retry") {
+    const n = await d.control.m(api.sessions.unstick, { now: Date.now() });
+    return n ? `${n} work session(s) will be summarized again, each on its person's computer.` : "No work session had run out of attempts.";
   }
 
   // Loops become bots (docs/bots.md, "Loops are bots"): each keeps how it runs today.

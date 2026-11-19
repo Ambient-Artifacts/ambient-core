@@ -16,13 +16,13 @@
 // and `sync` replaces it when the gateway has a newer one.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { chmodSync, chownSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, release, type } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.9.3";
+const VERSION = "0.9.4";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -442,6 +442,9 @@ async function sync() {
 const AMBIENT_UNIT = "ambient-runner-ambient.service";
 /** How long one of Ambient's own turns (a bot's question, the heartbeat) may take. */
 const INTERNAL_LIMIT_MS = 5 * 60_000;
+/** Upkeep's answers: at most this many at once, each stopped after this long. */
+const COMPLETE_AT_ONCE = 2;
+const COMPLETE_LIMIT_MS = 4 * 60_000;
 const AMBIENT_ENV = join(CONFIG_DIR, "ambient.env");
 
 function ambientUnit(cfg, wanted) {
@@ -695,6 +698,82 @@ async function ambientService() {
     log(`Looked at something for ${job.uid} in its own session (${result?.turns ?? "?"} turns${result?.costUsd !== undefined ? `, $${result.costUsd.toFixed(2)}` : ""})`);
   };
 
+  /**
+   * The brain's upkeep (docs/architecture.md, "Upkeep on your computer"): one structured answer
+   * from Claude Code with this computer's Claude sign-in, for a page update, an overview or a work
+   * session's note. No tools, no MCP servers, no settings (nobody's hooks or plugins) and no saved
+   * session, in an empty folder; with a Claude plan or key from Ambient, in a Claude config folder
+   * of its own, so the machine's ~/.claude is never read or written. The gateway keeps the prompts
+   * and checks the answer. At most COMPLETE_AT_ONCE at a time, so upkeep never crowds the chat.
+   */
+  let completing = 0;
+  const completeQueue = [];
+  const completeRun = async (job) => {
+    const model = /^[A-Za-z0-9._\[\]-]{1,80}$/.test(String(job.model)) ? String(job.model) : "haiku";
+    const wire = { model, system: String(job.system ?? ""), schema: job.schema && typeof job.schema === "object" ? job.schema : {} };
+    const work = join(base, ".upkeep");
+    mkdirSync(work, { recursive: true });
+    own(base);
+    own(work);
+    const dir = mkdtempSync(join(work, "run-"));
+    own(dir);
+    const env = runEnv(cfg, { ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}) });
+    if (env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY) {
+      const conf = join(work, "claude-config");
+      mkdirSync(conf, { recursive: true, mode: 0o700 });
+      own(conf);
+      env.CLAUDE_CONFIG_DIR = conf;
+    }
+    const args = [
+      "-p", "--output-format", "json", "--model", wire.model, "--system-prompt", wire.system,
+      "--json-schema", JSON.stringify(wire.schema), "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence",
+    ];
+    try {
+      const { code, stdout, stderr } = await new Promise((resolve) => {
+        const p = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, { cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
+        let out = "";
+        let err = "";
+        p.stdout.on("data", (d) => (out = (out + d).slice(-400_000)));
+        p.stderr.on("data", (d) => (err = (err + d).slice(-2000)));
+        const timer = setTimeout(() => p.kill("SIGKILL"), COMPLETE_LIMIT_MS);
+        timer.unref();
+        p.on("error", (e) => resolve({ code: 127, stdout: "", stderr: e.message }));
+        p.on("close", (c) => {
+          clearTimeout(timer);
+          resolve({ code: c ?? 1, stdout: out, stderr: err });
+        });
+        p.stdin.on("error", () => {});
+        p.stdin.end(String(job.user ?? ""));
+      });
+      let r = null;
+      try {
+        r = JSON.parse(stdout.trim().split("\n").pop() || "null");
+      } catch {}
+      if (!r || r.is_error || r.structured_output === undefined) {
+        return { error: `Claude Code couldn't write the ${String(job.what || "answer").slice(0, 40)}: ${String(r?.result ?? r?.subtype ?? `exit ${code}. ${stderr.trim().split("\n").slice(-2).join(" ")}`).slice(0, 1500)}` };
+      }
+      const u = r.usage ?? {};
+      return { text: JSON.stringify({ output: r.structured_output, usage: { input_tokens: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), output_tokens: u.output_tokens ?? 0, cache_read_tokens: u.cache_read_input_tokens ?? 0 } }) };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const complete = async (job) => {
+    if (completing >= COMPLETE_AT_ONCE) await new Promise((resolve) => completeQueue.push(resolve));
+    completing++;
+    let body;
+    try {
+      body = await completeRun(job);
+    } catch (err) {
+      body = { error: `Upkeep couldn't run here: ${err.message}`.slice(0, 1900) };
+    } finally {
+      completing--;
+      completeQueue.shift()?.();
+    }
+    await call(cfg, "POST", `/v1/host/ambient/${job.id}`, body).catch(() => {});
+    log(body.error ? `Upkeep: ${body.error.slice(0, 200)}` : `Upkeep: wrote the ${String(job.what || "answer").slice(0, 40)}`);
+  };
+
   /** Each person's turns in order (a promise chain per uid): one chain for the chat, one for the rest. */
   const queues = new Map();
 
@@ -712,6 +791,7 @@ async function ambientService() {
     if (job?.kind === "exec") void execJob(cfg, job);
     else if (job?.kind === "codex-login") void codexLoginJob(cfg, job);
     else if (job?.kind === "start") startJob(job);
+    else if (job?.kind === "complete") void complete(job);
     else if (job?.uid && job.token) {
       // One person's messages one after another in their session; Ambient's own turns (a bot's
       // question, the heartbeat) one after another in short sessions of their own, beside it.

@@ -34,6 +34,7 @@ import type { CodeHasher } from "./auth/codes.ts";
 import type { MicrosoftConnectFlow } from "./microsoft-connect.ts";
 import type { SignInNonces } from "./auth/signin-nonce.ts";
 import { VoiceBody, Voices } from "./voices.ts";
+import { upkeepState, type UpkeepComputers } from "./upkeep.ts";
 
 export interface AppApiDeps {
   /** An AI app's name, by its client id (oidc-provider's registered clients). */
@@ -53,6 +54,8 @@ export interface AppApiDeps {
   repos: PersonalRepos;
   sessions: SessionService;
   routines: RoutineService;
+  /** Where the person's brain upkeep runs (upkeep.ts): their own computer. */
+  upkeep?: UpkeepComputers;
   /** Bots and the chat with Ambient (docs/bots.md). */
   bots?: BotService;
   ambient?: AmbientChat;
@@ -225,6 +228,18 @@ export function appApiRouter(d: AppApiDeps): Router {
     list.push(close);
     streams.set(uid, list);
     while (list.length > MAX_STREAMS) list.shift()!();
+  });
+
+  // How the brain's upkeep is doing (upkeep.ts): pages current, notes waiting for the computer, or why not.
+  r.get("/v1/app/me/upkeep", auth, async (_req, res) => {
+    const uid = uidOf(res);
+    const [record, work, seq, computer] = await Promise.all([
+      d.control.q(api.users.get, { uid }),
+      d.control.q(api.work.get, { uid: uid as never }),
+      d.control.q(api.personal.seq, { uid: uid as never }),
+      d.upkeep ? d.upkeep.computerFor(uid) : Promise.resolve(null),
+    ]);
+    res.json(upkeepState({ on: record?.consolidate === true, work, seq, computer }));
   });
 
   r.get("/v1/app/me", auth, async (_req, res) => {

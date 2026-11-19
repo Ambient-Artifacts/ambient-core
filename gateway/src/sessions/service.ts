@@ -16,6 +16,7 @@ import type { Directory, Team } from "../directory.ts";
 import type { PersonalStore } from "../personal.ts";
 import { TeamServerError, type TeamLink } from "../teams.ts";
 import { condense, homeRelative, matchBudget, normalizeRemote, parseClaudeCode, pickTeam, splitBlocks, type ParsedSession, type SessionPlace, type SessionRule } from "./condense.ts";
+import { ComputerUnavailable } from "../bots/computer.ts";
 
 /** How long a team copy waits, so the user can keep a session personal. */
 export const SHARE_HOLD_MS = 30 * 60_000;
@@ -161,17 +162,23 @@ export class SessionService {
   }
 
   /** Summarize waiting sessions into notes. Failures are retried a few times, then flagged by the health check. */
-  async process(summarizer: SessionSummarizer, opts: { limit?: number; now?: number } = {}) {
+  /**
+   * Write the notes of uploaded work sessions. `summarizer`: one for everyone (a key), or each
+   * person's own (upkeep on their computer): a session whose person has no connected computer
+   * waits, without counting as a failed attempt.
+   */
+  async process(summarizer: SessionSummarizer | ((uid: string) => SessionSummarizer), opts: { limit?: number; now?: number; waitMs?: number } = {}) {
     const now = opts.now ?? Date.now();
+    const summarizerFor = typeof summarizer === "function" ? summarizer : () => summarizer;
     const items = await this.d.control.m(api.sessions.claim, { now, limit: opts.limit ?? 20, leaseMs: 10 * 60_000 });
-    const results: { sessionId: string; status: "written" | "skipped" | "failed"; path?: string; team?: string | null; error?: string; tokens?: number }[] = [];
+    const results: { sessionId: string; status: "written" | "skipped" | "failed" | "waiting"; path?: string; team?: string | null; error?: string; tokens?: number }[] = [];
     for (const item of items) {
       const uid = String(item.uid);
       try {
         const q = JSON.parse(await this.d.personal.open(uid, `session:${item.sessionId}`, item.iv, item.ciphertext)) as Queued;
         const user = await this.d.directory.user(uid);
         const team = await this.teamFor(uid, q.place);
-        const out = await summarizer.summarize({
+        const out = await summarizerFor(uid).summarize({
           transcript: q.transcript,
           tool: q.tool,
           person: user?.name ?? "the user",
@@ -219,6 +226,11 @@ export class SessionService {
         await this.d.control.m(api.sessions.done, { id: item.id });
         results.push({ sessionId: item.sessionId, status: "written", path: written.path, team: team?.slug ?? null, tokens });
       } catch (err) {
+        if (err instanceof ComputerUnavailable) {
+          await this.d.control.m(api.sessions.later, { id: item.id, waitMs: opts.waitMs ?? 15 * 60_000, now });
+          results.push({ sessionId: item.sessionId, status: "waiting", error: err.reason });
+          continue;
+        }
         const error = (err as Error).message;
         await this.d.control.m(api.sessions.failed, { id: item.id, error, now });
         results.push({ sessionId: item.sessionId, status: "failed", error });

@@ -13,13 +13,19 @@
 import { randomUUID } from "node:crypto";
 import type { PatService } from "../auth/pats.ts";
 import type { Turn } from "../ai/loop.ts";
+import type { LlmAnswer, WireRequest } from "@brain/team";
 
 /** Work for the computer that isn't a chat message: a root command, or a bot run to start now. */
 export type ControlJob =
   | { id: string; kind: "exec"; command: string; timeoutS: number }
   | { id: string; kind: "start"; routineId: string }
   /** Sign Codex in on the computer with a ChatGPT plan (device code): the runner sends back the link and code. */
-  | { id: string; kind: "codex-login" };
+  | { id: string; kind: "codex-login" }
+  /**
+   * One structured answer from Claude Code there, for the brain's upkeep (docs/architecture.md,
+   * "Upkeep on your computer"): no tools, no MCP, no settings, no saved session.
+   */
+  | ({ id: string; kind: "complete" } & WireRequest);
 
 export interface ComputerJob {
   id: string;
@@ -58,6 +64,15 @@ const CONNECTED_MS = 60_000;
 const TOKEN_TTL_MS = 24 * 3600_000;
 const TOKEN_RENEW_MS = 3600_000;
 const REPLY_TIMEOUT_MS = 15 * 60_000;
+/** How long one of upkeep's answers may take on the computer (the runner stops Claude Code at 4 min). */
+const COMPLETE_TIMEOUT_MS = 5 * 60_000;
+
+/** The computer can't take the work now: not connected, or it didn't answer in time. */
+export class ComputerUnavailable extends Error {
+  constructor(readonly reason: "offline" | "timeout" | "no_computer") {
+    super(reason === "no_computer" ? "no computer is connected" : reason === "offline" ? "the computer isn't connected" : "the computer didn't answer in time");
+  }
+}
 
 export class AmbientComputers {
   private queues = new Map<string, (ComputerJob | ControlJob)[]>();
@@ -164,6 +179,44 @@ export class AmbientComputers {
     const out = JSON.parse(text) as { url?: unknown; code?: unknown; expiresAt?: unknown };
     if (typeof out.url !== "string" || !/^https:\/\//.test(out.url) || typeof out.code !== "string") throw new Error("the computer sent no sign-in code");
     return { url: out.url, code: out.code, expiresAt: typeof out.expiresAt === "number" ? out.expiresAt : this.now() + 15 * 60_000 };
+  }
+
+  /**
+   * One structured answer from Claude Code on the computer, signed in with its Claude: the brain's
+   * upkeep runs there instead of on Ambient's key. Rejects when the computer isn't connected or
+   * doesn't answer in time; the answer's shape is checked by the caller.
+   */
+  async complete(hostId: string, req: WireRequest, waitMs = COMPLETE_TIMEOUT_MS): Promise<LlmAnswer> {
+    if (!this.connected(hostId)) throw new ComputerUnavailable("offline");
+    const job: ControlJob = { id: randomUUID(), kind: "complete", ...req };
+    const text = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(job.id);
+        this.unqueue(hostId, job.id);
+        reject(new ComputerUnavailable("timeout"));
+      }, waitMs);
+      timer.unref();
+      this.pending.set(job.id, { hostId, resolve, reject, timer });
+      this.hand(hostId, job);
+    });
+    let out: { output?: unknown; usage?: Partial<LlmAnswer["usage"]> };
+    try {
+      out = JSON.parse(text);
+    } catch {
+      throw new Error(`the computer's answer to the ${req.what} wasn't JSON`);
+    }
+    if (out.output === undefined) throw new Error(`the computer sent no ${req.what}`);
+    const u = out.usage ?? {};
+    return { output: out.output, usage: { input_tokens: Number(u.input_tokens) || 0, output_tokens: Number(u.output_tokens) || 0, cache_read_tokens: Number(u.cache_read_tokens) || 0 } };
+  }
+
+  /** A job that timed out before the computer took it leaves its queue. */
+  private unqueue(hostId: string, jobId: string) {
+    const q = this.queues.get(hostId);
+    if (!q) return;
+    const left = q.filter((j) => j.id !== jobId);
+    if (left.length) this.queues.set(hostId, left);
+    else this.queues.delete(hostId);
   }
 
   /** Start a bot's run on the computer now (a message to it), instead of at its next check. */

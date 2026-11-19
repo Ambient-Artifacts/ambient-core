@@ -105,7 +105,9 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
   const runs = await d.control.q(api.work.recent, { limit: 200 });
   const failed = runs.filter((r) => r.lastStatus === "failed" && now - r.lastRunAt < 24 * HOUR);
   if (failed.length) problems.push({ key: "personal:failed", text: `Personal upkeep failed for ${failed.length} user(s) in the last 24h.` });
-  const waiting = await d.control.q(api.work.due, { now, quietMs: 2 * HOUR, limit: 200 });
+  // Notes waiting for their person's own computer (upkeep.ts) aren't a backlog of ours.
+  const onTheirComputer = new Set(runs.filter((r) => r.lastStatus === "waiting").map((r) => String(r.uid)));
+  const waiting = (await d.control.q(api.work.due, { now, quietMs: 2 * HOUR, limit: 1000 })).filter((u) => !onTheirComputer.has(String(u.uid)));
   if (waiting.length) problems.push({ key: "personal:backlog", text: `${waiting.length} user(s) have notes waiting more than 2h for upkeep.` });
   summary.push(`personal: ${runs.filter((r) => now - r.lastRunAt < 24 * HOUR).length} users kept up in 24h`);
 
