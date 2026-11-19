@@ -1,5 +1,6 @@
 // /v1/app/*: the iOS app's API. In the MVP the app talks only to the gateway;
 // Convex sits behind it.
+import { CLAUDE_CODE_PLUGIN, claudeCodeInstall, clientKind, connectLinks, type AgentKind } from "./connect-agents.ts";
 import { randomInt } from "node:crypto";
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { z } from "zod";
@@ -38,6 +39,10 @@ import { VoiceBody, Voices } from "./voices.ts";
 export interface AppApiDeps {
   /** An AI app's name, by its client id (oidc-provider's registered clients). */
   clientName?: (clientId: string) => Promise<string | undefined>;
+  /** An OAuth client's name and redirect URIs (which AI app it is: connect-agents.ts). */
+  clientInfo?: (clientId: string) => Promise<{ name?: string; redirectUris: string[] } | undefined>;
+  /** This server's public address (connect links and the Claude Code plugin's server). */
+  origin?: string;
   /** Sign-in nonces for Apple, Microsoft and Google (auth/signin-nonce.ts). */
   signInNonces: SignInNonces;
   /** Invite codes are stored keyed (auth/codes.ts). */
@@ -447,21 +452,62 @@ export function appApiRouter(d: AppApiDeps): Router {
   // The AI apps connected over OAuth ("Disconnect any time in the app", the consent page says):
   // disconnecting one ends its grant and refresh tokens at once. An access token it already has is
   // a signed JWT nothing stores, so it works until it expires (accessTokenTtl, an hour by default).
+  // Each one says which AI app it is (`kind`, docs/connect-agents.md), so the app can tick off
+  // "Connected" per app. The Claude Code plugin signs in with a token instead of OAuth: its tokens
+  // are listed here too (`via: "token"`), and disconnecting one revokes it.
   r.get("/v1/app/connections", auth, async (_req, res) => {
-    const grants = await d.control.q(api.oauth.listGrants, { accountId: uidOf(res), now: Date.now() });
-    const connections = await Promise.all(
-      grants.map(async (g) => ({ id: g.grantId, clientId: g.clientId, name: (await d.clientName?.(g.clientId).catch(() => undefined)) ?? g.clientId, since: g.since })),
+    const uid = uidOf(res);
+    const grants = await d.control.q(api.oauth.listGrants, { accountId: uid, now: Date.now() });
+    const oauth = await Promise.all(
+      grants.map(async (g) => {
+        const info = d.clientInfo ? await d.clientInfo(g.clientId).catch(() => undefined) : undefined;
+        const name = info?.name ?? (await d.clientName?.(g.clientId).catch(() => undefined)) ?? g.clientId;
+        return { id: g.grantId, clientId: g.clientId, name, since: g.since, kind: clientKind(name, info?.redirectUris), via: "oauth" as const, lastUsedAt: null };
+      }),
     );
-    res.json({ connections });
+    const plugin = (await d.pats.list(uid))
+      .filter((p) => p.scopes.includes("sessions:write"))
+      .map((p) => ({ id: p.id, clientId: null, name: p.label, since: p.createdAt, kind: "claude-code" as AgentKind, via: "token" as const, lastUsedAt: null }));
+    res.json({ connections: [...oauth, ...plugin] });
   });
 
   r.delete("/v1/app/connections/:id", auth, async (req, res) => {
     const id = String(req.params.id);
-    if (id.length > 200 || !(await d.control.m(api.oauth.revokeGrant, { accountId: uidOf(res), grantId: id })).ok) {
+    const uid = uidOf(res);
+    const ok =
+      id.length <= 200 &&
+      ((await d.control.m(api.oauth.revokeGrant, { accountId: uid, grantId: id })).ok ||
+        (/^[a-z0-9]{10,64}$/.test(id) && (await d.pats.list(uid)).some((p) => p.id === id && p.scopes.includes("sessions:write")) && (await d.pats.revoke(uid, id))));
+    if (!ok) {
       res.status(404).json({ error: "not_found" });
       return;
     }
     res.status(204).end();
+  });
+
+  // ---- connecting AI apps in one step (docs/connect-agents.md) ----
+
+  r.get("/v1/app/connect-links", auth, (_req, res) => {
+    if (!d.origin) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    res.json(connectLinks(d.origin));
+  });
+
+  // The Mac app installs the Claude Code plugin for the person: a fresh plugin token and the exact
+  // command, so nothing is copied by hand. The token is shown once, like any token.
+  r.post("/v1/app/connect/claude-code", auth, json, async (req, res) => {
+    if (!d.origin) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    const body = z.object({ device: z.string().trim().max(60).optional() }).safeParse(req.body ?? {});
+    const uid = uidOf(res);
+    await d.control.m(api.users.markAppConnected, { uid: uid as never, now: Date.now() });
+    const label = `Claude Code${body.success && body.data.device ? ` on ${body.data.device}` : ""}`;
+    const made = await d.pats.create({ uid, scopes: ["personal:read", "personal:write", "team:read", "sessions:write"], resource: { kind: "personal" }, label });
+    res.json({ token: made.token, id: made.id, server: d.origin, command: claudeCodeInstall(d.origin, made.token), plugin: CLAUDE_CODE_PLUGIN });
   });
 
   // ---- work sessions (Claude Code and AI apps) ----
