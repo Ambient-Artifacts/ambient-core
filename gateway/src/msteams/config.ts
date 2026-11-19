@@ -12,7 +12,7 @@ const Bot = z.object({
   tenantId: z.string().uuid(),
   appId: z.string().uuid(),
   secret: z.string().min(8),
-  /** Anthropic API key for the answers (the team's own, so the cost is theirs); ANTHROPIC_API_KEY when absent. */
+  /** Anthropic API key for the answers (the team's own, so the cost is theirs); the server's ANTHROPIC_API_KEY only with BRAIN_USE_SERVER_KEY=true. */
   anthropicApiKey: z.string().min(10).optional(),
   model: z.string().default("claude-sonnet-5-5"),
   language: z.enum(["en", "de"]).default("en"),

@@ -60,6 +60,8 @@ export async function startStack(
     githubApp?: import("../src/bots/github-app.ts").GitHubAppConfig;
     /** How long after a signal Amb looks at a bot (learning.ts). */
     learningAfterMs?: number;
+    /** The team brain for teams on their own computer (team-bundle.ts), instead of building it. */
+    teamBundle?: () => Promise<import("../src/team-bundle.ts").TeamBundle>;
   } = {},
 ) {
   const serviceSecret = randomBytes(24).toString("hex");
@@ -179,6 +181,7 @@ export async function startStack(
     mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
     githubBatchMs: opts.githubBatchMs ?? 60_000,
     learning: { reviewAfterMs: opts.learningAfterMs ?? 60_000 },
+    teamBundle: opts.teamBundle,
   });
   gatewayServer.on("request", stack.app);
 

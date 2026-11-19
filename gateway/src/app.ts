@@ -48,7 +48,7 @@ import { DecisionService } from "./bots/decisions.ts";
 import { Heartbeat } from "./bots/heartbeat.ts";
 import { AppChannel } from "./channels/channel.ts";
 import { RoutineKeys } from "./routines/keys.ts";
-import { loadRunner, RoutineService } from "./routines/service.ts";
+import { loadInstaller, loadRunner, RoutineService } from "./routines/service.ts";
 import { sessionUploadRouter } from "./sessions/route.ts";
 import { SessionService } from "./sessions/service.ts";
 import { MicrosoftConnectFlow, MicrosoftConnector } from "./microsoft-connect.ts";
@@ -59,6 +59,9 @@ import { personalInstructions } from "./mcp/context.ts";
 import { MsTeamsBot } from "./msteams/bot.ts";
 import { BotClient, InboundVerifier } from "./msteams/botframework.ts";
 import { msteamsRouter } from "./msteams/route.ts";
+import { internalRouter, Upkeep, useServerKey } from "./upkeep.ts";
+import { relayingFetch, type Relay } from "./relay.ts";
+import { teamBundler, type TeamBundle } from "./team-bundle.ts";
 
 export const VERSION = "0.1.0";
 
@@ -85,6 +88,8 @@ export interface AppDeps {
   /** Tests: the Teams bots against a fake Bot Framework, with their state in memory. */
   msteams?: { fetchImpl?: typeof fetch; verifier?: InboundVerifier; apiKey?: string };
   /** Tests: Ambient's chat against a fake Anthropic; how long it may look at a bot's question; no heartbeat timer. */
+  /** Tests: the team brain's bundle, instead of building it. */
+  teamBundle?: () => Promise<TeamBundle>;
   ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number; noHeartbeat?: boolean; turnMs?: number };
   /** Tests: how long after a change bots are mirrored into git (default 30 s). */
   mirrorDelayMs?: number;
@@ -111,7 +116,11 @@ export function createApp(deps: AppDeps) {
   let botMirror: BotMirror | undefined;
   const repos = new PersonalRepos(control, personal, { allowFile: config.allowFileRepos }, { files: (uid) => botMirror?.personalFiles(uid) ?? Promise.resolve(new Map()) });
   const revisions = new Revisions(control);
-  const teams = new TeamLink(config.origin, config.signingKeys[0]!, deps.fetchImpl, (team) => revisions.teamChanged(team.id));
+  // A team on its own computer is reached through that computer's runner (relay.ts); the computers'
+  // queue is made further down, so the relay is looked up when a request goes out.
+  let relay: Relay = () => Promise.reject(new Error("the gateway is still starting"));
+  const teamFetch = relayingFetch((host, req, ms) => relay(host, req, ms), deps.fetchImpl ?? fetch);
+  const teams = new TeamLink(config.origin, config.signingKeys[0]!, teamFetch, (team) => revisions.teamChanged(team.id));
   const events = new EventHub(deps.revisionSource ?? new PollingRevisionSource(revisions, deps.revisionPollMs ?? 5_000));
   const microsoft = deps.microsoft ?? (config.microsoftClientIds?.length ? microsoftVerifier(config.microsoftClientIds) : undefined);
   const google = deps.google ?? (config.googleClientIds?.length ? googleVerifier(config.googleClientIds) : undefined);
@@ -130,7 +139,11 @@ export function createApp(deps: AppDeps) {
   const verify = createBearerVerifier({ issuer: config.origin, signingKeys: config.signingKeys, directory, pats });
   const sessions = new SessionService({ control, personal, directory, teams });
   const notifier = new Notifier({ control, send: deps.push ?? apnsSender(config.apns) });
-  const runner = loadRunner(deps.runnerDir ?? fileURLToPath(new URL("../../runner/", import.meta.url)), config.origin);
+  const runnerDir = deps.runnerDir ?? fileURLToPath(new URL("../../runner/", import.meta.url));
+  // The team's brain for teams on their own computer (team-bundle.ts), built when first asked for.
+  const teamBundle = deps.teamBundle ?? teamBundler(fileURLToPath(new URL("../../", import.meta.url)), VERSION);
+  const runner = loadRunner(runnerDir, config.origin);
+  const installer = loadInstaller(runnerDir, config.origin);
   const routineKeys = new RoutineKeys({ control, personal, master: config.masterKey });
   // Bots' folders, memory and handoffs, and Amb's memory (docs/bots.md, "A bot's folder").
   const folder = new BotFolder({ control, keys: routineKeys });
@@ -145,6 +158,11 @@ export function createApp(deps: AppDeps) {
     bots: config.bots,
     teamsOf: (uid) => directory.teamsOf(uid),
     teamBySlug: (slug) => directory.teamBySlug(slug),
+    teamBundle: async () => {
+      const b = await teamBundle();
+      return { version: b.version, sha256: b.sha256 };
+    },
+    onTeamServer: () => directory.forgetTeams(),
   });
   botMirror = new BotMirror({ control, keys: routineKeys, folder, teams, repos, delayMs: deps.mirrorDelayMs });
   const mirror = botMirror;
@@ -187,7 +205,7 @@ export function createApp(deps: AppDeps) {
       new MsTeamsBot({
         config: b,
         client: new BotClient(b, deps.msteams?.fetchImpl ?? deps.fetchImpl),
-        apiKey: deps.msteams?.apiKey ?? process.env.ANTHROPIC_API_KEY,
+        apiKey: deps.msteams?.apiKey ?? (useServerKey() ? process.env.ANTHROPIC_API_KEY : undefined),
         fetchImpl: deps.msteams?.fetchImpl ?? deps.fetchImpl,
         // The team's members with their sign-in email (Convex has no lookup by email; a team is small).
         accounts: async () => {
@@ -237,6 +255,9 @@ export function createApp(deps: AppDeps) {
   // Ambient on a person's own computer (their Claude plan) when one is connected; the server's key otherwise.
   const computers = new AmbientComputers({ pats, scopes: MCP_SCOPES });
   startNow = (hostId, routineId) => computers.start(hostId, routineId);
+  relay = (host, req, ms) => computers.relay(host, req, ms);
+  // The brain's upkeep and work-session notes, written by Claude on the person's own computer.
+  const upkeep = new Upkeep({ routines, computers });
   // Root commands Ambient asks for, run by the computer's runner after an approval (or at once on full access).
   const admin = new AdminService({ control, keys: routines.keys, routines, computers, notifier });
   const ambient: AmbientChat = new AmbientChat({
@@ -247,7 +268,8 @@ export function createApp(deps: AppDeps) {
       const personal = await personalInstructions(principal, readers, { name: await userName(uid).catch(() => undefined) });
       return buildMcpServer({ principal, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, personal });
     },
-    apiKey: deps.ambient?.apiKey ?? process.env.ANTHROPIC_API_KEY,
+    // Without a computer, the server's key answers only where the operator pays (upkeep.ts, useServerKey).
+    apiKey: deps.ambient ? deps.ambient.apiKey : useServerKey() ? process.env.ANTHROPIC_API_KEY : undefined,
     model: config.ambientModel ?? "claude-sonnet-5-5",
     fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
     computers,
@@ -329,14 +351,16 @@ export function createApp(deps: AppDeps) {
   }
   app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
-  app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
+  app.use(hostRouter({ routines, directory, runnerSource: runner?.source, installSource: installer, teamBundle }));
   app.use(botRunRouter({ bots, history: folders.history }));
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(ambientHostRouter({ routines, directory, computers }));
+  app.use(internalRouter({ secret: config.serviceSecret, upkeep, relay: (host, req, ms) => computers.relay(host, req, ms) }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
   app.use(
     appApiRouter({
       control,
+      upkeep,
       directory,
       access: appAccess(config.origin, config.signingKeys),
       pairing,

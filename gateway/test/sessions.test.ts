@@ -15,6 +15,7 @@ import { parsePage } from "@brain/spec";
 import { appCall, INVITE, mcpClient, signIn, startStack, text, type Stack } from "./helpers.ts";
 import { MAX_BLOCKS } from "../src/sessions/service.ts";
 import { MAX_UPLOAD_BYTES } from "../src/sessions/route.ts";
+import { ComputerUnavailable } from "../src/bots/computer.ts";
 
 const SCRIPT = join(import.meta.dirname, "..", "..", "integrations", "claude-code", "scripts", "capture.sh");
 const HOLD = 30 * 60_000;
@@ -126,6 +127,18 @@ describe("Claude Code sessions", () => {
     await end(path, "5f0c2a9e-aaaa-4c4c-8888-000000000099");
     expect(log()).toContain("held 5f0c2a9e-aaaa-4c4c-8888-000000000099");
     expect(log()).not.toContain("sent 5f0c2a9e-aaaa-4c4c-8888-000000000099");
+  });
+
+  it("wait for the person's computer without using up their attempts (upkeep on their computer)", async () => {
+    const path = transcript("5f0c2a9e-aaaa-4c4c-8888-0000000000aa", "Rename the upload helper");
+    await end(path, "5f0c2a9e-aaaa-4c4c-8888-0000000000aa");
+    const offline = { summarize: async () => Promise.reject(new ComputerUnavailable("no_computer")) };
+    expect(await s.sessions.process(() => offline as never)).toMatchObject([{ status: "waiting", error: "no_computer" }]);
+    // Not stuck on our side, not failed, and not claimed again before it's worth another look.
+    const backlog = await s.control.q(s.api.sessions.backlog, { now: Date.now() + 3600_000 });
+    expect(backlog).toMatchObject({ stuck: 0, failed: 0 });
+    expect(await s.sessions.process(model)).toEqual([]);
+    expect(await s.sessions.process(model, { now: Date.now() + 16 * 60_000 })).toMatchObject([{ status: "written" }]);
   });
 
   it("leaves scheduled runs alone, in the hook and on the server", async () => {

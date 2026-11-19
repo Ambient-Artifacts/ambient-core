@@ -47,9 +47,8 @@ beforeAll(async () => {
 afterAll(() => s.close());
 
 describe("Ambient on the person's computer", () => {
-  it("is only for accounts with bots, and sync says so", async () => {
-    expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(false);
-    expect((await hostCall(host, "GET", "/v1/host/ambient/next")).status).toBe(403);
+  it("keeps a person's own computer connected (upkeep runs there, bots or not), and sync says so", async () => {
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
     s.config.bots!.users.push(lena.user.uid);
     expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
   });
@@ -171,7 +170,9 @@ describe("Ambient on the team's server", () => {
     const codeHash = createHash("sha256").update("host-setup:TEAM-AMB1").digest("hex");
     await s.t.mutation(s.internal.routines.staffAddHost, { team: slug, name: "Team server", codeHash, expiresAt: Date.now() + 60_000 });
     const teamHost = String((await hostCall("", "POST", "/v1/host/setup", { code: "TEAM-AMB1", info })).json.token);
-    expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(false);
+    // A team's computer keeps its connection (the team's brain may be reached through it); Ambient
+    // answers the team's people there once the team has bots.
+    expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
     s.config.bots!.teams.push(slug);
     expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
 
@@ -267,6 +268,9 @@ done
     expect(args).toContain("--input-format stream-json");
     expect(args).toContain("--mcp-config");
     expect(args).toContain("--disallowedTools mcp__ambient__set_routine_secret");
+    // Only Ambient's MCP; the machine's own login, so only project and local settings.
+    expect(args).toContain("--strict-mcp-config");
+    expect(args).toContain("--setting-sources project,local");
     expect(args).toContain("You run as Claude Code on VPS");
     expect(JSON.parse(readFileSync(join(dir, "state", "state.json"), "utf8")).ambientSessions).toEqual({ [lena.user.uid]: "amb-1" });
 
@@ -276,11 +280,42 @@ done
     expect(internalArgs).not.toContain("--resume");
     expect(internalArgs).not.toContain("--input-format");
     expect(internalArgs).toContain("--disallowedTools mcp__ambient__set_routine_secret");
+    expect(internalArgs).toContain("--strict-mcp-config");
     expect(internalArgs).toContain("a short session of your own");
     expect(readFileSync(join(dir, "ambient", lena.user.uid, "internal-stdin.txt"), "utf8")).toBe("[Heartbeat] Look at Blog draft.");
     // The chat's session goes on where it was: its next reply is its fourth.
     await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Third" });
     expect((await settled()).messages.at(-1)?.text, out).toBe("reply 4");
     expect(JSON.parse(readFileSync(join(dir, "state", "state.json"), "utf8")).ambientSessions).toEqual({ [lena.user.uid]: "amb-1" });
+    p.kill();
+    await new Promise((r) => setTimeout(r, 200));
+
+    // With a sign-in of its own (a plan from Ambient), the same computer: a settings folder of the
+    // runner's. The session kept in the user's ~/.claude can't be resumed from it: a new one starts,
+    // and the message still gets its answer.
+    const claudeEnv = join(dir, "claude.env");
+    writeFileSync(claudeEnv, `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-${"t".repeat(30)}\n`);
+    p = spawn(process.execPath, [RUNNER, "ambient"], {
+      env: {
+        AMBIENT_CLAUDE_ENV: claudeEnv, AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner",
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
+        HOME: dir,
+        AMBIENT_SERVER: s.origin,
+        AMBIENT_HOST_TOKEN: host,
+        AMBIENT_CLAUDE: join(bin, "claude"),
+        AMBIENT_STATE_DIR: join(dir, "state"),
+        AMBIENT_AMBIENT_HOME: dir,
+      },
+    });
+    p.stdout?.on("data", (d) => (out += d));
+    p.stderr?.on("data", (d) => (out += d));
+    await new Promise((r) => setTimeout(r, 300));
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Fourth" });
+    expect((await settled()).messages.at(-1)?.text, out).toBe("reply 1");
+    const isolatedArgs = readFileSync(join(dir, "ambient", lena.user.uid, "args.txt"), "utf8");
+    expect(isolatedArgs).not.toContain("--resume");
+    expect(isolatedArgs).not.toContain("--setting-sources");
+    expect(out).toContain("kept in another settings folder");
   }, 30_000);
 });

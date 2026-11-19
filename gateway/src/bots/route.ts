@@ -21,6 +21,7 @@ import type { GitHubApp } from "./github-app.ts";
 import { LEARN, lessonsOf, type BotLearning } from "./learning.ts";
 import { NOTIFY, type AmbSettings } from "./amb-settings.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "./bot-templates.ts";
+import { passHeaders } from "../relay.ts";
 
 function fail(res: Response, err: unknown) {
   if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError) {
@@ -827,6 +828,23 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
       return;
     }
     res.json(job);
+  });
+
+  // The team server's answer to a relayed request (relay.ts), as is: status and headers in ours.
+  r.post("/v1/host/relay/:jobId", express.raw({ type: () => true, limit: "32mb" }), async (req, res) => {
+    const h = await host(req, res);
+    if (!h) return;
+    const id = String(req.params.jobId);
+    const error = req.header("x-ambient-error") ? Buffer.from(req.header("x-ambient-error")!, "base64").toString("utf8") : undefined;
+    let headers: Record<string, string> = {};
+    try {
+      headers = JSON.parse(Buffer.from(req.header("x-ambient-headers") ?? "", "base64").toString("utf8")) as Record<string, string>;
+    } catch {}
+    const status = Number(req.header("x-ambient-status"));
+    const ok = error
+      ? d.computers.relayed(h.id, id, { error: error.slice(0, 500) })
+      : d.computers.relayed(h.id, id, { status: status >= 100 && status < 600 ? status : 502, headers: passHeaders(headers), body: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0) });
+    res.status(ok ? 204 : 404).end();
   });
 
   r.post("/v1/host/ambient/:jobId", json, async (req, res) => {

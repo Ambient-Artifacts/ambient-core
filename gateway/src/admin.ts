@@ -69,6 +69,11 @@ Bots
       With bots, every loop is a bot: turn the person's plain loops (or, with --team, the team's,
       as that person, who must own or admin it) into bots that run exactly as before: on the
       computer itself, with all of the owner's keys, reporting news. Safe to run again.
+
+Work sessions
+  sessions retry
+      Work sessions that ran out of attempts (an outage, a key out of credit) are summarized
+      again, each on its person's computer.
 `;
 
 export class AdminError extends Error {}
@@ -201,6 +206,12 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     ].join("\n");
   }
 
+  // Work sessions that ran out of attempts (an outage, a key out of credit) get them back.
+  if (cmd === "sessions" && sub === "retry") {
+    const n = await d.control.m(api.sessions.unstick, { now: Date.now() });
+    return n ? `${n} work session(s) will be summarized again, each on its person's computer.` : "No work session had run out of attempts.";
+  }
+
   // Loops become bots (docs/bots.md, "Loops are bots"): each keeps how it runs today.
   if (cmd === "bots" && sub === "adopt-loops") {
     const u = await findUser(words[2]);
@@ -253,7 +264,7 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     });
     const teams = await new Directory(d.control, 0).teamsOf(u.uid);
     const out = await routines.addComputer({ uid: u.uid, teams, personal: true, canWritePersonal: true, canWriteTeams: true }, text(flags, "name") ?? "Server");
-    return [`Setup code for ${u.name}'s computer "${out.computer.name}", valid 30 minutes. On that computer (Linux, systemd, Claude Code signed in):`, out.commands].join("\n");
+    return [`Setup code for ${u.name}'s computer "${out.computer.name}", valid 30 minutes. On that computer (Linux with systemd), as root:`, out.commands].join("\n");
   }
 
   if (cmd === "team" && sub === "create") {
@@ -264,10 +275,11 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
       name,
       peopleSlug: `people/${slugify(owner.name) || "member"}`,
       now: now(),
+      pool: true,
     });
-    if (!made.ok) {
-      if (made.error === "no_server") throw new AdminError("No free team server. Start one and add it with: admin server add <server-id> <url>");
-      throw new AdminError("Give the team a name.");
+    if (!made.ok || !made.server) {
+      if (!made.ok && made.error !== "no_server") throw new AdminError("Give the team a name.");
+      throw new AdminError("No free team server. Start one and add it with: admin server add <server-id> <url>");
     }
     const link = new TeamLink(origin, d.config.signingKeys[0]!, d.fetchImpl, (team) => new Revisions(d.control).teamChanged(team.id));
     try {

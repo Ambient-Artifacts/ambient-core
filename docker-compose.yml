@@ -30,6 +30,9 @@ x-gateway-env: &gateway-env
   BRAIN_ADMIN_CODES: "true"
   # Optional: Claude writes work-session notes and keeps personal wikis current (opt-in per user).
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  BRAIN_USE_SERVER_KEY: ${BRAIN_USE_SERVER_KEY:-}
+  # New teams from the app take the compose file's team server (the pool); "false": they run on a computer of their own.
+  BRAIN_TEAM_POOL: ${BRAIN_TEAM_POOL:-true}
   BRAIN_SESSION_MODEL: ${BRAIN_SESSION_MODEL:-}
   BRAIN_CONSOLIDATE_MODEL: ${BRAIN_CONSOLIDATE_MODEL:-}
   BRAIN_ALERT_WEBHOOK: ${BRAIN_ALERT_WEBHOOK:-}

@@ -127,8 +127,19 @@ export const HostInfo = z.object({
   /** Codex's version and how it's signed in there (runner 0.9.0 on). */
   codex: z.string().max(80).optional(),
   codexLogin: z.enum(["chatgpt", "api_key", "none"]).optional(),
+  /** Whether Claude Code can run there: a sign-in from Ambient, or the computer's own (runner 0.10.0 on). */
+  claudeSignedIn: z.boolean().optional(),
+  /** A team's computer: its team brain's version, and whether it answers there (runner 0.11.0 on). */
+  teamBrain: z.object({ version: z.string().max(40), ok: z.boolean() }).optional(),
 });
 export type HostInfo = z.infer<typeof HostInfo>;
+
+/** What Convex keeps of a computer's info: claudeSignedIn stays with the gateway (RoutineService.signedIn). */
+function storedInfo(info: HostInfo | undefined) {
+  if (!info) return undefined;
+  const { claudeSignedIn: _signedIn, teamBrain: _brain, ...rest } = info;
+  return rest;
+}
 
 export const RunResult = z.object({
   status: z.enum(["succeeded", "failed"]),
@@ -257,6 +268,11 @@ export interface Computer {
   access: Access;
   /** Root commands approved with "Always". */
   allowed: string[];
+  /**
+   * Whether Claude Code can run there: a plan or key stored in Ambient and in use, or the computer
+   * says it's signed in. null: not known yet (an older runner, or no sync since the gateway started).
+   */
+  claudeSignedIn: boolean | null;
 }
 
 export interface Routine {
@@ -337,6 +353,15 @@ export interface Host {
   name: string;
 }
 
+/** The team brain a team's computer runs: which team, and the bundle (GET /runner/ambient-team.mjs). */
+export interface TeamBrainSpec {
+  teamId: string;
+  teamName: string;
+  slug: string;
+  version: string;
+  sha256: string;
+}
+
 /** What a computer's sync gets: enough to write the systemd units. */
 export interface HostRoutine {
   id: string;
@@ -373,6 +398,8 @@ const isManager = (t: Team) => t.role === "owner" || t.role === "admin";
 export class RoutineService {
   /** A bot's run failed: automations may listen (docs/bots.md, "Automations"). Set once they're up. */
   onBotEvent?: (e: AutomationEvent) => void;
+  /** What each computer said at its last sync: whether Claude Code can run there (not stored in Convex). */
+  private signedIn = new Map<string, boolean>();
   /** A bot that watches GitHub repos: its branch prefix and repos, for the PR gate in its instructions (app.ts sets it). */
   githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[]; on?: import("../bots/github.ts").WatchMode[] } | null>;
   /** A GitHub token for a bot's run from Ambient's GitHub App (docs/bots.md, "Connect GitHub"); null: none covers it. */
@@ -397,6 +424,10 @@ export class RoutineService {
       teamBySlug?: (slug: string) => Promise<Team | undefined>;
       /** Bots' folders, memory and handoffs (docs/bots.md, "A bot's folder"). */
       folder?: BotFolder;
+      /** The team brain a team's computer runs (team-bundle.ts): its version and checksum. */
+      teamBundle?: () => Promise<{ version: string; sha256: string }>;
+      /** A team's brain moved to its computer: cached team lookups forget it. */
+      onTeamServer?: (teamId: string) => void;
     },
   ) {}
 
@@ -445,10 +476,13 @@ export class RoutineService {
     return new Set(teams.filter((t): t is Team => !!t && t.status === "active").map((t) => t.id));
   }
 
-  /** Whether a computer runs Ambient: a person's own, when they have bots; a team's server, when the team has. */
+  /** Whether a computer runs Ambient: a person's own and a team's, always (upkeep, the team's brain, bots). */
   async ambientOn(host: Host): Promise<boolean> {
-    if (host.teamId) return this.d.bots?.teams.includes("*") || (await this.botTeamIds()).has(host.teamId);
-    return host.uid !== null && (await this.botsForUser(host.uid));
+    // A team's computer keeps it too: the team's brain may be reached through it (relay.ts).
+    if (host.teamId) return true;
+    // A person's own computer always keeps its connection: their brain's upkeep runs there
+    // (upkeep.ts), bots or not.
+    return host.uid !== null;
   }
 
   /**
@@ -529,6 +563,7 @@ export class RoutineService {
       model: h.model ? { model: h.model.model, effort: h.model.effort ?? null, fallback: h.model.fallback ?? null } : null,
       access: h.access ?? "standard",
       allowed: h.allowed ?? [],
+      claudeSignedIn: (h.claude?.use === "plan" && h.claude.plan) || (h.claude?.use === "key" && h.claude.key) ? true : (this.signedIn.get(h.id) ?? null),
     };
   }
 
@@ -848,17 +883,20 @@ export class RoutineService {
   // ---- the user's own computers ----
 
   /** A new computer of the user's: a one-time code for `ambient-runner setup`, valid 30 minutes. */
-  async addComputer(actor: Actor, name: string): Promise<{ computer: Computer; code: string; expiresAt: number; commands: string }> {
-    this.assertPersonalWrite(actor);
+  /**
+   * A new computer: one-time code for `ambient-runner setup`, valid 30 minutes. With `team` (its
+   * owner or an admin), the team's computer: it runs the team's brain when the team has no server
+   * of its own (docs/architecture.md, "A team on its own computer"), and the team's bots.
+   */
+  async addComputer(actor: Actor, name: string, team?: string): Promise<{ computer: Computer; code: string; expiresAt: number; commands: string }> {
+    const forTeam = team ? this.managedTeam(actor, team) : null;
+    if (!forTeam) this.assertPersonalWrite(actor);
     const code = newSetupCode();
     const expiresAt = this.now() + CODE_TTL_MS;
-    const out = await this.d.control.m(api.routines.addHost, {
-      uid: actor.uid as never,
-      name,
-      codeHash: this.d.codes.hash("host-setup", setupCode(code)),
-      expiresAt,
-      now: this.now(),
-    });
+    const codeHash = this.d.codes.hash("host-setup", setupCode(code));
+    const out = forTeam
+      ? await this.d.control.m(api.routines.addTeamHost, { uid: actor.uid as never, teamId: forTeam.id as never, name, codeHash, expiresAt, now: this.now() })
+      : await this.d.control.m(api.routines.addHost, { uid: actor.uid as never, name, codeHash, expiresAt, now: this.now() });
     if (!out.ok) throw refused(out.error);
     return { computer: this.computer(out.host as unknown as HostRow), code, expiresAt, commands: setupCommands(this.d.origin, code) };
   }
@@ -982,6 +1020,23 @@ export class RoutineService {
     return { version: `key:${c.at}`, env: { CODEX_API_KEY: await this.d.keys.open(owner, "host:openai:key", c.iv, c.ct) } };
   }
 
+  /**
+   * The computer stores its own Claude plan (install.sh signed Claude in there): sealed with its
+   * owner's key, or its team's, and used from the next sync. A person's computer goes through the
+   * app's path as its owner; a team's server through setClaudeByHost.
+   */
+  async hostSetClaude(host: Host, kind: "plan" | "key", token: string): Promise<void> {
+    const t = token.trim().replace(/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=/, "");
+    if (!/^[A-Za-z0-9_-]+$/.test(t) || (kind === "plan" ? !t.startsWith("sk-ant-oat") : !t.startsWith("sk-ant-api"))) throw refused("bad_token");
+    const owner: Owner = host.teamId ? { kind: "team", teamId: host.teamId } : { kind: "user", uid: host.uid! };
+    const sealed = await this.d.keys.seal(owner, `host:claude:${kind}`, t);
+    const out = host.teamId
+      ? await this.d.control.m(api.routines.setClaudeByHost, { hostId: host.id as never, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() })
+      : await this.d.control.m(api.routines.setClaude, { uid: host.uid as never, id: host.id, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() });
+    if (!out.ok) throw refused(out.error ?? "bad_request");
+    this.signedIn.set(host.id, true);
+  }
+
   /** The computer's chosen sign-in as environment (only the computer asks, with its token). */
   async hostClaude(host: Host): Promise<{ version: string | null; env: Record<string, string> }> {
     const c = await this.d.control.q(api.routines.hostClaude, { hostId: host.id as never });
@@ -1002,7 +1057,7 @@ export class RoutineService {
   }
 
   private claim(codeHash: string, tokenHash: string, info: HostInfo) {
-    return this.d.control.m(api.routines.claimHost, { codeHash, tokenHash, info, now: this.now() });
+    return this.d.control.m(api.routines.claimHost, { codeHash, tokenHash, info: storedInfo(info)!, now: this.now() });
   }
 
   async setup(code: string, info: HostInfo): Promise<{ token: string; computer: { id: string; name: string; team: boolean } }> {
@@ -1011,15 +1066,17 @@ export class RoutineService {
     let out = await this.claim(keyed!, sha256Hex(token), info);
     if (!out.ok && out.error === "invalid_code") out = await this.claim(legacy!, sha256Hex(token), info);
     if (!out.ok) throw refused(out.error);
+    if (info.claudeSignedIn !== undefined) this.signedIn.set(String(out.host.id), info.claudeSignedIn);
     return { token, computer: { id: String(out.host.id), name: out.host.name, team: Boolean(out.host.teamId) } };
   }
 
   async sync(
     host: Host,
     info?: HostInfo,
-  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null; openai: string | null; model: StoredModel | null }> {
-    const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info, now: this.now() });
+  ): Promise<{ computer: { id: string; name: string }; routines: HostRoutine[]; runner?: { version: string; sha256: string; signature?: string }; ambient: boolean; claude: string | null; openai: string | null; model: StoredModel | null; teamBrain: TeamBrainSpec | null }> {
+    const out = await this.d.control.m(api.routines.hostSync, { hostId: host.id as never, info: storedInfo(info), now: this.now() });
     if (!out) throw new RoutineError("unauthorized", "This computer was removed.", 401);
+    if (info?.claudeSignedIn !== undefined) this.signedIn.set(host.id, info.claudeSignedIn);
     return {
       computer: { id: host.id, name: host.name },
       routines: (out.routines as unknown as RoutineRow[]).map((r) => ({
@@ -1038,7 +1095,28 @@ export class RoutineService {
       openai: await this.openaiVersion(host),
       // The default model for its runs (a bot's own wins; startRun says).
       model: (out as unknown as { model?: StoredModel | null }).model ?? null,
+      // A team's computer runs the team's brain when the team has no server of its own.
+      teamBrain: await this.teamBrain(host, info),
     };
+  }
+
+  /**
+   * What a team's computer should run of the team's brain (docs/architecture.md, "A team on its own
+   * computer"): for a team with no server, or one already on this computer; never for a hosted team.
+   * Once the computer says the brain answers there, the team's address becomes `computer://<host>`.
+   */
+  private async teamBrain(host: Host, info: HostInfo | undefined): Promise<TeamBrainSpec | null> {
+    if (!host.teamId || !this.d.teamBundle) return null;
+    const team = (await this.d.control.q(api.teams.byId, { teamId: host.teamId as never })) as unknown as Team | null;
+    if (!team || team.status !== "active") return null;
+    const here = `computer://${host.id}`;
+    if (team.serverUrl && team.serverUrl !== here) return null;
+    const bundle = await this.d.teamBundle();
+    if (info?.teamBrain?.ok && team.serverUrl !== here) {
+      const set = await this.d.control.m(api.teams.setComputerServer, { teamId: host.teamId as never, hostId: host.id as never });
+      if (set.ok) this.d.onTeamServer?.(host.teamId);
+    }
+    return { teamId: team.id, teamName: team.name, slug: team.slug, version: bundle.version, sha256: bundle.sha256 };
   }
 
   /** A run starts: what to run, its owner's secrets as environment variables, and the run's id. */
@@ -1203,8 +1281,22 @@ export function newSetupCode(): string {
 const setupCode = (code: string) => code.trim().toUpperCase();
 
 /** What the app shows to set up a computer (Linux with systemd, Node and Claude Code). */
+/**
+ * The one line that connects a computer (runner/install.sh): it installs what's missing, connects
+ * with the code and signs Claude in. By hand, without the script: download
+ * <origin>/runner/ambient-runner.mjs and run `sudo node ambient-runner.mjs setup <code>`.
+ */
 export function setupCommands(origin: string, code: string): string {
-  return [`curl -fsSL ${origin}/runner/ambient-runner.mjs -o ambient-runner.mjs`, `sudo node ambient-runner.mjs setup ${code}`].join("\n");
+  return `curl -fsSL ${origin}/install.sh | sudo bash -s ${code}`;
+}
+
+/** runner/install.sh with this gateway's address in it, served at /install.sh. */
+export function loadInstaller(dir: string, origin: string): string | undefined {
+  try {
+    return readFileSync(join(dir, "install.sh"), "utf8").replace(/^DEFAULT_SERVER="[^"]*"$/m, `DEFAULT_SERVER=${JSON.stringify(origin)}`);
+  } catch {
+    return undefined;
+  }
 }
 
 /** A bot's own model must be its runtime's (a Claude model can't run in Codex, nor the other way). */

@@ -10,19 +10,24 @@
 //   ambient-runner image                         build the bots' container image now
 //   ambient-runner ambient                       Ambient on this computer: one Claude Code session that
 //                                                stays open, answering the person's chat (a service)
+//   ambient-runner claude-status                 "signed-in" or "missing": can Claude Code run here
+//   ambient-runner claude-token                  a Claude plan's token on stdin (from `claude setup-token`),
+//                                                stored in Ambient as this computer's sign-in
 //   ambient-runner status | uninstall
+//
+// install.sh (served next to this file at /install.sh) installs what's missing and runs setup.
 //
 // One file, no dependencies, Node 18 or newer. The gateway serves it at /runner/ambient-runner.mjs
 // and `sync` replaces it when the gateway has a newer one.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createHash, createPublicKey, verify } from "node:crypto";
-import { chmodSync, chownSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { hostname, release, type } from "node:os";
+import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
+import { chmodSync, chownSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { hostname, release, tmpdir, type } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.9.3";
+const VERSION = "0.11.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -112,6 +117,8 @@ function config() {
     claudeArgs: (env.AMBIENT_CLAUDE_ARGS ?? "--permission-mode auto").split(/\s+/).filter(Boolean),
     folder: env.AMBIENT_FOLDER || "",
     node: env.AMBIENT_NODE || process.execPath,
+    /** "own": Ambient's sessions use the user's own Claude Code settings (~/.claude) even with a sign-in from Ambient. */
+    claudeConfig: env.AMBIENT_CLAUDE_CONFIG === "own" ? "own" : "isolated",
   };
 }
 
@@ -168,10 +175,31 @@ function claudeVersion(cfg) {
   }
 }
 
-/** What the app shows about this computer. Claude Code's and Codex's versions are checked once an hour. */
+/**
+ * Whether Claude Code can run here: a sign-in from Ambient or the computer's own token or key, or
+ * else Claude Code's own login for the routine user (`claude auth status`).
+ */
+function claudeLogin(cfg) {
+  const env = runEnv(cfg);
+  if (env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY) return true;
+  try {
+    const as = asUser(cfg.user);
+    // In a folder of the runner's, with nothing on stdin: it only reads its own settings.
+    const cwd = existsSync(STATE_DIR) ? STATE_DIR : tmpdir();
+    const r = spawnSync(cfg.claude, ["auth", "status"], { cwd, input: "", encoding: "utf8", timeout: 30_000, env: runEnv(cfg, as ? { HOME: as.home } : {}), ...(as ? { uid: as.uid, gid: as.gid } : {}) });
+    return JSON.parse(r.stdout).loggedIn === true;
+  } catch {
+    return false;
+  }
+}
+
+/** What the app shows about this computer. Claude Code's and Codex's versions (and Claude's own login) are checked once an hour. */
 function info(cfg, state) {
-  if (!state.claude || Date.now() - state.claude.at > 3600_000) state.claude = { at: Date.now(), version: claudeVersion(cfg) };
-  return { hostname: hostname().slice(0, 120), os: `${type()} ${release()}`.slice(0, 120), runner: VERSION, claude: state.claude.version, ...codexInfo(cfg, state) };
+  if (!state.claude || Date.now() - state.claude.at > 3600_000 || state.claude.login === undefined) state.claude = { at: Date.now(), version: claudeVersion(cfg), login: claudeLogin(cfg) };
+  // A sign-in from Ambient counts at once (claude.env changes with sync); Claude Code's own login as last checked.
+  const env = runEnv(cfg);
+  const claudeSignedIn = Boolean(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY) || state.claude.login === true;
+  return { hostname: hostname().slice(0, 120), os: `${type()} ${release()}`.slice(0, 120), runner: VERSION, claude: state.claude.version, claudeSignedIn, ...codexInfo(cfg, state), ...(state.teamBrain ? { teamBrain: { version: String(state.teamBrain.version).slice(0, 40), ok: state.teamBrain.ok === true } } : {}) };
 }
 
 // ---- Codex (docs/bots.md, "Codex next to Claude Code") ----
@@ -419,6 +447,7 @@ async function sync() {
   ambientUnit(cfg, out.ambient === true);
   await claudeSync(cfg, state, out.claude ?? null);
   await openaiSync(cfg, state, out.openai ?? null);
+  await teamBrainSync(cfg, state, out.teamBrain ?? null);
   const model = out.model ?? null;
   if (JSON.stringify(state.model ?? null) !== JSON.stringify(model)) {
     state.model = model;
@@ -427,6 +456,200 @@ async function sync() {
   }
   writeState(state);
   if (out.runner?.sha256 && (await selfUpdate(cfg, out.runner)) && out.ambient === true) systemctl("restart", AMBIENT_UNIT);
+}
+
+// ---- A team's brain on the team's computer ----
+//
+// A team without a server of its own runs its brain here (docs/architecture.md, "A team on its own
+// computer"): the team server as one file from the gateway (checked against the sha256 sync gives),
+// on 127.0.0.1 only, as the routine user, with its data in /var/lib/ambient-team, and its nightly
+// upkeep on this computer's Claude. Nothing listens outside: the gateway's requests for it come over
+// the long poll (http jobs) and go back the same way. Sync stops it when the team no longer runs here
+// (its data stays).
+
+const TEAM_UNIT = "ambient-team.service";
+const TEAM_UPKEEP = "ambient-team-upkeep";
+const TEAM_PORT = Number(process.env.AMBIENT_TEAM_PORT || 18790);
+const TEAM_BUNDLE = join(INSTALL_DIR, "ambient-team.mjs");
+const TEAM_ENV = join(CONFIG_DIR, "team.env");
+const TEAM_DATA = process.env.AMBIENT_TEAM_DATA || "/var/lib/ambient-team";
+
+/** Node's own SQLite (the team brain's search index) needs Node 22.13 or newer. */
+function nodeForTeamBrain() {
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  return major > 22 || (major === 22 && minor >= 13);
+}
+
+async function teamBrainHealthy() {
+  try {
+    return (await fetch(`http://127.0.0.1:${TEAM_PORT}/health`, { signal: AbortSignal.timeout(3000) })).ok;
+  } catch {
+    return false;
+  }
+}
+
+async function teamBrainSync(cfg, state, spec) {
+  const units = [TEAM_UNIT, `${TEAM_UPKEEP}.service`, `${TEAM_UPKEEP}.timer`];
+  if (!spec) {
+    if (existsSync(join(UNIT_DIR, TEAM_UNIT))) {
+      systemctl("disable", "--now", `${TEAM_UPKEEP}.timer`);
+      systemctl("disable", "--now", TEAM_UNIT);
+      for (const u of units) rmSync(join(UNIT_DIR, u), { force: true });
+      systemctl("daemon-reload");
+      log(`Stopped the team's brain here (its data stays in ${TEAM_DATA})`);
+    }
+    delete state.teamBrain;
+    return;
+  }
+  if (!nodeForTeamBrain()) {
+    if (state.teamBrain?.error !== "node") log(`The team's brain needs Node 22.13 or newer here (this is ${process.versions.node}). Install a newer Node, then run setup again.`);
+    state.teamBrain = { version: spec.version, ok: false, error: "node" };
+    return;
+  }
+  let changed = false;
+  const have = existsSync(TEAM_BUNDLE) ? createHash("sha256").update(readFileSync(TEAM_BUNDLE)).digest("hex") : null;
+  if (have !== spec.sha256) {
+    let buf;
+    try {
+      const res = await fetch(`${cfg.server}/runner/ambient-team.mjs`, { headers: { authorization: `Bearer ${cfg.token}`, "user-agent": `ambient-runner/${VERSION}` }, signal: AbortSignal.timeout(120_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      buf = Buffer.from(await res.arrayBuffer());
+    } catch (err) {
+      log(`Couldn't fetch the team's brain: ${err.message}`);
+      state.teamBrain = { version: spec.version, ok: await teamBrainHealthy() };
+      return;
+    }
+    if (createHash("sha256").update(buf).digest("hex") !== spec.sha256) {
+      log("The team's brain from the gateway didn't match its checksum; not installed.");
+      state.teamBrain = { version: spec.version, ok: await teamBrainHealthy() };
+      return;
+    }
+    mkdirSync(INSTALL_DIR, { recursive: true });
+    writeFileSync(`${TEAM_BUNDLE}.new`, buf, { mode: 0o644 });
+    renameSync(`${TEAM_BUNDLE}.new`, TEAM_BUNDLE);
+    changed = true;
+    log(`Installed the team's brain ${spec.version} for ${spec.teamName}`);
+  }
+  const clean = (v) => String(v).replace(/[\r\n]/g, " ").slice(0, 200);
+  const secret = readEnvFile(TEAM_ENV).BRAIN_TEAM_SECRET || randomBytes(32).toString("base64url");
+  const env = {
+    BRAIN_TEAM_ID: clean(spec.teamId),
+    BRAIN_TEAM_NAME: clean(spec.teamName),
+    BRAIN_DATA_DIR: TEAM_DATA,
+    BRAIN_GATEWAY_ISSUER: cfg.server,
+    BRAIN_LISTEN_HOST: "127.0.0.1",
+    PORT: String(TEAM_PORT),
+    BRAIN_TEAM_SECRET: secret,
+    BRAIN_VERSION: clean(spec.version),
+  };
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  if (writeIfChanged(TEAM_ENV, Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n")) {
+    chmodSync(TEAM_ENV, 0o600);
+    changed = true;
+  }
+  const as = cfg.user && cfg.user !== "root" ? asUser(cfg.user) : null;
+  mkdirSync(TEAM_DATA, { recursive: true, mode: 0o750 });
+  if (as) chownSync(TEAM_DATA, as.uid, as.gid);
+  const runAs = as ? `User=${cfg.user}\nGroup=${as.gid}\n` : "";
+  const path = process.env.PATH || SYSTEM_PATH.join(":");
+  const claudeConfig = runEnv(cfg).CLAUDE_CONFIG_DIR;
+  const serve = `# Written by ambient-runner; changes here are overwritten.
+[Unit]
+Description=Ambient: the team's brain for ${env.BRAIN_TEAM_NAME} (127.0.0.1:${TEAM_PORT} only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+${runAs}EnvironmentFile=${TEAM_ENV}
+Environment=PATH=${path}
+ExecStart=${cfg.node} ${TEAM_BUNDLE} serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`;
+  const upkeep = `# Written by ambient-runner; changes here are overwritten.
+[Unit]
+Description=Ambient: the team's nightly upkeep, with this computer's Claude
+
+[Service]
+Type=oneshot
+${runAs}EnvironmentFile=${TEAM_ENV}
+EnvironmentFile=-${CLAUDE_ENV}
+Environment=PATH=${path}
+Environment=HOME=${as ? home(cfg.user) : "/root"}
+Environment=BRAIN_CLAUDE=${cfg.claude}
+${claudeConfig ? `Environment=CLAUDE_CONFIG_DIR=${claudeConfig}\n` : ""}ExecStart=${cfg.node} ${TEAM_BUNDLE} consolidate
+TimeoutStartSec=2h
+`;
+  const timer = `# Written by ambient-runner; changes here are overwritten.
+[Unit]
+Description=Ambient: the team's upkeep, nightly
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`;
+  const unitsChanged = [writeIfChanged(join(UNIT_DIR, TEAM_UNIT), serve), writeIfChanged(join(UNIT_DIR, `${TEAM_UPKEEP}.service`), upkeep), writeIfChanged(join(UNIT_DIR, `${TEAM_UPKEEP}.timer`), timer)].some(Boolean);
+  if (unitsChanged) systemctl("daemon-reload");
+  if (unitsChanged || changed) {
+    systemctl("enable", TEAM_UNIT);
+    systemctl("restart", TEAM_UNIT);
+    systemctl("enable", "--now", `${TEAM_UPKEEP}.timer`);
+  } else if (systemctl("is-active", TEAM_UNIT).stdout.trim() !== "active") {
+    systemctl("start", TEAM_UNIT);
+  }
+  let ok = await teamBrainHealthy();
+  for (let i = 0; !ok && (unitsChanged || changed) && i < 10; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    ok = await teamBrainHealthy();
+  }
+  if (ok && !state.teamBrain?.ok) log(`The team's brain for ${spec.teamName} answers here`);
+  state.teamBrain = { version: spec.version, ok };
+}
+
+/** A request for the team's brain from the gateway (relay.ts): passed to 127.0.0.1, answered as is. */
+async function relayJob(cfg, job) {
+  let status = 502;
+  let headers = {};
+  let body = Buffer.alloc(0);
+  let error = null;
+  try {
+    const path = String(job.path ?? "");
+    if (!path.startsWith("/") || path.startsWith("//")) throw new Error("not a path on the team's brain");
+    const method = String(job.method ?? "GET").toUpperCase();
+    const res = await fetch(`http://127.0.0.1:${TEAM_PORT}${path}`, {
+      method,
+      headers: job.headers && typeof job.headers === "object" ? job.headers : {},
+      body: job.body && method !== "GET" && method !== "HEAD" ? Buffer.from(String(job.body), "base64") : undefined,
+      redirect: "manual",
+      signal: AbortSignal.timeout(280_000),
+    });
+    status = res.status;
+    for (const [k, v] of res.headers) if (!["connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding"].includes(k)) headers[k] = v;
+    body = Buffer.from(await res.arrayBuffer());
+  } catch (err) {
+    error = `The team's brain on this computer didn't answer: ${err.message}`;
+  }
+  await fetch(`${cfg.server}/v1/host/relay/${job.id}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${cfg.token}`,
+      "user-agent": `ambient-runner/${VERSION}`,
+      "content-type": "application/octet-stream",
+      "x-ambient-status": String(status),
+      "x-ambient-headers": Buffer.from(JSON.stringify(headers)).toString("base64"),
+      ...(error ? { "x-ambient-error": Buffer.from(error.slice(0, 400)).toString("base64") } : {}),
+    },
+    body,
+    signal: AbortSignal.timeout(120_000),
+  }).catch((err) => log(`Couldn't send the team brain's answer back: ${err.message}`));
 }
 
 // ---- Ambient on this computer ----
@@ -442,6 +665,9 @@ async function sync() {
 const AMBIENT_UNIT = "ambient-runner-ambient.service";
 /** How long one of Ambient's own turns (a bot's question, the heartbeat) may take. */
 const INTERNAL_LIMIT_MS = 5 * 60_000;
+/** Upkeep's answers: at most this many at once, each stopped after this long. */
+const COMPLETE_AT_ONCE = 2;
+const COMPLETE_LIMIT_MS = 4 * 60_000;
 const AMBIENT_ENV = join(CONFIG_DIR, "ambient.env");
 
 function ambientUnit(cfg, wanted) {
@@ -566,7 +792,9 @@ async function ambientService() {
   /** What every Ambient session gets: the computer's model, Ambient's tools, and its instructions. */
   const sessionArgs = (mcpFile, instructions) => [
     ...withModel(cfg.claudeArgs, readState().model),
-    "--mcp-config", mcpFile, "--allowedTools", "mcp__ambient",
+    ...settingArgs(cfg),
+    // Only Ambient's tools from MCP: never the MCP servers the user set up for their own Claude Code.
+    "--mcp-config", mcpFile, "--strict-mcp-config", "--allowedTools", "mcp__ambient",
     // Secrets go in through the app, never through a chat.
     "--disallowedTools", "mcp__ambient__set_routine_secret",
     "--append-system-prompt", instructions,
@@ -581,6 +809,12 @@ async function ambientService() {
 
   const start = (uid, p, instructions) => {
     const dir = folderOf(uid);
+    // A session kept in another settings folder (before the runner had its own) can't be resumed: start afresh.
+    const configDir = runEnv(cfg).CLAUDE_CONFIG_DIR;
+    if (p.session && configDir && !sessionKnown(configDir, p.session)) {
+      log(`Ambient's session for ${uid} was kept in another settings folder: starting a new one`);
+      p.session = null;
+    }
     const args = [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       ...sessionArgs(mcpConfig(safe(uid), p.token), instructions),
@@ -695,6 +929,82 @@ async function ambientService() {
     log(`Looked at something for ${job.uid} in its own session (${result?.turns ?? "?"} turns${result?.costUsd !== undefined ? `, $${result.costUsd.toFixed(2)}` : ""})`);
   };
 
+  /**
+   * The brain's upkeep (docs/architecture.md, "Upkeep on your computer"): one structured answer
+   * from Claude Code with this computer's Claude sign-in, for a page update, an overview or a work
+   * session's note. No tools, no MCP servers, no settings (nobody's hooks or plugins) and no saved
+   * session, in an empty folder; with a Claude plan or key from Ambient, in a Claude config folder
+   * of its own, so the machine's ~/.claude is never read or written. The gateway keeps the prompts
+   * and checks the answer. At most COMPLETE_AT_ONCE at a time, so upkeep never crowds the chat.
+   */
+  let completing = 0;
+  const completeQueue = [];
+  const completeRun = async (job) => {
+    const model = /^[A-Za-z0-9._\[\]-]{1,80}$/.test(String(job.model)) ? String(job.model) : "haiku";
+    const wire = { model, system: String(job.system ?? ""), schema: job.schema && typeof job.schema === "object" ? job.schema : {} };
+    const work = join(base, ".upkeep");
+    mkdirSync(work, { recursive: true });
+    own(base);
+    own(work);
+    const dir = mkdtempSync(join(work, "run-"));
+    own(dir);
+    const env = runEnv(cfg, { ...(drop ? { HOME: as.home, USER: user, LOGNAME: user } : {}) });
+    if (env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY) {
+      const conf = join(work, "claude-config");
+      mkdirSync(conf, { recursive: true, mode: 0o700 });
+      own(conf);
+      env.CLAUDE_CONFIG_DIR = conf;
+    }
+    const args = [
+      "-p", "--output-format", "json", "--model", wire.model, "--system-prompt", wire.system,
+      "--json-schema", JSON.stringify(wire.schema), "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence",
+    ];
+    try {
+      const { code, stdout, stderr } = await new Promise((resolve) => {
+        const p = spawn(drop ? sys("setpriv") : cfg.claude, drop ? ["--reuid", String(as.uid), "--regid", String(as.gid), "--init-groups", "--", cfg.claude, ...args] : args, { cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
+        let out = "";
+        let err = "";
+        p.stdout.on("data", (d) => (out = (out + d).slice(-400_000)));
+        p.stderr.on("data", (d) => (err = (err + d).slice(-2000)));
+        const timer = setTimeout(() => p.kill("SIGKILL"), COMPLETE_LIMIT_MS);
+        timer.unref();
+        p.on("error", (e) => resolve({ code: 127, stdout: "", stderr: e.message }));
+        p.on("close", (c) => {
+          clearTimeout(timer);
+          resolve({ code: c ?? 1, stdout: out, stderr: err });
+        });
+        p.stdin.on("error", () => {});
+        p.stdin.end(String(job.user ?? ""));
+      });
+      let r = null;
+      try {
+        r = JSON.parse(stdout.trim().split("\n").pop() || "null");
+      } catch {}
+      if (!r || r.is_error || r.structured_output === undefined) {
+        return { error: `Claude Code couldn't write the ${String(job.what || "answer").slice(0, 40)}: ${String(r?.result ?? r?.subtype ?? `exit ${code}. ${stderr.trim().split("\n").slice(-2).join(" ")}`).slice(0, 1500)}` };
+      }
+      const u = r.usage ?? {};
+      return { text: JSON.stringify({ output: r.structured_output, usage: { input_tokens: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), output_tokens: u.output_tokens ?? 0, cache_read_tokens: u.cache_read_input_tokens ?? 0 } }) };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const complete = async (job) => {
+    if (completing >= COMPLETE_AT_ONCE) await new Promise((resolve) => completeQueue.push(resolve));
+    completing++;
+    let body;
+    try {
+      body = await completeRun(job);
+    } catch (err) {
+      body = { error: `Upkeep couldn't run here: ${err.message}`.slice(0, 1900) };
+    } finally {
+      completing--;
+      completeQueue.shift()?.();
+    }
+    await call(cfg, "POST", `/v1/host/ambient/${job.id}`, body).catch(() => {});
+    log(body.error ? `Upkeep: ${body.error.slice(0, 200)}` : `Upkeep: wrote the ${String(job.what || "answer").slice(0, 40)}`);
+  };
+
   /** Each person's turns in order (a promise chain per uid): one chain for the chat, one for the rest. */
   const queues = new Map();
 
@@ -712,6 +1022,8 @@ async function ambientService() {
     if (job?.kind === "exec") void execJob(cfg, job);
     else if (job?.kind === "codex-login") void codexLoginJob(cfg, job);
     else if (job?.kind === "start") startJob(job);
+    else if (job?.kind === "complete") void complete(job);
+    else if (job?.kind === "http") void relayJob(cfg, job);
     else if (job?.uid && job.token) {
       // One person's messages one after another in their session; Ambient's own turns (a bot's
       // question, the heartbeat) one after another in short sessions of their own, beside it.
@@ -823,7 +1135,10 @@ function expand(folder, user) {
   return folder.startsWith("~/") ? join(home(user), folder.slice(2)) : folder;
 }
 
-/** The environment Claude Code runs in: the runner's, without the computer's token. */
+/**
+ * The environment Claude Code runs in: the runner's, without the computer's token. With a sign-in
+ * of its own (a token or key), Claude Code gets a settings folder of the runner's too (claudeHome).
+ */
 function runEnv(cfg, extra = {}, secrets = {}) {
   const allowed = Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k)));
   const env = { ...process.env, ...allowed, ...extra };
@@ -831,7 +1146,59 @@ function runEnv(cfg, extra = {}, secrets = {}) {
   // A Claude Code session's own variables stay out (when the runner itself is started from one); the
   // computer's sign-in (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`, in extra.env) stays in.
   for (const k of Object.keys(env)) if ((k.startsWith("CLAUDE_CODE_") && k !== "CLAUDE_CODE_OAUTH_TOKEN") || k === "CLAUDECODE") delete env[k];
-  return signInEnv(chosenClaude(env));
+  const out = signInEnv(chosenClaude(env));
+  if (isolated(cfg, out)) out.CLAUDE_CONFIG_DIR = claudeHome(cfg);
+  return out;
+}
+
+// ---- Claude Code's settings for Ambient's runs ----
+//
+// A computer that already runs Claude Code (Remote Control, other jobs) keeps its own setup: with a
+// sign-in of their own (a token or key), Ambient's sessions and bots use a settings folder of the
+// runner's (CLAUDE_CONFIG_DIR), so the user's ~/.claude (hooks, plugins, MCP servers, settings,
+// CLAUDE.md, history) never reaches them, and their sessions never show up in the user's. Without
+// one they need Claude Code's own login, and so its folder: then only project and local settings
+// count (--setting-sources), never the user's. AMBIENT_CLAUDE_CONFIG=own in runner.env keeps the
+// user's settings for everything (docs/self-hosting.md, "What the setup leaves alone").
+
+/** Runs use a settings folder of the runner's: a sign-in of their own, and not turned off. */
+function isolated(cfg, env) {
+  return cfg.claudeConfig !== "own" && Boolean(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY);
+}
+
+/** The routine user's settings folder for Ambient's runs: <state>/claude/<user>, theirs alone. */
+function claudeHome(cfg) {
+  const user = String(cfg.user || "root").replace(/[^A-Za-z0-9._-]/g, "_");
+  const dir = join(STATE_DIR, "claude", user);
+  if (!existsSync(dir)) {
+    mkdirSync(join(STATE_DIR, "claude"), { recursive: true, mode: 0o755 });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      const as = asUser(cfg.user);
+      if (as) chownSync(dir, as.uid, as.gid);
+    } catch {
+      // No such user (yet): Claude Code says so when it starts.
+    }
+  }
+  return dir;
+}
+
+/** Flags every Claude Code run here gets: only project and local settings when it must use the user's folder. */
+function settingArgs(cfg) {
+  return isolated(cfg, runEnv(cfg)) || cfg.claudeConfig === "own" ? [] : ["--setting-sources", "project,local"];
+}
+
+/**
+ * Whether a session can be resumed from a settings folder: its transcript is there. A session from
+ * before the runner had a folder of its own isn't, and then a run starts fresh instead of failing.
+ */
+function sessionKnown(configDir, id) {
+  const projects = join(configDir, "projects");
+  try {
+    return readdirSync(projects).some((d) => existsSync(join(projects, d, `${id}.jsonl`)));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -963,7 +1330,7 @@ const ADAPTERS = {
       // `system`: the bot's instructions for this run from the gateway (runner 0.8.0 on); older
       // gateways send none, and the runner's own text stays.
       const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
-      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history");
+      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history");
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
       return { args, stdin };
@@ -1512,11 +1879,21 @@ async function run(id) {
     }
   }
   // Codex's own run settings: its model (a bot's own OpenAI model), never Claude Code's flags.
-  const runCfg = codex ? cfg : { ...cfg, claudeArgs: withModel(cfg.claudeArgs, bot?.model ?? readState().model) };
+  const runCfg = codex ? cfg : { ...cfg, claudeArgs: [...withModel(cfg.claudeArgs, bot?.model ?? readState().model), ...(contained ? [] : settingArgs(cfg))] };
+  // A conversation kept in another settings folder (before the runner had its own) can't be
+  // resumed: the run continues from what the bot handed over instead.
+  let carryOn = resume;
+  if (!codex && !contained && carryOn?.sessionId) {
+    const configDir = runEnv(cfg).CLAUDE_CONFIG_DIR;
+    if (configDir && !sessionKnown(configDir, carryOn.sessionId)) {
+      log(`Its last session was kept in another settings folder: continuing in a new one`);
+      carryOn = { ...carryOn, sessionId: null };
+    }
+  }
   const mcpArg = codex ? mcpServer : mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile);
   // A bot's Claude Code run stays open for messages that come in while it works (stream-json in).
   const streaming = Boolean(adapter.streams && bot && runToken);
-  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, resume, mcpArg, system, { contained, outDir: contained ? null : outDir, streaming });
+  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, carryOn, mcpArg, system, { contained, outDir: contained ? null : outDir, streaming });
   const codexEnv = codex ? { ...openaiKey, ...(mcpServer ? { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } : {}) } : {};
   let child;
   let containerName = null;
@@ -1814,9 +2191,9 @@ function gidOf(user) {
 
 async function setup(args) {
   const code = args.find((a) => /^[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(a));
-  if (!code) die("usage: sudo node ambient-runner.mjs setup <code> [--user <name>] [--path <dirs to put first on PATH>] [--server <url>]", 2);
+  if (!code) die("usage: sudo node ambient-runner.mjs setup <code> [--user <name>] [--path <dirs to put first on PATH>] [--server <url>] [--claude <path>]", 2);
   if (process.getuid?.() !== 0) die("Run setup with sudo: it installs systemd units.");
-  if (spawnSync(sys("systemctl"), ["--version"]).status !== 0) die("This computer has no systemd. Routines need Linux with systemd for now.");
+  if (spawnSync(sys("systemctl"), ["--version"]).status !== 0) die("This computer has no systemd. Bots need Linux with systemd for now.");
   // systemd runs this Node as root every minute: someone who can change it would get root.
   const unsafe = changeableByOthers(process.execPath);
   if (unsafe) die(`${process.execPath} can be changed by ${unsafe}, and the runner runs it as root. Install Node for the whole system (owned by root, e.g. /usr/bin/node) and run setup with that one.`);
@@ -1830,9 +2207,8 @@ async function setup(args) {
   if (!claude) die(`Claude Code isn't installed for ${user}. Install it (https://claude.com/claude-code), sign in, then run setup again.`);
   const path = [...new Set([...extraPath, dirname(process.execPath), dirname(claude), join(userHome, ".local/bin"), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])].join(":");
   const env = { PATH: path, HOME: userHome, ...readEnvFile(EXTRA) };
-  if (!claudeSignedIn(claude, user, { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "", ...env })) {
-    die(`Claude Code isn't signed in for ${user}. Run "claude" as ${user} once and sign in (or put ANTHROPIC_API_KEY in ${EXTRA}), then run setup again.`);
-  }
+  // Signing in comes after: install.sh does it (claude-token), or the app does (the computer, then Claude).
+  const signedIn = claudeSignedIn(claude, user, { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "", ...env });
 
   const server = (flag(args, "server") || DEFAULT_SERVER).replace(/\/+$/, "");
   const cfg = { server, token: "", claude, user };
@@ -1898,8 +2274,9 @@ WantedBy=timers.target
   systemctl("daemon-reload");
   systemctl("enable", "--now", "ambient-runner.timer");
   systemctl("start", "ambient-runner.service");
-  const whose = out.computer.team ? "The team's routines" : "Routines you add in the Ambient app";
-  log(`Connected as "${out.computer.name}". ${whose} run here as ${user}, in ${folder} unless a routine names its own folder.`);
+  const whose = out.computer.team ? "The team's bots" : "Ambient's chat and the bots you add in the Ambient app";
+  log(`Connected as "${out.computer.name}". ${whose} run here as ${user}, in ${folder} unless a bot names its own folder.`);
+  if (!signedIn) log(`Claude Code isn't signed in for ${user} yet: sign in with your Claude plan (install.sh does it), or add it in the Ambient app (the computer, then Claude).`);
   log(`Logs: journalctl -u 'ambient-routine-*' -u ambient-runner`);
 }
 
@@ -1908,24 +2285,57 @@ WantedBy=timers.target
 function status() {
   const cfg = config();
   log(`ambient-runner ${VERSION}, server ${cfg.server}, runs as ${cfg.user}`);
+  const env = runEnv(cfg);
+  log(`Claude: ${claudeLogin(cfg) ? "signed in" : "not signed in"}${env.CLAUDE_CONFIG_DIR && isolated(cfg, env) ? `, settings in ${env.CLAUDE_CONFIG_DIR} (not ${cfg.user}'s own)` : ""}`);
   const r = systemctl("list-timers", `${PREFIX}*.timer`, "--all", "--no-pager");
-  log(r.stdout.trim() || "No routines on this computer yet.");
+  log(r.stdout.trim() || "No bots on this computer yet.");
+}
+
+/** For install.sh: whether Claude Code can run here ("signed-in", exit 0) or not ("missing", exit 1). */
+function claudeStatus() {
+  const ok = claudeLogin(config());
+  log(ok ? "signed-in" : "missing");
+  process.exit(ok ? 0 : 1);
+}
+
+/**
+ * A Claude plan's token from stdin (install.sh got it from `claude setup-token`): stored in
+ * Ambient, sealed, as this computer's sign-in, then fetched back by a sync into claude.env.
+ */
+async function claudeToken() {
+  if (process.getuid?.() !== 0) die("Run it with sudo.");
+  const cfg = config();
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  const token = Buffer.concat(chunks).toString("utf8").trim().replace(/^CLAUDE_CODE_OAUTH_TOKEN=/, "");
+  if (!/^sk-ant-oat[A-Za-z0-9_-]+$/.test(token)) die("That isn't a Claude plan's token (it starts with sk-ant-oat).");
+  try {
+    await call(cfg, "POST", "/v1/host/claude", { kind: "plan", token });
+  } catch (err) {
+    die(`Ambient didn't take it: ${err.message}`);
+  }
+  await sync();
+  log("Claude: this computer signs in with your plan now.");
 }
 
 function uninstall() {
   if (process.getuid?.() !== 0) die("Run uninstall with sudo.");
+  // A team's brain here stops too; its data stays in TEAM_DATA (the team's wiki, until it has a new home).
+  for (const u of [`${TEAM_UPKEEP}.timer`, TEAM_UNIT]) systemctl("disable", "--now", u);
   for (const f of existsSync(UNIT_DIR) ? readdirSync(UNIT_DIR) : []) {
     if (f.startsWith(PREFIX) && f.endsWith(".timer")) systemctl("disable", "--now", f);
   }
   systemctl("disable", "--now", "ambient-runner.timer");
+  // Ambient's chat service too (its unit is ambient-runner-ambient.service).
+  systemctl("disable", "--now", AMBIENT_UNIT);
   for (const f of readdirSync(UNIT_DIR)) {
-    if (f.startsWith(PREFIX) || f.startsWith("ambient-runner.")) rmSync(join(UNIT_DIR, f), { force: true });
+    if (f.startsWith(PREFIX) || f.startsWith("ambient-runner.") || f === AMBIENT_UNIT || f.startsWith("ambient-team")) rmSync(join(UNIT_DIR, f), { force: true });
   }
   systemctl("daemon-reload");
   rmSync(CONFIG_DIR, { recursive: true, force: true });
   rmSync(STATE_DIR, { recursive: true, force: true });
   rmSync(INSTALL_DIR, { recursive: true, force: true });
-  log("Removed. Remove the computer in the Ambient app too.");
+  log(`Removed. Remove the computer in the Ambient app too. The user it ran as stays (an "ambient" user made by install.sh: sudo userdel -r ambient)${existsSync(TEAM_DATA) ? `, and so does the team brain's data in ${TEAM_DATA}` : ""}.`);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -1956,6 +2366,12 @@ switch (cmd) {
   case "status":
     status();
     break;
+  case "claude-status":
+    claudeStatus();
+    break;
+  case "claude-token":
+    await claudeToken();
+    break;
   case "uninstall":
     uninstall();
     break;
@@ -1964,5 +2380,5 @@ switch (cmd) {
     log(VERSION);
     break;
   default:
-    die("usage: ambient-runner setup <code> | sync | run <routine-id> | image | status | uninstall", 2);
+    die("usage: ambient-runner setup <code> | sync | run <routine-id> | image | status | claude-status | claude-token | uninstall", 2);
 }
