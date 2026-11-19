@@ -565,6 +565,45 @@ Code decides, every run:
 So a bot knows what it did yesterday and what's next, without dragging weeks of transcript
 around: a wrong turn is fixed by correcting its memory or handoff, not by wiping it.
 
+### Wake-ups
+
+A bot plans its own time. A schedule is optional: `schedule.every: "needed"` ("When it needs
+to", the default in the app) means no timer at all; the bot runs when someone writes to it, on
+its events (GitHub), and at the wake-ups it books itself. A bot with a schedule can book them
+too.
+
+- **Booking:** the runner's `wake_me` tool (ambient-bot MCP, runner 0.14.0) with `at` (a local
+  time like `2026-11-24 09:00`, read in the bot's `schedule.timezone`, or ISO with an offset) and
+  a `note` (what to do then). `cancel_wake_up` takes one back. The instructions say: a next step
+  on a date gets a wake-up; plan backwards from deadlines and leave the owner time to review.
+- **Guardrails** (Convex, `control/convex/wakes.ts`): 10 minutes to 30 days ahead, at most 5
+  booked, an hour apart (`too_soon`, `too_far`, `too_many`, `too_close`, each with a message the
+  bot can act on).
+- **Firing:** the gateway's ticker (`gateway/src/bots/wakes.ts`, every 30 seconds) fires what's
+  due: the note goes into the thread as a message from `Wake-up` and, when the bot is on, a run
+  starts with it at once (its computer's long poll), resuming its session like a message does
+  (`Wake-up: <note>`). A paused bot only gets the note.
+- **What a run knows:** its first message (and a resumed session's) says the time now in its
+  zone and lists what's booked, with ids.
+- **The first run:** a bot without a schedule starts right after it's made (or, made paused,
+  when it's first turned on), with a message from `Wake-up` that asks it to do what's due and
+  book the rest. One with a schedule waits for it.
+- **Shown:** a routine's `nextRunAt` is its next wake-up when that comes before its schedule (or
+  it has none), so the app's "Next: …" covers both.
+
+The app's API (whoever sees a bot sees its wake-ups; whoever may change it books and cancels):
+
+- `GET /v1/app/routines/:id/wakes` → `{ "timezone", "wakes": [{ "id", "at", "when": "Tue 24 Nov, 09:00", "note", "byBot" }] }`
+- `POST /v1/app/routines/:id/wakes` with `{ "at", "note" }` → `{ "wake" }`
+- `DELETE /v1/app/routines/:id/wakes/:wake` → `204`
+
+The run's side, with its run token: `GET /v1/bot/wakes`, `POST /v1/bot/wakes` (`{ "at", "note" }`
+→ `{ "wake", "booked" }`), `DELETE /v1/bot/wakes/:id`. MCP: `bot_wake_ups` (list, book, cancel).
+
+A computer gets `onCalendar: ""` for a bot without a schedule: runner 0.14.0 writes its service
+and no timer (and removes a timer it had); older runners skip it until they've updated
+themselves, on the same sync.
+
 ### Outcomes, not tasks
 
 A bot can own an outcome instead of running a task list: `GOAL.md` in its folder says the result
@@ -982,8 +1021,8 @@ its own from the start (`learn: "auto"`).
 
 | id | Name | Face | GitHub | Runtime | Schedule (besides GitHub's events) |
 |---|---|---|---|---|---|
-| `review_bot` | Reviewer | sage pebble, thick glasses | `all_prs` | Codex when the computer has a Codex sign-in (a second model's eyes), else Claude Code | weekdays 09:00: pull requests nobody reviewed for a day |
-| `builder` | Builder | sky cap, hoodie | `own_prs` | Claude Code | weekdays 09:00: labelled issues |
+| `review_bot` | Reviewer | sage pebble, thick glasses | `all_prs` | Codex when the computer has a Codex sign-in (a second model's eyes), else Claude Code | none (`needed`): its first run reviews what nobody reviewed for a day |
+| `builder` | Builder | sky cap, hoodie | `own_prs` | Claude Code | with a `label`, weekdays 09:00: labelled issues; without, none (`needed`): what the owner writes |
 | `wiki_keeper` | Wiki keeper | sand dome, reading glasses | `merges`, `own_prs` | Claude Code | Fridays 15:00: the week's merges |
 
 Questions (`id`, kind, default):

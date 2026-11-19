@@ -432,6 +432,28 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     expect(readFileSync(join(dir, "systemctl.log"), "utf8")).toContain(`start --no-block ambient-routine-${routineId}.service`);
   });
 
+  it("a routine without a schedule keeps its service and loses its timer, and gets it back", async () => {
+    const unit = (ext: string) => join(dir, "units", `ambient-routine-${routineId}.${ext}`);
+    const needed = (await appCall(s, lena, "PATCH", `/v1/app/routines/${routineId}`, { schedule: { ...vienna, every: "needed" } })).json.routine as R;
+    expect(needed).toMatchObject({ scheduleText: "When it needs to", nextRunAt: null });
+    expect(((await hostCall(host, "POST", "/v1/host/sync", {})).json.routines as { id: string }[]).find((r) => r.id === routineId)).toMatchObject({ onCalendar: "" });
+    writeFileSync(join(dir, "systemctl.log"), "");
+    const out = await runner(["sync"]);
+    expect(out.code, out.out).toBe(0);
+    expect(existsSync(unit("service"))).toBe(true);
+    expect(existsSync(unit("timer"))).toBe(false);
+    const calls = readFileSync(join(dir, "systemctl.log"), "utf8");
+    expect(calls).toContain(`disable --now ambient-routine-${routineId}.timer`);
+    expect(calls).not.toContain(`enable ambient-routine-${routineId}.timer`);
+    // Requested runs still start.
+    await appCall(s, lena, "POST", `/v1/app/routines/${routineId}/run`);
+    await runner(["sync"]);
+    expect(readFileSync(join(dir, "systemctl.log"), "utf8")).toContain(`start --no-block ambient-routine-${routineId}.service`);
+    await appCall(s, lena, "PATCH", `/v1/app/routines/${routineId}`, { schedule: vienna });
+    await runner(["sync"]);
+    expect(readFileSync(unit("timer"), "utf8")).toContain("OnCalendar=Wed *-*-* 08:52:00 Europe/Vienna");
+  });
+
   it("an installed older runner replaces itself with the gateway's signed release", async () => {
     const install = join(dir, "install");
     mkdirSync(install, { recursive: true });

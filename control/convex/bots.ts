@@ -177,7 +177,7 @@ export const wake = mutation({
   },
 });
 
-async function runByToken(ctx: { db: QueryCtx["db"] }, runTokenHash: string) {
+export async function runByToken(ctx: { db: QueryCtx["db"] }, runTokenHash: string) {
   const run = await ctx.db.query("routineRuns").withIndex("by_run_token", (q) => q.eq("runTokenHash", runTokenHash)).unique();
   if (!run || run.status !== "running") return null;
   const r = await ctx.db.get(run.routineId);

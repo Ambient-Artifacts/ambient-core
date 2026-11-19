@@ -44,6 +44,7 @@ function routineShape(r: Doc<"routines">) {
     bot: r.bot ?? null,
     openQuestionId: r.openQuestionId ?? null,
     seenAt: r.seenAt ?? null,
+    nextWakeAt: r.nextWakeAt ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
@@ -238,6 +239,7 @@ export const remove = mutation({
     for (const run of runs) await ctx.db.delete(run._id);
     const messages = await ctx.db.query("botMessages").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(1000);
     for (const m of messages) await ctx.db.delete(m._id);
+    for (const w of await ctx.db.query("botWakes").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(500)) await ctx.db.delete(w._id);
     // The files sent in its thread go with it.
     for (const f of await ctx.db.query("attachments").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(500)) {
       await ctx.storage.delete(f.storageId);

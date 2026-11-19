@@ -155,7 +155,7 @@ describe("a bot's folder on the computer", () => {
     const system = after(args, "--append-system-prompt")!;
     expect(system).toMatch(/^OUTDIR=\/.+\/runs\/run00000001\/out$/);
     expect(args.join(" ")).not.toContain("one of your owner's bots in Ambient");
-    expect(after(args, "--allowedTools")).toBe("mcp__ambient-bot__ask_owner,mcp__ambient-bot__send_file,mcp__ambient-bot__search_history,mcp__ambient");
+    expect(after(args, "--allowedTools")).toBe("mcp__ambient-bot__ask_owner,mcp__ambient-bot__send_file,mcp__ambient-bot__search_history,mcp__ambient-bot__wake_me,mcp__ambient-bot__cancel_wake_up,mcp__ambient");
     expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toBe("Wake up: write the release notes.");
     expect(readFileSync(join(dir, "work", "seen-memory.txt"), "utf8")).toBe("Lena likes bullet points.\n");
     expect(finished).toMatchObject({
@@ -285,7 +285,7 @@ describe("bot-mcp", () => {
     send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
     await reply(1);
     send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    expect(((await reply(2)).tools as { name: string }[]).map((t) => t.name)).toEqual(["ask_owner", "send_file", "search_history"]);
+    expect(((await reply(2)).tools as { name: string }[]).map((t) => t.name)).toEqual(["ask_owner", "send_file", "search_history", "wake_me", "cancel_wake_up"]);
     send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search_history", arguments: { query: "fridays", from: "2026-11-01", limit: 99 } } });
     const out = await reply(3);
     expect((out.content as { text: string }[])[0]!.text).toBe("2026-11-10 09:30 Lena (thread): Never publish on Fridays.");

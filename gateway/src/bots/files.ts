@@ -119,4 +119,6 @@ export interface Folders {
   learning?: import("./learning.ts").BotLearning;
   /** Amb's settings per person (docs/bots.md, "Amb's settings"). */
   ambSettings?: import("./amb-settings.ts").AmbSettings;
+  /** Wake-ups bots book for themselves (docs/bots.md, "Wake-ups"). */
+  wakes?: import("./wakes.ts").Wakes;
 }

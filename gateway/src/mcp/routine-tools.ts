@@ -19,7 +19,9 @@ import { RoutineError, RoutineInput, RoutinePatch, SecretName, SecretValue, type
 
 const Schedule = z
   .object({
-    every: z.enum(["hour", "day", "weekday", "week"]).describe('"hour" (every hour at the minute of time), "day", "weekday" (Monday to Friday) or "week" (on days).'),
+    every: z
+      .enum(["hour", "day", "weekday", "week", "needed"])
+      .describe('"hour" (every hour at the minute of time), "day", "weekday" (Monday to Friday), "week" (on days), or "needed" for a bot with no schedule ("When it needs to": it runs when written to, on its events, and at wake-ups it books itself; time is then ignored).'),
     days: z.array(z.enum(WEEKDAYS)).max(7).optional().describe('For "week": the days, e.g. ["wed"].'),
     time: z.string().describe('"HH:MM", 24-hour, in timezone.'),
     timezone: z.string().describe("The user's IANA time zone, e.g. Europe/Vienna."),
@@ -562,6 +564,40 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         const out = await bots.post(actor, id, text);
         const what = out.message.kind === "answer" ? "Answered its question" : "Sent";
         return result(`${what}. "${out.routine.name}" starts a run with it within a minute.`, { message: out.message });
+      }),
+  );
+
+  const wakes = folders?.wakes;
+  if (!wakes) return;
+  server.registerTool(
+    "bot_wake_ups",
+    {
+      title: "A bot's wake-ups",
+      description:
+        "The times a bot booked to wake itself up (docs: a bot plans dated steps, e.g. draft on Tuesday for Thursday's post, and runs then with its note). list shows them; book adds one for the user (a time and what to do then); cancel removes one by its id. Book or cancel only when the user asked for it in this conversation.",
+      inputSchema: {
+        id: z.string().max(64).describe("The bot's id (list_routines)."),
+        action: z.enum(["list", "book", "cancel"]).optional().describe("Default list."),
+        at: z.string().max(64).optional().describe("book: when, e.g. 2026-11-24 09:00 (in the bot's time zone) or ISO with an offset."),
+        note: z.string().max(2_000).optional().describe("book: what the bot should do then (its first message at that time)."),
+        wake: z.string().max(64).optional().describe("cancel: the wake-up's id."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ id, action, at, note, wake }) =>
+      guard(async () => {
+        if (action === "book") {
+          if (!at || !note?.trim()) return error("To book one, pass at (a time) and note (what to do then).");
+          const w = await wakes.bookFor(actor, id, at, note);
+          return result(`Booked for ${w.when}: ${w.note}`, { wake: w });
+        }
+        if (action === "cancel") {
+          if (!wake) return error("Pass the wake-up's id (list shows them).");
+          await wakes.cancelFor(actor, id, wake, source);
+          return result("Cancelled.");
+        }
+        const out = await wakes.listFor(actor, id);
+        return result(out.wakes.length ? out.wakes.map((w) => `- ${w.when} (${w.id})${w.byBot ? "" : " [booked by a person]"}: ${w.note}`).join("\n") + `\n(Times in ${out.timezone}.)` : "No wake-ups booked.", out);
       }),
   );
 }

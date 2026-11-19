@@ -14,6 +14,7 @@ import type { AmbientComputers } from "./computer.ts";
 import type { Host } from "../routines/service.ts";
 import { FolderError, type BotFolder } from "./folder.ts";
 import type { BotFiles } from "./files.ts";
+import type { Wakes } from "./wakes.ts";
 import type { HistorySearch } from "./history.ts";
 import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
 import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
@@ -65,6 +66,7 @@ export function botAppRoutes(
     githubApp?: () => GitHubApp | undefined;
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
+    wakes?: () => Wakes | undefined;
     directory: Directory;
     auth: RequestHandler;
     json: RequestHandler;
@@ -178,6 +180,44 @@ export function botAppRoutes(
     const bots = d.routines.botsEnabled(await actor(res));
     // With bots every loop is a bot (docs/bots.md, "Loops are bots"): the app has no plain loops then.
     res.json({ bots, loopsAreBots: bots });
+  });
+
+  // A bot's wake-ups (docs/bots.md, "Wake-ups"): whoever sees it sees them, whoever may change it books and cancels.
+  r.get("/v1/app/routines/:id/wakes", d.auth, async (req, res) => {
+    const wakes = d.wakes?.();
+    if (!wakes) return notEnabled(res);
+    try {
+      res.json(await wakes.listFor(await actor(res), id(req)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/routines/:id/wakes", d.auth, d.json, async (req, res) => {
+    const wakes = d.wakes?.();
+    if (!wakes) return notEnabled(res);
+    const body = z.object({ at: z.string().trim().min(1).max(64), note: z.string().trim().min(1).max(2_000) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Pick a time and say what the bot should do then." });
+      return;
+    }
+    try {
+      res.json({ wake: await wakes.bookFor(await actor(res), id(req), body.data.at, body.data.note) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/routines/:id/wakes/:wake", d.auth, async (req, res) => {
+    const wakes = d.wakes?.();
+    if (!wakes) return notEnabled(res);
+    try {
+      const who = await actor(res);
+      await wakes.cancelFor(who, id(req), String(req.params.wake), (await d.directory.user(who.uid).catch(() => null))?.name ?? "owner");
+      res.status(204).end();
+    } catch (err) {
+      fail(res, err);
+    }
   });
 
   r.get("/v1/app/routines/:id/thread", d.auth, async (req, res) => {
@@ -753,7 +793,7 @@ export function botAppRoutes(
 }
 
 /** A bot's run asks its owner (the runner's ask_owner tool), with its run token. */
-export function botRunRouter(d: { bots: BotService; history?: HistorySearch }): Router {
+export function botRunRouter(d: { bots: BotService; history?: HistorySearch; wakes?: Wakes }): Router {
   const r = express.Router();
   const json = express.json({ limit: "64kb" });
   const perRun = limiter(120);
@@ -830,6 +870,43 @@ export function botRunRouter(d: { bots: BotService; history?: HistorySearch }): 
     }
     try {
       await d.bots.runReply(req.headers.authorization, body.data.text, checkAttachments(body.data.files));
+      res.status(204).end();
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // Wake-ups a run books for its bot (the runner's wake_me and cancel_wake_up; bots/wakes.ts).
+  r.get("/v1/bot/wakes", async (req, res) => {
+    if (slowDown(req, res)) return;
+    if (!d.wakes) return void res.status(404).json({ error: "not_found", message: "Wake-ups aren't on here." });
+    try {
+      res.json({ wakes: await d.wakes.list(req.headers.authorization) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/bot/wakes", json, async (req, res) => {
+    if (slowDown(req, res)) return;
+    if (!d.wakes) return void res.status(404).json({ error: "not_found", message: "Wake-ups aren't on here." });
+    const body = z.object({ at: z.string().trim().min(1).max(64), note: z.string().trim().min(1).max(2_000) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Pass at (a time, e.g. 2026-11-24 09:00) and note (what to do then, up to 2,000 characters)." });
+      return;
+    }
+    try {
+      res.json(await d.wakes.book(req.headers.authorization, body.data.at, body.data.note));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/bot/wakes/:id", async (req, res) => {
+    if (slowDown(req, res)) return;
+    if (!d.wakes) return void res.status(404).json({ error: "not_found", message: "Wake-ups aren't on here." });
+    try {
+      await d.wakes.cancel(req.headers.authorization, String(req.params.id));
       res.status(204).end();
     } catch (err) {
       fail(res, err);

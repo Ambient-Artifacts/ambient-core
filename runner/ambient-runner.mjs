@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.13.0";
+const VERSION = "0.14.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -395,14 +395,24 @@ async function sync() {
   } catch (err) {
     die(`Couldn't reach Ambient (${cfg.server}): ${err.message}`, err.status === 401 ? 3 : 1);
   }
-  const routines = (out.routines ?? []).filter((r) => /^[a-z0-9]{8,64}$/.test(r.id) && /^[A-Za-z0-9*.,:/ _+-]+$/.test(r.onCalendar));
+  // onCalendar "": a bot without a schedule ("When it needs to"): a service to start, no timer.
+  const routines = (out.routines ?? []).filter((r) => /^[a-z0-9]{8,64}$/.test(r.id) && (r.onCalendar === "" || /^[A-Za-z0-9*.,:/ _+-]+$/.test(r.onCalendar)));
   const wanted = new Set(routines.map((r) => r.id));
   let reload = false;
   const changed = new Set();
 
   for (const r of routines) {
     const svc = writeIfChanged(join(UNIT_DIR, `${PREFIX}${r.id}.service`), serviceUnit(cfg, r));
-    const tmr = writeIfChanged(join(UNIT_DIR, `${PREFIX}${r.id}.timer`), timerUnit(r));
+    const timerPath = join(UNIT_DIR, `${PREFIX}${r.id}.timer`);
+    let tmr = false;
+    if (r.onCalendar) tmr = writeIfChanged(timerPath, timerUnit(r));
+    else if (existsSync(timerPath)) {
+      // Its schedule was taken away: the timer goes.
+      systemctl("disable", "--now", `${PREFIX}${r.id}.timer`);
+      rmSync(timerPath, { force: true });
+      log(`"${r.name}" runs when it needs to (no schedule)`);
+      tmr = true;
+    }
     if (svc || tmr) {
       reload = true;
       changed.add(r.id);
@@ -430,7 +440,9 @@ async function sync() {
   );
   for (const r of routines) {
     const timer = `${PREFIX}${r.id}.timer`;
-    if (r.enabled && (!enabled.has(r.id) || changed.has(r.id))) {
+    if (!r.onCalendar) {
+      // No timer to keep; only requested runs (messages, events, wake-ups).
+    } else if (r.enabled && (!enabled.has(r.id) || changed.has(r.id))) {
       systemctl("enable", timer);
       systemctl("restart", timer);
       log(`Scheduled "${r.name}": ${r.onCalendar}`);
@@ -1370,7 +1382,7 @@ const ADAPTERS = {
       // `system`: the bot's instructions for this run from the gateway (runner 0.8.0 on); older
       // gateways send none, and the runner's own text stays.
       const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
-      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__send_file,mcp__ambient-bot__search_history,mcp__ambient");
+      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__send_file,mcp__ambient-bot__search_history,mcp__ambient-bot__wake_me,mcp__ambient-bot__cancel_wake_up,mcp__ambient");
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
       return { args, stdin };
@@ -1662,6 +1674,26 @@ const SEARCH_TOOL = {
   },
 };
 
+const WAKE_TOOL = {
+  name: "wake_me",
+  description:
+    "Book a wake-up: at that time you're started again, and your note is your first message then. For a next step on a date (draft on Tuesday so your owner can review before Thursday's post; check the numbers a week after a launch). Plan backwards from deadlines. 10 minutes to 30 days ahead, at most 5 booked, an hour apart (one wake-up can do several things). Your first message shows the time now and what's booked.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      at: { type: "string", description: "When, in your owner's time zone: 2026-11-24 09:00 (or ISO with an offset, 2026-11-24T09:00:00+01:00)." },
+      note: { type: "string", maxLength: 2000, description: "What to do then, so your next run knows without searching: the step, where things are (the draft's path, the PR), and the deadline." },
+    },
+    required: ["at", "note"],
+  },
+};
+
+const CANCEL_WAKE_TOOL = {
+  name: "cancel_wake_up",
+  description: "Cancel one of your booked wake-ups (its id is in your first message, or in wake_me's answer): when the step is done already or the plan changed.",
+  inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+};
+
 /** A result's time as "2026-11-17 09:30" (UTC). */
 function when(at) {
   const d = typeof at === "number" || /^\d+$/.test(String(at ?? "")) ? new Date(Number(at)) : new Date(String(at));
@@ -1723,6 +1755,18 @@ async function botMcp() {
     if (!Array.isArray(results) || !results.length) return { text: "Nothing found." };
     return { text: results.map((r) => `${when(r.at)} ${r.who ?? "?"} (${r.where ?? "thread"}): ${String(r.text ?? "").replace(/\s+/g, " ").trim()}`).join("\n") };
   };
+  const bookedLines = (list) => (list.length ? list.map((w) => `- ${w.when} (${w.id}): ${String(w.note ?? "").replace(/\s+/g, " ").trim().slice(0, 200)}`).join("\n") : "(none)");
+  const wakeMe = async ({ at, note }) => {
+    if (typeof at !== "string" || !at.trim() || typeof note !== "string" || !note.trim()) return { text: "Pass at (when) and note (what to do then).", error: true };
+    const out = await api("POST", "/v1/bot/wakes", { at: at.trim().slice(0, 64), note: note.trim().slice(0, 2000) });
+    return { text: `Booked: ${out.wake.when} (${out.wake.id}). Booked now:\n${bookedLines(out.booked ?? [])}` };
+  };
+  const cancelWake = async ({ id }) => {
+    if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return { text: "Pass the wake-up's id.", error: true };
+    await api("DELETE", `/v1/bot/wakes/${id}`);
+    const { wakes = [] } = await api("GET", "/v1/bot/wakes").catch(() => ({ wakes: [] }));
+    return { text: `Cancelled. Booked now:\n${bookedLines(wakes)}` };
+  };
   createInterface({ input: process.stdin }).on("line", async (line) => {
     let m;
     try {
@@ -1735,7 +1779,7 @@ async function botMcp() {
       if (m.method === "initialize") {
         send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: m.params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "ambient-bot", version: VERSION } } });
       } else if (m.method === "tools/list") {
-        send({ jsonrpc: "2.0", id: m.id, result: { tools: [ASK_TOOL, SEND_FILE_TOOL, SEARCH_TOOL] } });
+        send({ jsonrpc: "2.0", id: m.id, result: { tools: [ASK_TOOL, SEND_FILE_TOOL, SEARCH_TOOL, WAKE_TOOL, CANCEL_WAKE_TOOL] } });
       } else if (m.method === "tools/call" && m.params?.name === "ask_owner") {
         const out = await ask(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't ask: ${err.message}. Decide yourself if you can, and say so in your summary.`, error: true }));
         send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
@@ -1744,6 +1788,12 @@ async function botMcp() {
         send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
       } else if (m.method === "tools/call" && m.params?.name === "search_history") {
         const out = await search(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't search: ${err.message}`, error: true }));
+        send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
+      } else if (m.method === "tools/call" && m.params?.name === "wake_me") {
+        const out = await wakeMe(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't book it: ${err.message}`, error: true }));
+        send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
+      } else if (m.method === "tools/call" && m.params?.name === "cancel_wake_up") {
+        const out = await cancelWake(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't cancel it: ${err.message}`, error: true }));
         send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
       } else if (m.method === "ping") {
         send({ jsonrpc: "2.0", id: m.id, result: {} });

@@ -543,7 +543,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   // ---- routines (prompts Claude Code runs on a schedule on the user's computers) ----
 
   routineAppRoutes(r, { routines: d.routines, directory: d.directory, auth, json });
-  if (d.bots && d.ambient) botAppRoutes(r, { routines: d.routines, bots: d.bots, ambient: d.ambient, admin: d.admin, decisions: d.decisions, files: d.folders?.files, folder: d.folders?.folder, automations: () => d.folders?.automations, github: () => d.folders?.github, githubApp: () => d.folders?.githubApp, learning: () => d.folders?.learning, ambSettings: () => d.folders?.ambSettings, directory: d.directory, auth, json });
+  if (d.bots && d.ambient) botAppRoutes(r, { routines: d.routines, bots: d.bots, ambient: d.ambient, admin: d.admin, decisions: d.decisions, files: d.folders?.files, folder: d.folders?.folder, automations: () => d.folders?.automations, github: () => d.folders?.github, githubApp: () => d.folders?.githubApp, learning: () => d.folders?.learning, ambSettings: () => d.folders?.ambSettings, wakes: () => d.folders?.wakes, directory: d.directory, auth, json });
 
   // ---- teams ----
 
