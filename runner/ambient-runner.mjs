@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.11.0";
+const VERSION = "0.12.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -1330,7 +1330,7 @@ const ADAPTERS = {
       // `system`: the bot's instructions for this run from the gateway (runner 0.8.0 on); older
       // gateways send none, and the runner's own text stays.
       const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
-      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history");
+      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history,mcp__ambient");
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
       return { args, stdin };
@@ -1407,6 +1407,9 @@ const ADAPTERS = {
           "-c", 'mcp_servers.ambient-bot.env_vars=["AMBIENT_SERVER","AMBIENT_RUN_TOKEN"]',
           // ask_owner waits up to three minutes for an answer.
           "-c", "mcp_servers.ambient-bot.tool_timeout_sec=600",
+          // The brain over HTTP, with the run's token from Codex's environment.
+          "-c", `mcp_servers.ambient.url=${toml(`${cfg.server}/mcp`)}`,
+          "-c", 'mcp_servers.ambient.bearer_token_env_var="AMBIENT_RUN_TOKEN"',
         );
       }
       if (resume?.sessionId) return { args: ["exec", "resume", ...flags, resume.sessionId, "-"], stdin: resume.message };
@@ -1809,7 +1812,13 @@ async function run(id) {
     const node = contained ? "node" : cfg.node;
     writeFileSync(
       mcpFile,
-      JSON.stringify({ mcpServers: { "ambient-bot": { command: node, args: [runnerPath, "bot-mcp"], env: { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } } } }),
+      JSON.stringify({
+        mcpServers: {
+          "ambient-bot": { command: node, args: [runnerPath, "bot-mcp"], env: { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } },
+          // The brain, with the run's token: what an employee's AI app may do there, while the run goes.
+          ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${runToken}` } },
+        },
+      }),
       { mode: 0o600 },
     );
     // The container's user (node, uid 1000) or the routine's user reads it.

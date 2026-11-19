@@ -60,6 +60,7 @@ import { MsTeamsBot } from "./msteams/bot.ts";
 import { BotClient, InboundVerifier } from "./msteams/botframework.ts";
 import { msteamsRouter } from "./msteams/route.ts";
 import { internalRouter, Upkeep, useServerKey } from "./upkeep.ts";
+import { botPrincipal } from "./mcp/bot-principal.ts";
 import { relayingFetch, type Relay } from "./relay.ts";
 import { teamBundler, type TeamBundle } from "./team-bundle.ts";
 
@@ -349,7 +350,8 @@ export function createApp(deps: AppDeps) {
     automations.start();
     learning.start();
   }
-  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, userName }));
+  // Bots' runs read the brain too, as an employee's AI app would (mcp/bot-principal.ts).
+  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, userName, botPrincipal: (h, t) => botPrincipal({ control, directory }, h, t) }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source, installSource: installer, teamBundle }));
   app.use(botRunRouter({ bots, history: folders.history }));

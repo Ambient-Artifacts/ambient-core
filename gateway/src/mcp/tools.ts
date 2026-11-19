@@ -20,6 +20,7 @@ import type { Voices } from "../voices.ts";
 import { TeamServerError } from "../teams.ts";
 import { registerRoutineTools } from "./routine-tools.ts";
 import { registerSettingsTools } from "./settings-tools.ts";
+import { BOT_TOOLS } from "./bot-principal.ts";
 
 const MAX_TEXT = 25_000;
 
@@ -266,15 +267,29 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     ? TEAM_DEFAULT_INSTRUCTIONS + (writeTeams.length > 1 ? ` The user is in more than one team (${teamList}): name the one the work belongs to, and ask if that isn't clear.` : "")
     : "";
   const general = (canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS) + (defaultRule ? `\n${defaultRule}` : "");
-  const server = new McpServer({ name: "ambient", version }, { instructions: personal ? `${general}\n\n${personal}` : general });
+  const botNote = principal.bot
+    ? `You're the bot "${principal.bot.name}". You read the brain like any member of the ${principal.personal ? "owner's teams" : "team"} would, and you can't change its pages: when one is wrong, send suggest_correction; when you finished meaningful work, log it with log_work. Both say they came from you.`
+    : "";
+  const instructions = [general, botNote, personal].filter(Boolean).join("\n\n");
+  const server = new McpServer({ name: "ambient", version }, { instructions });
+  // A bot's run (bot-principal.ts): only the tools an employee's AI app would use on the brain.
+  if (principal.bot) {
+    const register = server.registerTool.bind(server) as (...a: unknown[]) => unknown;
+    (server as unknown as { registerTool: (...a: unknown[]) => unknown }).registerTool = (name: unknown, ...rest: unknown[]) =>
+      BOT_TOOLS.has(String(name)) ? register(name, ...rest) : undefined;
+  }
   const warnings: string[] = [];
 
   /**
    * Where a personal connection's save_note or log_work goes when no team was named: the team,
    * unless the project is private or wasn't given. `note` tells the model why it stayed personal.
    */
+  // Claude projects ("private" ones stay personal) mean nothing to a bot's run: it names a team or not.
+  const refusalFor = (project: string | undefined) => (principal.bot ? null : projectRefusal(project));
+
   function byProject(project: string | undefined, slug: string | undefined, teamParam: string): { team: Team | null; note?: string } | { error: string } {
     if (!teamDefault) return { team: null };
+    if (principal.bot && !slug) return { team: null };
     if (!project?.trim()) return { team: null, note: ` No project was given, so it stayed personal; pass project (the Claude project's name, or "none") and work outside a private project goes to the team.` };
     if (privateProject(project)) return { team: null };
     if (slug) {
@@ -508,7 +523,7 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
       if ("error" in pick) return errorResult(pick.error);
       const toTeam = pick.team;
       if (toTeam && principal.scopes.has("team:write") && readers.deliverToTeam) {
-        const refusal = projectRefusal(project);
+        const refusal = refusalFor(project);
         if (refusal) return errorResult(refusal);
         const now = new Date();
         const refs = (related ?? []).map((r) => teamPageRef(r, toTeam.slug)).filter((r): r is string => !!r);
@@ -654,13 +669,14 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
           return errorResult("This connection can't send work to the team. Reconnect Ambient in this app and allow logging work to your team.");
         }
         if (team) {
-          const refusal = projectRefusal(a.project);
+          const refusal = refusalFor(a.project);
           if (refusal) return errorResult(refusal);
         }
         if (principal.personal && !principal.scopes.has("personal:write")) {
           return errorResult("This connection can't save to Ambient. Reconnect Ambient in this app and allow saving notes.");
         }
-        const tool = (a.app ?? "").replace(/\s+/g, " ").trim().slice(0, 40) || "AI app";
+        // A bot's work log says it's the bot's, whatever app name it gives.
+        const tool = principal.bot ? `${principal.bot.name} (bot)`.slice(0, 40) : (a.app ?? "").replace(/\s+/g, " ").trim().slice(0, 40) || "AI app";
         let out: Awaited<ReturnType<NonNullable<ReaderSource["logWork"]>>>;
         try {
           out = await readers.logWork!(principal.uid, {
@@ -734,7 +750,7 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       },
       async ({ wrong, right, how_known, pages, team: slugArg, app, project }) => {
-        const refusal = projectRefusal(project);
+        const refusal = refusalFor(project);
         if (refusal) return errorResult(refusal);
         const ids = pages ?? [];
         if (ids.some((p) => /^(personal:|ambient:\/\/personal\/)/.test(p.trim()))) {
@@ -759,7 +775,7 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
           team,
           uid: principal.uid,
           name: await readers.userName?.(principal.uid).catch(() => undefined),
-          app: (app ?? "").replace(/\s+/g, " ").trim().slice(0, 40) || "an AI app",
+          app: principal.bot ? `the bot ${principal.bot.name}`.slice(0, 40) : (app ?? "").replace(/\s+/g, " ").trim().slice(0, 40) || "an AI app",
           source: principal.clientId ? `ai:${principal.clientId}` : "ai",
           wrong,
           right,
@@ -805,7 +821,7 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       },
       async ({ id, team: slugArg, include_transcript, project }) => {
-        const refusal = projectRefusal(project);
+        const refusal = refusalFor(project);
         if (refusal) return errorResult(refusal);
         const team = slugArg ? principal.teams.find((t) => t.slug === slugArg) : principal.teams.length === 1 ? principal.teams[0] : undefined;
         if (!team) return errorResult(`Which team? Pass team: ${principal.teams.map((t) => t.slug).join(", ")}.`);

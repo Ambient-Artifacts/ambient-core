@@ -137,7 +137,8 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
   const findUser = async (ref: string | undefined) => {
     const out = await d.control.q(api.admin.findUser, { ref: need(ref, "The user's email") });
     if (out.matches > 1) throw new AdminError(`${out.matches} accounts have the email ${ref}. Use the user id from \`admin list\`.`);
-    if (!out.user) throw new AdminError(`No account for ${ref}. Make one with: admin user add ${ref}`);
+    // Only Apple's and admin-entered emails identify an account (control/convex/admin.ts, lookup).
+    if (!out.user) throw new AdminError(`No account for ${ref}. Accounts that signed in with Microsoft or Google are found by their id (admin list), not by email. To make one: admin user add ${ref}`);
     return out.user;
   };
 

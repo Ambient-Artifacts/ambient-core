@@ -150,7 +150,7 @@ describe("a bot's folder on the computer", () => {
     const system = after(args, "--append-system-prompt")!;
     expect(system).toMatch(/^OUTDIR=\/.+\/runs\/run00000001\/out$/);
     expect(args.join(" ")).not.toContain("one of your owner's bots in Ambient");
-    expect(after(args, "--allowedTools")).toBe("mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history");
+    expect(after(args, "--allowedTools")).toBe("mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history,mcp__ambient");
     expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toBe("Wake up: write the release notes.");
     expect(readFileSync(join(dir, "work", "seen-memory.txt"), "utf8")).toBe("Lena likes bullet points.\n");
     expect(finished).toMatchObject({
