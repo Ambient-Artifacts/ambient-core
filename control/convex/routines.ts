@@ -238,6 +238,11 @@ export const remove = mutation({
     for (const run of runs) await ctx.db.delete(run._id);
     const messages = await ctx.db.query("botMessages").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(1000);
     for (const m of messages) await ctx.db.delete(m._id);
+    // The files sent in its thread go with it.
+    for (const f of await ctx.db.query("attachments").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(500)) {
+      await ctx.storage.delete(f.storageId);
+      await ctx.db.delete(f._id);
+    }
     await ctx.db.delete(r._id);
     return { ok: true as const, name: r.name };
   },

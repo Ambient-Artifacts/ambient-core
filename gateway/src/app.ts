@@ -62,6 +62,7 @@ import { msteamsRouter } from "./msteams/route.ts";
 import { internalRouter, Upkeep, upkeepOf, useServerKey } from "./upkeep.ts";
 import { PeopleService } from "./people.ts";
 import { botPrincipal } from "./mcp/bot-principal.ts";
+import { Attachments } from "./bots/attachments.ts";
 import { relayingFetch, type Relay } from "./relay.ts";
 import { teamBundler, type TeamBundle } from "./team-bundle.ts";
 
@@ -179,8 +180,11 @@ export function createApp(deps: AppDeps) {
   let startNow: ((hostId: string, routineId: string) => boolean) | undefined;
   // A bot's question goes to Ambient first (DecisionService, set up below with Ambient).
   let onQuestion: ((q: Parameters<DecisionService["onBotQuestion"]>[0]) => void) | undefined;
+  // Files sent in Ambient's chat and bots' threads, kept so they show again (bots/attachments.ts).
+  const attachments = new Attachments({ control, keys: routines.keys });
   const bots = new BotService({
     routines,
+    attachments,
     channels: [new AppChannel(notifier)],
     startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false,
     onQuestion: (q) => (onQuestion ? onQuestion(q) : undefined),
@@ -266,6 +270,7 @@ export function createApp(deps: AppDeps) {
   // Root commands Ambient asks for, run by the computer's runner after an approval (or at once on full access).
   const admin = new AdminService({ control, keys: routines.keys, routines, computers, notifier });
   const ambient: AmbientChat = new AmbientChat({
+    attachments,
     control,
     keys: routines.keys,
     mcp: async (uid): Promise<McpServer> => {

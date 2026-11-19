@@ -166,10 +166,10 @@ export async function startStack(
   await t.mutation(internal.teams.registerServer, { serverId: "pool-1", url: poolUrl });
 
   // convex-test's generic signatures don't line up with ConvexHttpClient's; the runtime shape does.
-  const call = t as unknown as { query: (f: unknown, a: unknown) => Promise<never>; mutation: (f: unknown, a: unknown) => Promise<never> };
+  const call = t as unknown as { query: (f: unknown, a: unknown) => Promise<never>; mutation: (f: unknown, a: unknown) => Promise<never>; action: (f: unknown, a: unknown) => Promise<never> };
   const stack = createApp({
     config,
-    convex: { query: (fn, args) => call.query(fn, args), mutation: (fn, args) => call.mutation(fn, args) },
+    convex: { query: (fn, args) => call.query(fn, args), mutation: (fn, args) => call.mutation(fn, args), action: (fn, args) => call.action(fn, args) },
     apple: appleVerifier([BUNDLE_ID], { keys: [appleJwk] }),
     revisionPollMs: opts.revisionPollMs,
     streamMaxMs: opts.streamMaxMs,
@@ -352,6 +352,12 @@ export async function appCall(stack: Stack, token: string, method: string, path:
   });
   const text = await res.text();
   return { status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
+}
+
+/** As appCall, the answer as it is (a file's bytes and headers). */
+export async function appRaw(stack: Stack, token: string, method: string, path: string): Promise<Response> {
+  const url = `${stack.origin}${path}`;
+  return fetch(url, { method, headers: await appHeaders(token, method, url) });
 }
 
 /** The fixture personal wiki as sync ops. */

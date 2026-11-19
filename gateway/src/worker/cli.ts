@@ -31,7 +31,7 @@ import { apnsSender, Notifier } from "../push.ts";
 const [cmd, ...flags] = process.argv.slice(2);
 const config = loadConfig();
 const convex = new ConvexHttpClient(config.convexUrl);
-const control = new Control({ query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args) }, config.serviceSecret);
+const control = new Control({ query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args), action: (fn, args) => convex.action(fn, args) }, config.serviceSecret);
 
 /**
  * Where upkeep's model runs: "computer" (each person's own, the default) or "key": the server's

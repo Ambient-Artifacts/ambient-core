@@ -535,6 +535,27 @@ export default defineSchema({
     .index("by_host", ["hostId", "createdAt"]),
 
   /** A person's chat with Ambient (the master bot), sealed with their own data key. */
+  /**
+   * A file sent with a message (Ambient's chat, a bot's thread), so it shows there again: sealed
+   * with its owner's key and kept in Convex file storage (`storageId`), its name and type sealed
+   * here (`metaIv`/`metaCt`). A personal one has `userId`, a team bot's thread's `teamId`;
+   * `routineId` says it's a bot's thread's, none: Ambient's chat. Goes with the chat's history
+   * (forgetChat), the bot (routines.remove) and the account.
+   */
+  attachments: defineTable({
+    userId: v.optional(v.id("users")),
+    teamId: v.optional(v.id("teams")),
+    routineId: v.optional(v.id("routines")),
+    storageId: v.id("_storage"),
+    iv: v.string(),
+    metaIv: v.string(),
+    metaCt: v.string(),
+    size: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId", "routineId", "createdAt"])
+    .index("by_routine", ["routineId"]),
+
   ambientChat: defineTable({
     userId: v.id("users"),
     role: v.union(v.literal("user"), v.literal("ambient")),

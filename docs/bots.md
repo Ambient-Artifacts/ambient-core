@@ -340,14 +340,37 @@ command line. The bot's secrets reach its commands; the run's token and the sign
 **For Amb:** `update_routine` with `bot.runtime: "codex"` (and an OpenAI model), `use_openai_account`,
 and `sign_in_chatgpt` (returns the link and code to give the person). Keys go in through the app only.
 
-## Files in Ambient's chat
+## Files in the chat
 
-`POST /v1/app/ambient/chat` also takes `attachments`: up to 4 files, 10 MB together, each
+`POST /v1/app/ambient/chat` and `POST /v1/app/routines/:id/thread` (a bot's thread) also take
+`attachments`: up to 4 files, 10 MB together, each
 `{ "name": "plan.pdf", "type": "application/pdf", "data": "<base64>" }`. Images (JPEG, PNG, GIF,
-WebP), PDFs and text files (text/*, JSON, CSV, Markdown). The message in the history says which
-files came with it ("📎 plan.pdf"); the files themselves aren't kept in Ambient: on a computer they
-are saved in the person's Ambient folder there and Claude Code reads them; on the server they go
-to Claude with the message. Refused: 400 `bad_attachment` with the reason.
+WebP), PDFs and text files (text/*, JSON, CSV, Markdown). Refused: 400 `bad_attachment` with the
+reason.
+
+The files are kept, so the message shows them again on every device, like Claude shows them
+(`gateway/src/bots/attachments.ts`). Each is sealed with its owner's key (the person's; a team bot's
+thread: the team's) and stored in Convex file storage (`attachments` table, actions
+`attachments.store`/`read`); its name and type are sealed beside it. The message lists them as
+`files: [{ id, name, type, size }]`, and the app fetches each:
+
+- `GET /v1/app/ambient/chat/files/:id`: a file of the person's chat with Ambient, only theirs.
+- `GET /v1/app/routines/:id/thread/files/:id`: a file of a bot's thread, to whoever may read it.
+
+Both answer with the file's own type, inline, cached for good (an id never changes), in a sandbox
+(`content-security-policy: sandbox`). An id from another chat or thread is 404, never someone
+else's file.
+
+Where the files go:
+- Ambient on a computer: saved in the person's Ambient folder there, Claude Code reads them; on the
+  server they go to Claude with the message. The history for the model says which files came.
+- A bot: the run its message starts gets them in its out folder (runner 0.12.1 fetches each with the
+  run's token from `GET /v1/bot/files/:id`), named in the message. Files in messages a run gets
+  while it's working (steering) are only in the thread, not in that run.
+- Gone with: Forget chat (`DELETE /v1/app/ambient/chat?forget=1`; New chat keeps them with the
+  history), the bot (`routines.remove`), and the account.
+
+Not yet: files Ambient or a bot makes on the computer (a chart, a PDF) coming back into the chat.
 
 ## A computer's model, and what Ambient may do there
 

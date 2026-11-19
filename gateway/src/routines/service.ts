@@ -24,6 +24,7 @@ import type { Owner, RoutineKeys } from "./keys.ts";
 import type { CodeHasher } from "../auth/codes.ts";
 import type { Author, BotFolder } from "../bots/folder.ts";
 import type { AutomationEvent } from "../bots/automations.ts";
+import type { FileRef } from "../bots/attachments.ts";
 
 export const HOST_TOKEN_PREFIX = "ambient_host_";
 export const RUN_TOKEN_PREFIX = "ambient_run_";
@@ -1130,7 +1131,7 @@ export class RoutineService {
     /** A bot's settings (runtime, isolation, …); null for a plain loop. */
     bot: BotSettings | null;
     /** A bot's run that continues a conversation: the session and what it continues with. */
-    resume: { sessionId: string | null; message: string } | null;
+    resume: { sessionId: string | null; message: string; files?: FileRef[] } | null;
     /** A bot's run: its token for asking the owner (POST /v1/bot/ask), valid while it runs. */
     runToken: string | null;
     /** A bot's run (runner 0.8.0): its instructions, skills and memory (docs/bots.md, "A bot's folder"). */
@@ -1157,9 +1158,9 @@ export class RoutineService {
         env.GITHUB_TOKEN = token;
       }
     }
-    let resume: { sessionId: string | null; message: string } | null = null;
+    let resume: { sessionId: string | null; message: string; files?: FileRef[] } | null = null;
     if (r.bot && out.resume) {
-      const body = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch(() => ({ text: "" }));
+      const body = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch(() => ({ text: "", files: undefined }));
       const who = out.resume.authorName ?? "Your owner";
       resume = {
         sessionId: out.resume.sessionId,
@@ -1169,6 +1170,8 @@ export class RoutineService {
             : out.resume.authorName === "GitHub" && !(out.resume as { authorId?: string | null }).authorId
               ? body.text
               : `${who} wrote to you in the Ambient app: ${body.text}`,
+        // Files sent with it: the runner fetches them with the run's token into the run's folder.
+        ...(body.files?.length ? { files: body.files } : {}),
       };
     }
     let prompt = await this.d.keys.open(owner, "routine:prompt", r.promptIv, r.promptCt);

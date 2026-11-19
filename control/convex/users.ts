@@ -329,6 +329,12 @@ export const purgeBatch = mutation({
     if (left > 0) await drop((await ctx.db.query("personalTombstones").withIndex("by_user_path", (q) => q.eq("userId", uid)).take(left)).map((r) => r._id));
     if (left > 0) await drop((await ctx.db.query("sessionInbox").withIndex("by_user_session", (q) => q.eq("userId", uid)).take(left)).map((r) => r._id));
     if (left > 0) await drop((await ctx.db.query("sessionNotes").withIndex("by_user", (q) => q.eq("userId", uid)).take(left)).map((r) => r._id));
+    if (left > 0) {
+      // Files sent in their chat and their personal bots' threads, with their stored bytes.
+      const files = await ctx.db.query("attachments").withIndex("by_user", (q) => q.eq("userId", uid)).take(left);
+      for (const f of files) await ctx.storage.delete(f.storageId);
+      await drop(files.map((r) => r._id));
+    }
     for (const table of ["personalWork", "userKeys", "voices", "repos", "pairingCodes", "appSessions", "pats", "routineHosts", "pushDevices"] as const) {
       if (left <= 0) break;
       await drop((await byUser(table)).slice(0, left).map((r) => r._id));

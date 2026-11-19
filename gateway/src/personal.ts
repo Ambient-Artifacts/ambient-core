@@ -12,6 +12,8 @@ import {
   unwrapDataKey,
   wrapDataKey,
   type MasterKey,
+  decryptBytes,
+  encryptBytes,
 } from "./crypto.ts";
 
 export interface SyncUpsert {
@@ -243,6 +245,15 @@ export class PersonalStore {
     const dek = await this.dataKey(uid);
     const [row] = await this.control.q(api.personal.getMany, { uid: uid as never, paths: [path] });
     return row ? decryptPage(dek, uid, row.path, row.iv, row.ciphertext) : undefined;
+  }
+
+  /** A file's bytes, sealed with the user's own data key (attachments in their chat). */
+  async sealBytes(uid: string, label: string, bytes: Buffer): Promise<{ iv: string; ciphertext: string }> {
+    return encryptBytes(await this.dataKey(uid), uid, label, bytes);
+  }
+
+  async openBytes(uid: string, label: string, iv: string, ciphertext: string): Promise<Buffer> {
+    return decryptBytes(await this.dataKey(uid), uid, label, iv, ciphertext);
   }
 
   /** Encrypt a small secret (a repo token, sync state) with the user's own data key. */
