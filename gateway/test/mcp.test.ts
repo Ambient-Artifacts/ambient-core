@@ -50,7 +50,7 @@ describe("transport", () => {
 });
 
 describe("tools", () => {
-  it("lists twenty-eight tools; save_note, log_work, the routine tools, the settings changes, forget_my_voice, the sign-in switches, Codex's sign-in and the computer admin tools write", async () => {
+  it("lists thirty-six tools; save_note, log_work, the routine tools, the settings changes, forget_my_voice, the sign-in switches, Codex's sign-in, the computer admin tools and the account tools write", async () => {
     const client = await mcpClient(`${s.origin}/mcp`, lenaAll);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
@@ -58,18 +58,23 @@ describe("tools", () => {
       "change_preferences",
       "change_team_settings",
       "command_status",
+      "connect_computer",
+      "connect_microsoft",
       "create_routine",
+      "create_team",
       "delete_routine",
       "fetch",
       "forget_my_voice",
       "get_entity",
       "get_settings",
       "index",
+      "join_team",
       "list_action_items",
       "list_decisions",
       "list_recent",
       "list_routines",
       "log_work",
+      "remove_computer",
       "run_on_computer",
       "run_routine",
       "save_note",
@@ -77,13 +82,16 @@ describe("tools", () => {
       "set_computer_access",
       "set_computer_model",
       "set_routine_secret",
+      "set_session_rules",
       "sign_in_chatgpt",
+      "team_people",
       "transcript",
+      "update_profile",
       "update_routine",
       "use_claude_account",
       "use_openai_account",
     ]);
-    const writers = ["save_note", "log_work", "create_routine", "update_routine", "run_routine", "delete_routine", "set_routine_secret", "change_team_settings", "change_preferences", "forget_my_voice", "use_claude_account", "use_openai_account", "sign_in_chatgpt", "set_computer_model", "set_computer_access", "run_on_computer", "command_status"];
+    const writers = ["save_note", "log_work", "create_routine", "update_routine", "run_routine", "delete_routine", "set_routine_secret", "change_team_settings", "change_preferences", "forget_my_voice", "use_claude_account", "use_openai_account", "sign_in_chatgpt", "set_computer_model", "set_computer_access", "run_on_computer", "command_status", "connect_computer", "remove_computer", "create_team", "join_team", "team_people", "update_profile", "set_session_rules", "connect_microsoft"];
     for (const t of tools) expect(t.annotations?.readOnlyHint, t.name).toBe(!writers.includes(t.name));
     await client.close();
   });

@@ -358,6 +358,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     const args = readFileSync(join(dir, "work", "args.txt"), "utf8");
     expect(args).toContain("--mcp-config");
     expect(args).toContain("--allowedTools mcp__ambient-bot__ask_owner");
+    // The brain too, as an employee's AI app has it (mcp/bot-principal.ts).
+    expect(args).toContain("mcp__ambient-bot__search_history,mcp__ambient");
     expect(args).toContain('one of your owner\'s bots in Ambient');
     expect(args).not.toContain("--resume");
     // A fresh run wakes up with its AGENTS.md (the prompt), its memory and its handoffs (docs/bots.md).

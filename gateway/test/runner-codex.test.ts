@@ -191,6 +191,9 @@ describe("a Codex bot on the computer itself", () => {
     expect(c.find((x) => x.startsWith("developer_instructions="))).toMatch(/^developer_instructions="OUTDIR=\/.+\/runs\/run00000001\/out"$/);
     expect(c).toContain(`mcp_servers.ambient-bot.args=${JSON.stringify([RUNNER, "bot-mcp"])}`);
     expect(c).toContain('mcp_servers.ambient-bot.env_vars=["AMBIENT_SERVER","AMBIENT_RUN_TOKEN"]');
+    // The brain over HTTP, the run's token from the environment, never on the command line.
+    expect(c).toContain('mcp_servers.ambient.bearer_token_env_var="AMBIENT_RUN_TOKEN"');
+    expect(c.find((x) => x.startsWith("mcp_servers.ambient.url="))).toMatch(/^mcp_servers\.ambient\.url="http[^"]+\/mcp"$/);
     expect(c.find((x) => x.startsWith("shell_environment_policy.exclude="))).toContain("AMBIENT_RUN_TOKEN");
     // The run's token is in Codex's environment, never on its command line.
     expect(args.join(" ")).not.toContain(RUN_TOKEN);

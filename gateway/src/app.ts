@@ -59,7 +59,9 @@ import { personalInstructions } from "./mcp/context.ts";
 import { MsTeamsBot } from "./msteams/bot.ts";
 import { BotClient, InboundVerifier } from "./msteams/botframework.ts";
 import { msteamsRouter } from "./msteams/route.ts";
-import { internalRouter, Upkeep, useServerKey } from "./upkeep.ts";
+import { internalRouter, Upkeep, upkeepOf, useServerKey } from "./upkeep.ts";
+import { PeopleService } from "./people.ts";
+import { botPrincipal } from "./mcp/bot-principal.ts";
 import { relayingFetch, type Relay } from "./relay.ts";
 import { teamBundler, type TeamBundle } from "./team-bundle.ts";
 
@@ -258,6 +260,9 @@ export function createApp(deps: AppDeps) {
   relay = (host, req, ms) => computers.relay(host, req, ms);
   // The brain's upkeep and work-session notes, written by Claude on the person's own computer.
   const upkeep = new Upkeep({ routines, computers });
+  // Teams and the person's own profile (people.ts): the app's routes and the AI apps' tools share it.
+  const people = new PeopleService({ control, directory, teams, codes: codeHasher, personal, microsoftConnect });
+  const upkeepFor = (uid: string) => upkeepOf({ control, upkeep }, uid);
   // Root commands Ambient asks for, run by the computer's runner after an approval (or at once on full access).
   const admin = new AdminService({ control, keys: routines.keys, routines, computers, notifier });
   const ambient: AmbientChat = new AmbientChat({
@@ -266,7 +271,7 @@ export function createApp(deps: AppDeps) {
     mcp: async (uid): Promise<McpServer> => {
       const principal = { uid, scopes: new Set(MCP_SCOPES), via: "pat" as const, clientId: "ambient-chat", personal: true, teams: await directory.teamsOf(uid) };
       const personal = await personalInstructions(principal, readers, { name: await userName(uid).catch(() => undefined) });
-      return buildMcpServer({ principal, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, personal });
+      return buildMcpServer({ principal, readers, routines, bots, admin, decisions, folders, settings, voices, people, upkeep: upkeepFor, userName, version: VERSION, personal });
     },
     // Without a computer, the server's key answers only where the operator pays (upkeep.ts, useServerKey).
     apiKey: deps.ambient ? deps.ambient.apiKey : useServerKey() ? process.env.ANTHROPIC_API_KEY : undefined,
@@ -349,7 +354,8 @@ export function createApp(deps: AppDeps) {
     automations.start();
     learning.start();
   }
-  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, userName }));
+  // Bots' runs read the brain too, as an employee's AI app would (mcp/bot-principal.ts).
+  app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, people, upkeep: upkeepFor, version: VERSION, userName, botPrincipal: (h, t) => botPrincipal({ control, directory }, h, t) }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source, installSource: installer, teamBundle }));
   app.use(botRunRouter({ bots, history: folders.history }));
@@ -361,6 +367,7 @@ export function createApp(deps: AppDeps) {
     appApiRouter({
       control,
       upkeep,
+      people,
       directory,
       access: appAccess(config.origin, config.signingKeys),
       pairing,

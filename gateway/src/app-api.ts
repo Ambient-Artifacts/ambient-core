@@ -1,10 +1,9 @@
 // /v1/app/*: the iOS app's API. In the MVP the app talks only to the gateway;
 // Convex sits behind it.
 import { CLAUDE_CODE_PLUGIN, claudeCodeInstall, clientKind, connectLinks, type AgentKind } from "./connect-agents.ts";
-import { randomInt } from "node:crypto";
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { z } from "zod";
-import { SyncRequest, TeamNoteV1, parsePage, slugify } from "@brain/spec";
+import { SyncRequest, TeamNoteV1 } from "@brain/spec";
 import { GitError, HasContent, QueryRequest, dispatchQuery, fileLinks, renderListing, type WikiReader } from "@brain/wiki";
 import type { AppAccess } from "./auth/app-access.ts";
 import type { AppleRevoker } from "./auth/apple-revoke.ts";
@@ -14,7 +13,6 @@ import { api, type Control } from "./control.ts";
 import { sha256Hex } from "./crypto.ts";
 import type { Directory } from "./directory.ts";
 import { addressKey, inFlight, limiter } from "./limiter.ts";
-import { MAX_ABOUT, ME_PATH, writeAbout } from "./me.ts";
 import { appStores, meetingBrief, waitingOn } from "./briefs.ts";
 import { localDay, validZone } from "./digest.ts";
 import type { PersonalStore } from "./personal.ts";
@@ -30,13 +28,14 @@ import type { RoutineService } from "./routines/service.ts";
 import type { SessionService } from "./sessions/service.ts";
 import type { EventHub, Revisions } from "./revisions.ts";
 import { TeamServerError, type TeamLink } from "./teams.ts";
-import { SettingsService } from "./team-admin.ts";
+import { SettingsService, type Reply } from "./team-admin.ts";
 import type { CodeHasher } from "./auth/codes.ts";
 import type { MicrosoftConnectFlow } from "./microsoft-connect.ts";
 import type { SignInNonces } from "./auth/signin-nonce.ts";
 import { VoiceBody, Voices } from "./voices.ts";
-import { upkeepState, type UpkeepComputers } from "./upkeep.ts";
+import { upkeepOf, type UpkeepComputers } from "./upkeep.ts";
 import { serverKind } from "./relay.ts";
+import { PeopleService } from "./people.ts";
 
 export interface AppApiDeps {
   /** An AI app's name, by its client id (oidc-provider's registered clients). */
@@ -60,6 +59,8 @@ export interface AppApiDeps {
   repos: PersonalRepos;
   sessions: SessionService;
   routines: RoutineService;
+  /** Teams and the person's profile (people.ts): the same service as the AI apps' tools. */
+  people?: PeopleService;
   /** Where the person's brain upkeep runs (upkeep.ts): their own computer. */
   upkeep?: UpkeepComputers;
   /** Bots and the chat with Ambient (docs/bots.md). */
@@ -87,7 +88,8 @@ export interface AppApiDeps {
   streamMaxMs?: number;
 }
 
-const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
+const SessionRules = z.object({ rules: z.array(z.object({ match: z.string().trim().min(2).max(200), team: z.string().min(1).max(80) })).max(50) });
+const InviteBody = z.object({ role: z.enum(["admin", "member"]).optional(), uses: z.number().int().min(1).max(100).optional(), days: z.number().int().min(1).max(90).optional() });
 
 const DeleteAccount = z.object({ authorizationCode: z.string().min(10).max(4000).optional() });
 
@@ -111,6 +113,13 @@ export const MAX_STREAMS = 8;
 export function appApiRouter(d: AppApiDeps): Router {
   const r = express.Router();
   const settings = new SettingsService(d);
+  // Teams and the person's own profile (people.ts), shared with the AI apps' tools.
+  const people = d.people ?? new PeopleService({ control: d.control, directory: d.directory, teams: d.teams, codes: d.codes, personal: d.personal, microsoftConnect: d.microsoftConnect });
+  /** A service's answer as the route's response (204: no body). */
+  const send = (res: Response, out: Reply) => {
+    if (out.status === 204) res.status(204).end();
+    else res.status(out.status).json(out.json);
+  };
   const voices = new Voices(d);
   // Sync batches may carry transcripts; the app splits batches well below this. Routes put `auth`
   // before `json`, so nobody can make the gateway inflate and buffer a body without signing in,
@@ -238,14 +247,7 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // How the brain's upkeep is doing (upkeep.ts): pages current, notes waiting for the computer, or why not.
   r.get("/v1/app/me/upkeep", auth, async (_req, res) => {
-    const uid = uidOf(res);
-    const [record, work, seq, computer] = await Promise.all([
-      d.control.q(api.users.get, { uid }),
-      d.control.q(api.work.get, { uid: uid as never }),
-      d.control.q(api.personal.seq, { uid: uid as never }),
-      d.upkeep ? d.upkeep.computerFor(uid) : Promise.resolve(null),
-    ]);
-    res.json(upkeepState({ on: record?.consolidate === true, work, seq, computer }));
+    res.json(await upkeepOf(d, uidOf(res)));
   });
 
   r.get("/v1/app/me", auth, async (_req, res) => {
@@ -329,42 +331,17 @@ export function appApiRouter(d: AppApiDeps): Router {
   // ---- about you: the `me` page every AI app starts from (me.ts) ----
 
   r.get("/v1/app/me/about", auth, async (_req, res) => {
-    const text = await d.personal.readPage(uidOf(res), ME_PATH);
-    if (!text) {
-      res.json({ about: null, page: null });
-      return;
-    }
-    const page = parsePage(text);
-    res.json({
-      about: typeof page.frontmatter.about === "string" ? page.frontmatter.about : null,
-      page: { title: String(page.frontmatter.title ?? ""), summary: String(page.frontmatter.summary ?? ""), updated: String(page.frontmatter.updated ?? ""), body: page.body.trim() },
-    });
+    res.json(await people.about(uidOf(res)));
   });
 
   // What they write about themselves, kept word for word; Claude's upkeep writes the rest of
   // the page from it and their notes (when upkeep is on).
   r.put("/v1/app/me/about", auth, json, async (req, res) => {
-    const about = typeof req.body?.about === "string" ? req.body.about.trim() : "";
-    if (!about || about.length > MAX_ABOUT) {
-      res.status(400).json({ error: "bad_request", message: `Write a few sentences, at most ${MAX_ABOUT} characters.` });
-      return;
-    }
-    const uid = uidOf(res);
-    const [user, prev] = await Promise.all([d.directory.user(uid), d.personal.readPage(uid, ME_PATH)]);
-    const text = writeAbout(prev, about, user?.name ?? "", new Date().toISOString().slice(0, 10));
-    await d.personal.serverWrite(uid, [{ path: ME_PATH, content: text }]);
-    res.json({ about, path: ME_PATH });
+    send(res, await people.setAbout(uidOf(res), req.body?.about));
   });
 
   r.post("/v1/app/me/name", auth, json, async (req, res) => {
-    const name = typeof req.body?.name === "string" ? req.body.name : "";
-    if (!name.trim()) {
-      res.status(400).json({ error: "bad_request" });
-      return;
-    }
-    await d.control.m(api.users.rename, { uid: uidOf(res) as never, name });
-    d.directory.invalidate(uidOf(res));
-    res.status(204).end();
+    send(res, await people.rename(uidOf(res), req.body?.name));
   });
 
   // ---- your voice (voices.ts) ----
@@ -546,20 +523,12 @@ export function appApiRouter(d: AppApiDeps): Router {
   });
 
   r.put("/v1/app/sessions/rules", auth, json, async (req, res) => {
-    const uid = uidOf(res);
-    const body = z.object({ rules: z.array(z.object({ match: z.string().trim().min(2).max(200), team: z.string().min(1).max(80) })).max(50) }).safeParse(req.body);
+    const body = SessionRules.safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Each rule needs a folder or repo and a team." });
       return;
     }
-    const mine = new Set((await d.directory.teamsOf(uid)).map((t) => t.slug));
-    const unknown = body.data.rules.find((r) => !mine.has(r.team));
-    if (unknown) {
-      res.status(400).json({ error: "not_a_member", message: `You're not in the team "${unknown.team}".` });
-      return;
-    }
-    await d.control.m(api.sessions.setRules, { uid: uid as never, rules: body.data.rules });
-    res.json({ rules: body.data.rules });
+    send(res, await people.setSessionRules(uidOf(res), body.data.rules));
   });
 
   r.post("/v1/app/sessions/:sessionId/keep", auth, async (req, res) => {
@@ -579,86 +548,12 @@ export function appApiRouter(d: AppApiDeps): Router {
   // ---- teams ----
 
   r.post("/v1/app/teams/join", auth, json, async (req, res) => {
-    const code = typeof req.body?.code === "string" ? req.body.code.trim().toUpperCase() : "";
-    if (!code || !authLimit(`join:${uidOf(res)}`)) {
-      res.status(400).json({ error: "bad_request" });
-      return;
-    }
-    const uid = uidOf(res);
-    const user = await d.directory.user(uid);
-    let out!: Awaited<ReturnType<typeof join>>;
-    const join = (codeHash: string) =>
-      d.control.m(api.teams.joinWithInvite, { uid: uid as never, codeHash, peopleSlug: `people/${slugify(user?.name ?? "member") || "member"}`, now: Date.now() });
-    for (const codeHash of d.codes.candidates("invite", code)) {
-      out = await join(codeHash);
-      if (out.ok || out.error !== "invalid_code") break;
-    }
-    d.directory.invalidate(uid);
-    if (!out.ok) {
-      res.status(400).json({ error: out.error });
-      return;
-    }
-    res.json({ team: { slug: out.team.slug, name: out.team.name, role: out.team.role, peopleSlug: out.team.peopleSlug } });
+    send(res, await people.joinTeam(uidOf(res), req.body?.code));
   });
 
-  // Create a team (the user owns it) on a free server from the pool.
+  // Create a team (the user owns it): on a computer of its own, or a pool server (people.ts).
   r.post("/v1/app/teams", auth, json, async (req, res) => {
-    const uid = uidOf(res);
-    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
-    if (!name || name.length > 80 || !authLimit(`create:${uid}`)) {
-      res.status(400).json({ error: "bad_request", message: "Give the team a name (up to 80 characters)." });
-      return;
-    }
-    const user = await d.directory.user(uid);
-    // A new team runs on a computer of its own (relay.ts), connected by its owner; Ambient's pool
-    // of hosted servers only with BRAIN_TEAM_POOL=true (self-hosting with spare servers).
-    const pool = process.env.BRAIN_TEAM_POOL === "true";
-    const made = await d.control.m(api.teams.createOwned, {
-      uid: uid as never,
-      name,
-      peopleSlug: `people/${slugify(user?.name ?? "member") || "member"}`,
-      now: Date.now(),
-      pool,
-    });
-    if (!made.ok) {
-      if (made.error === "no_server") {
-        console.warn("[gateway] team creation refused: the server pool is empty");
-        res.status(503).json({ error: "no_server", message: "We're setting up more team servers. Try again in a few hours; we've been told." });
-      } else if (made.error === "too_many_teams") {
-        res.status(403).json({ error: made.error, message: "You already own three teams. Write to us if you need another." });
-      } else {
-        res.status(400).json({ error: made.error, message: "Give the team a name." });
-      }
-      return;
-    }
-    const server = made.server;
-    if (!server) {
-      d.directory.invalidate(uid);
-      const t = made.team;
-      res.json({ team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: "none" } });
-      return;
-    }
-    try {
-      await d.teams.claim(server, { id: made.team.id, name: made.team.name });
-    } catch (err) {
-      const claim = err instanceof TeamServerError ? err.claim : undefined;
-      console.error(`[gateway] claiming pool server ${server.serverId} failed (${claim ?? "error"}): ${(err as Error).message}`);
-      // It may have taken the claim before the answer was lost: keep the team, as when the server
-      // is slow to restart. Freeing it then would hand a server that now serves a deleted team to
-      // the next team, and every creation after would fail on it.
-      if (claim !== "uncertain") {
-        // A server that says it's taken stays out of the pool; one that surely didn't claim goes back.
-        await d.control.m(api.teams.abandonCreate, { teamId: made.team.id as never, release: claim !== "taken" });
-        d.directory.invalidate(uid);
-        res.status(503).json({ error: "team_unavailable", message: "The team's server didn't answer. Try again in a minute." });
-        return;
-      }
-    }
-    d.directory.invalidate(uid);
-    // Best effort: the server restarts as the team's; notes queue on the phone until it's up.
-    await d.teams.ready(server.url);
-    const t = made.team;
-    res.json({ team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: "hosted" } });
+    send(res, await people.createTeam(uidOf(res), req.body?.name));
   });
 
   const managed = async (req: Request, res: Response) => {
@@ -676,14 +571,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   };
 
   r.get("/v1/app/teams/:slug/members", auth, async (req, res) => {
-    const team = await managed(req, res);
-    if (!team) return;
-    const members = await d.control.q(api.teams.members, { uid: uidOf(res) as never, slug: team.slug });
-    if (!members) {
-      refused(res, "not_a_member");
-      return;
-    }
-    res.json({ team: { slug: team.slug, name: team.name, status: team.status, role: team.role }, members });
+    send(res, await people.members(uidOf(res), String(req.params.slug)));
   });
 
   // Every member's voice fingerprint (theirs included), for the app to name who speaks in a
@@ -699,66 +587,27 @@ export function appApiRouter(d: AppApiDeps): Router {
   });
 
   r.post("/v1/app/teams/:slug/invites", auth, json, async (req, res) => {
-    const team = await managed(req, res);
-    if (!team) return;
-    const body = z
-      .object({ role: z.enum(["admin", "member"]).optional(), uses: z.number().int().min(1).max(100).optional(), days: z.number().int().min(1).max(90).optional() })
-      .safeParse(req.body ?? {});
+    const body = InviteBody.safeParse(req.body ?? {});
     if (!body.success) {
-      res.status(400).json({ error: "bad_request" });
+      // A team the user isn't in answers not_a_member first, as before.
+      const team = await d.directory.membership(uidOf(res), String(req.params.slug));
+      if (!team) res.status(403).json({ error: "not_a_member" });
+      else res.status(400).json({ error: "bad_request" });
       return;
     }
-    const part = () => Array.from({ length: 4 }, () => INVITE_ALPHABET[randomInt(INVITE_ALPHABET.length)]).join("");
-    const prefix = team.slug.replace(/[^a-z0-9]/g, "").slice(0, 4).toUpperCase() || "TEAM";
-    const code = `${prefix}-${part()}-${part()}`;
-    const uses = body.data.uses ?? 10;
-    const out = await d.control.m(api.teams.invite, {
-      uid: uidOf(res) as never,
-      slug: team.slug,
-      codeHash: d.codes.hash("invite", code),
-      role: body.data.role,
-      uses,
-      days: body.data.days ?? 14,
-      now: Date.now(),
-    });
-    if (!out.ok) {
-      refused(res, out.error);
-      return;
-    }
-    res.json({ code, role: out.role, uses, expiresAt: out.expiresAt });
+    send(res, await people.invite(uidOf(res), String(req.params.slug), body.data));
   });
 
   r.delete("/v1/app/teams/:slug/members/:uid", auth, async (req, res) => {
-    const team = await managed(req, res);
-    if (!team) return;
-    const target = String(req.params.uid);
-    const out = await d.control.m(api.teams.removeMemberBy, { uid: uidOf(res) as never, slug: team.slug, target });
-    d.directory.invalidate(target);
-    if (!out.ok) refused(res, out.error);
-    else res.status(204).end();
+    send(res, await people.removeMember(uidOf(res), String(req.params.slug), String(req.params.uid)));
   });
 
   r.post("/v1/app/teams/:slug/members/:uid/role", auth, json, async (req, res) => {
-    const team = await managed(req, res);
-    if (!team) return;
-    const role = req.body?.role;
-    if (role !== "admin" && role !== "member") {
-      res.status(400).json({ error: "bad_request" });
-      return;
-    }
-    const target = String(req.params.uid);
-    const out = await d.control.m(api.teams.setRole, { uid: uidOf(res) as never, slug: team.slug, target, role });
-    d.directory.invalidate(target);
-    if (!out.ok) refused(res, out.error);
-    else res.status(204).end();
+    send(res, await people.setRole(uidOf(res), String(req.params.slug), String(req.params.uid), req.body?.role));
   });
 
   r.post("/v1/app/teams/:slug/leave", auth, async (req, res) => {
-    const uid = uidOf(res);
-    const out = await d.control.m(api.teams.leaveBySlug, { uid: uid as never, slug: String(req.params.slug) });
-    d.directory.invalidate(uid);
-    if (!out.ok) refused(res, out.error);
-    else res.status(204).end();
+    send(res, await people.leave(uidOf(res), String(req.params.slug)));
   });
 
   r.post("/v1/app/teams/:slug/notes", auth, json, async (req, res) => {
@@ -955,27 +804,7 @@ export function appApiRouter(d: AppApiDeps): Router {
   };
   // "Connect Microsoft 365": the address the app opens in a browser sheet, for an owner or admin.
   r.post("/v1/app/teams/:slug/microsoft/connect", auth, json, async (req, res) => {
-    if (!d.microsoftConnect) {
-      res.status(501).json({ error: "unavailable", message: "This server has no Microsoft app for Connect Microsoft 365. Use your company's own Entra app instead." });
-      return;
-    }
-    const uid = uidOf(res);
-    const team = await d.directory.freshMembership(uid, String(req.params.slug));
-    if (!team || team.status !== "active") {
-      res.status(403).json({ error: "not_a_member" });
-      return;
-    }
-    if (team.role !== "owner" && team.role !== "admin") {
-      res.status(403).json({ error: "admins_only", message: "Only team owners and admins can connect Microsoft 365." });
-      return;
-    }
-    if (!team.serverUrl) {
-      res.status(503).json({ error: "team_unavailable", message: "The team's server isn't ready yet." });
-      return;
-    }
-    const requester = (await d.directory.user(uid))?.name ?? "a team admin";
-    const purpose = req.body?.for === "work" ? "work" : "transcripts";
-    res.json({ url: d.microsoftConnect.start({ uid, team, requester, purpose }) });
+    send(res, await people.microsoftLink(uidOf(res), String(req.params.slug), req.body?.for === "work" ? "work" : "transcripts"));
   });
   r.get("/v1/app/teams/:slug/settings", auth, teamSettings("GET"));
   r.put("/v1/app/teams/:slug/settings", auth, json, teamSettings("PUT"));

@@ -12,6 +12,7 @@ import express, { type Router } from "express";
 import { z } from "zod";
 import { toWire, type Llm, type LlmAnswer, type WireRequest } from "@brain/team";
 import { ComputerUnavailable, type AmbientComputers } from "./bots/computer.ts";
+import { api, type Control } from "./control.ts";
 import type { RoutineService } from "./routines/service.ts";
 import type { Relay, RelayRequest } from "./relay.ts";
 
@@ -214,4 +215,15 @@ export function upkeepState(o: {
   }
   if (due || o.work?.lastStatus === "waiting") return { ...base, state: "pending" };
   return { ...base, state: "current" };
+}
+
+/** A person's upkeep as the app and the AI apps show it (GET /v1/app/me/upkeep, get_settings). */
+export async function upkeepOf(d: { control: Control; upkeep?: UpkeepComputers }, uid: string): Promise<UpkeepState> {
+  const [record, work, seq, computer] = await Promise.all([
+    d.control.q(api.users.get, { uid }),
+    d.control.q(api.work.get, { uid: uid as never }),
+    d.control.q(api.personal.seq, { uid: uid as never }),
+    d.upkeep ? d.upkeep.computerFor(uid) : Promise.resolve(null),
+  ]);
+  return upkeepState({ on: record?.consolidate === true, work, seq, computer });
 }
