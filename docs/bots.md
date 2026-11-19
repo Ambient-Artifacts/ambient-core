@@ -423,6 +423,12 @@ conversation, and an answer anywhere settles it everywhere.
    Nikolai: …", role `ambient`), and you can overrule it there or in the chat.
 4. What goes to you: a decision message in Ambient's chat, plus a push "<bot> needs you".
 
+### Questions show the work
+
+A question for approval carries what's to be approved: `ask_owner`'s `details` (markdown, up to 20,000 characters) holds the draft itself, the pull request's link, the file's link, the numbers and where each comes from. It's sealed with the question and shown with it: in the bot's thread (`details` on the question message), on the decision (`details`) and in Ambient's chat message about it. Ambient's look at the question (the triage) gets it too, and without it is told not to suggest approving work it hasn't seen. Bots are told to put the work there and never write "see my last message" (2026-11-19: a draft was only "in my last message", which wasn't shown).
+
+A run's result with substance of its own (over 400 characters: a draft, a report) shows in the thread even when the same run asked something, just before the question; only a short one that would repeat the question is held back.
+
 ### The decision
 
 ```json

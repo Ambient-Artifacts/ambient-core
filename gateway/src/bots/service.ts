@@ -10,7 +10,7 @@ import { botLook } from "@brain/spec";
 import { api } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Channel, Inbound } from "../channels/channel.ts";
-import { claudeFix, openMessage, sealMessage, type ClaudeFix } from "./messages.ts";
+import { claudeFix, openMessage, sealMessage, type ClaudeFix, type MessageBody } from "./messages.ts";
 import { RoutineError, RUN_TOKEN_PREFIX, type Actor, type Routine, type RoutineService } from "../routines/service.ts";
 import type { Owner } from "../routines/keys.ts";
 import type { AutomationEvent } from "./automations.ts";
@@ -21,6 +21,8 @@ export interface ThreadMessage {
   kind: "result" | "failure" | "question" | "answer" | "message";
   text: string;
   choices: string[] | null;
+  /** A question's work to decide on: the draft, the pull request's link, the file. */
+  details: string | null;
   runId: string | null;
   author: string | null;
   /** Written by whoever is asking (their own messages, in the app: on the right). */
@@ -46,6 +48,8 @@ interface MessageRow {
 }
 
 const QUESTION_MAX = 2_000;
+/** How long a question's work may be (a post, a PR's summary with its link). */
+const DETAILS_MAX = 20_000;
 const MESSAGE_MAX = 8_000;
 
 function refused(code: string, message: string, status = 400) {
@@ -64,7 +68,7 @@ export class BotService {
       /** Starts a bot's run on its computer at once (its long poll) instead of at the next check. */
       startNow?: (hostId: string, routineId: string) => boolean;
       /** A bot's question goes to Ambient first (DecisionService); without it, straight to the channels. */
-      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; delegate: "never" | "brain" | "most"; team: string | null }) => void;
+      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; delegate: "never" | "brain" | "most"; team: string | null }) => void;
       now?: () => number;
     },
   ) {}
@@ -97,13 +101,14 @@ export class BotService {
   }
 
   private async message(owner: Owner, m: MessageRow, uid: string, computer?: string | null): Promise<ThreadMessage> {
-    const body = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => ({ text: "(couldn't be opened)", choices: undefined }));
+    const body: MessageBody = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => ({ text: "(couldn't be opened)" }));
     return {
       id: String(m.id),
       role: m.role,
       kind: m.kind,
       text: body.text,
       choices: body.choices?.length ? body.choices : null,
+      details: body.details ?? null,
       runId: m.runId ? String(m.runId) : null,
       author: m.authorName,
       mine: m.role === "user" && m.authorId !== null && String(m.authorId) === uid,
@@ -181,14 +186,16 @@ export class BotService {
   }
 
   /** A run asks its bot's owner; every channel gets the question. Returns the question's id. */
-  async ask(authorization: string | undefined, question: string, choices: string[] = []): Promise<{ id: string }> {
+  /** `details`: what the question is about, shown with it (the draft, the PR's link, the file). */
+  async ask(authorization: string | undefined, question: string, choices: string[] = [], details?: string): Promise<{ id: string }> {
     const runTokenHash = this.tokenHash(authorization);
     const who = await this.d.routines.control.q(api.bots.runOwner, { runTokenHash });
     if (!who) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
     const owner = this.ownerOf({ teamId: who.teamId ? String(who.teamId) : null, createdBy: String(who.createdBy) });
     const text = question.trim().slice(0, QUESTION_MAX);
     const picks = choices.map((c) => c.trim().slice(0, 120)).filter(Boolean).slice(0, 6);
-    const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks });
+    const work = details?.trim().slice(0, DETAILS_MAX) || undefined;
+    const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks, ...(work ? { details: work } : {}) });
     const out = await this.d.routines.control.m(api.bots.ask, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
     this.onEvent?.({ kind: "bot_asked", uid: String(out.notify), routineId: String(out.routineId), bot: who.name, text, questionId: String(out.questionId) });
@@ -201,6 +208,7 @@ export class BotService {
         bot: { name: who.name, ...botLook(who.name, { face: who.face, color: who.color ?? undefined, wear: who.wear ?? undefined }) },
         question: text,
         choices: picks,
+        ...(work ? { details: work } : {}),
         delegate: (who as { delegate?: "never" | "brain" | "most" }).delegate ?? "brain",
         team: out.team,
       });

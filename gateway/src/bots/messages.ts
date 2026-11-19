@@ -10,18 +10,20 @@ export const CHAT_PURPOSE = "ambient:chat";
 export interface MessageBody {
   text: string;
   choices?: string[];
+  /** A question's work to decide on (docs/bots.md, "Questions show the work"): the draft, the link. */
+  details?: string;
 }
 
 export async function sealMessage(keys: RoutineKeys, owner: Owner, body: MessageBody, purpose = MESSAGE_PURPOSE) {
-  const sealed = await keys.seal(owner, purpose, JSON.stringify(body.choices?.length ? { t: body.text, c: body.choices } : { t: body.text }));
+  const sealed = await keys.seal(owner, purpose, JSON.stringify({ t: body.text, ...(body.choices?.length ? { c: body.choices } : {}), ...(body.details ? { d: body.details } : {}) }));
   return { iv: sealed.iv, ct: sealed.ciphertext };
 }
 
 export async function openMessage(keys: RoutineKeys, owner: Owner, iv: string, ct: string, purpose = MESSAGE_PURPOSE): Promise<MessageBody> {
   const raw = await keys.open(owner, purpose, iv, ct);
   try {
-    const j = JSON.parse(raw) as { t?: unknown; c?: unknown };
-    if (typeof j.t === "string") return { text: j.t, ...(Array.isArray(j.c) ? { choices: j.c.filter((x): x is string => typeof x === "string") } : {}) };
+    const j = JSON.parse(raw) as { t?: unknown; c?: unknown; d?: unknown };
+    if (typeof j.t === "string") return { text: j.t, ...(Array.isArray(j.c) ? { choices: j.c.filter((x): x is string => typeof x === "string") } : {}), ...(typeof j.d === "string" && j.d ? { details: j.d } : {}) };
   } catch {
     // Not ours: shown as it is.
   }
