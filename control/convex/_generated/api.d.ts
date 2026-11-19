@@ -25,6 +25,7 @@ import type * as sessions from "../sessions.js";
 import type * as teams from "../teams.js";
 import type * as users from "../users.js";
 import type * as voices from "../voices.js";
+import type * as wakes from "../wakes.js";
 import type * as work from "../work.js";
 
 import type {
@@ -51,6 +52,7 @@ declare const fullApi: ApiFromModules<{
   teams: typeof teams;
   users: typeof users;
   voices: typeof voices;
+  wakes: typeof wakes;
   work: typeof work;
 }>;
 

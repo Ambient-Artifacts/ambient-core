@@ -10,7 +10,7 @@ export const runStatus = v.union(v.literal("running"), v.literal("succeeded"), v
 const weekday = v.union(v.literal("mon"), v.literal("tue"), v.literal("wed"), v.literal("thu"), v.literal("fri"), v.literal("sat"), v.literal("sun"));
 /** See RoutineSchedule in @brain/spec (the gateway validates before writing). */
 export const routineSchedule = v.object({
-  every: v.union(v.literal("hour"), v.literal("day"), v.literal("weekday"), v.literal("week")),
+  every: v.union(v.literal("hour"), v.literal("day"), v.literal("weekday"), v.literal("week"), v.literal("needed")),
   days: v.optional(v.array(weekday)),
   time: v.string(),
   timezone: v.string(),
@@ -463,6 +463,8 @@ export default defineSchema({
     lastResultHash: v.optional(v.string()),
     /** When someone last read the bot's thread: a result after it is news ("done"), docs/bots.md. */
     seenAt: v.optional(v.number()),
+    /** Its next wake-up (botWakes), kept by the wake-up mutations; absent with none booked. */
+    nextWakeAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -514,6 +516,28 @@ export default defineSchema({
     answerId: v.optional(v.id("botMessages")),
     createdAt: v.number(),
   }).index("by_routine", ["routineId", "createdAt"]),
+
+  /**
+   * A wake-up a bot booked for itself (docs/bots.md, "Wake-ups"): at `at` its thread gets the
+   * note (role user, author "Wake-up") and a run starts with it. The note is sealed with the
+   * owner's data key, like the thread.
+   */
+  botWakes: defineTable({
+    routineId: v.id("routines"),
+    teamId: v.optional(v.id("teams")),
+    at: v.number(),
+    iv: v.string(),
+    ct: v.string(),
+    status: v.union(v.literal("pending"), v.literal("fired"), v.literal("cancelled")),
+    /** The run that booked it; absent when its owner booked it (the app, MCP). */
+    runId: v.optional(v.id("routineRuns")),
+    /** Who cancelled it: the bot, or its owner's name. */
+    cancelledBy: v.optional(v.string()),
+    firedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_routine", ["routineId", "status", "at"])
+    .index("by_due", ["status", "at"]),
 
   /**
    * A root command Ambient asked to run on a computer, waiting for the person who asked (or who

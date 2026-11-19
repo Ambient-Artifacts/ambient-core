@@ -183,6 +183,8 @@ interface RoutineRow {
   openQuestionId: string | null;
   /** When the bot's thread was last read (absent on rows from before it). */
   seenAt?: number | null;
+  /** Its next booked wake-up (docs/bots.md, "Wake-ups"). */
+  nextWakeAt?: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -285,7 +287,7 @@ export interface Routine {
   schedule: RoutineSchedule;
   /** "Wednesdays at 08:52" */
   scheduleText: string;
-  /** Milliseconds since 1970; null while paused or without a computer. */
+  /** Milliseconds since 1970; null while paused or without a computer. A bot's next wake-up when it comes before its schedule (or it has none). */
   nextRunAt: number | null;
   /** The team it belongs to, or null for a personal routine. */
   team: TeamRef | null;
@@ -369,6 +371,7 @@ export interface TeamBrainSpec {
 export interface HostRoutine {
   id: string;
   name: string;
+  /** "" for a bot without a schedule ("When it needs to"): a service and no timer. */
   onCalendar: string;
   enabled: boolean;
   runRequested: boolean;
@@ -404,6 +407,8 @@ export class RoutineService {
   /** What each computer said at its last sync: whether Claude Code can run there (not stored in Convex). */
   private signedIn = new Map<string, boolean>();
   /** A bot that watches GitHub repos: its branch prefix and repos, for the PR gate in its instructions (app.ts sets it). */
+  /** A bot's booked wake-ups and the time now in its zone, for its run (bots/wakes.ts). */
+  wakesFor?: (r: { id: string; teamId: string | null; createdBy: string; timezone: string }) => Promise<{ timezone: string; now: string; wakes: { id: string; when: string; note: string }[] }>;
   githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[]; on?: import("../bots/github.ts").WatchMode[] } | null>;
   /** A GitHub token for a bot's run from Ambient's GitHub App (docs/bots.md, "Connect GitHub"); null: none covers it. */
   githubToken?: (owner: Owner, routineId: string) => Promise<string | null>;
@@ -610,7 +615,7 @@ export class RoutineService {
       prompt: await this.d.keys.open(this.ownerOf(r), "routine:prompt", r.promptIv, r.promptCt),
       schedule: r.schedule,
       scheduleText: describeSchedule(r.schedule),
-      nextRunAt: r.enabled && host?.ready ? nextRun(r.schedule, this.now()) : null,
+      nextRunAt: r.enabled && host?.ready ? soonest(nextRun(r.schedule, this.now()), r.bot ? (r.nextWakeAt ?? null) : null) : null,
       team: team ? { slug: team.slug, name: team.name } : null,
       canEdit,
       computer: host ? { id: host.id, name: host.name } : null,
@@ -668,6 +673,14 @@ export class RoutineService {
   }
 
   /** The raw row (for the bots' own service). */
+  /** A bot and what Convex checks for it: what the user may read, or (`write`) change. */
+  async botAccess(actor: Actor, id: string, write = false): Promise<{ r: { id: string; teamId: string | null; createdBy: string; name: string; timezone: string }; access: { uid: never; teamIds: never } }> {
+    const { r } = await this.row(actor, id);
+    if (!r.bot) throw refused("no_such_routine");
+    const access = write ? this.writeAccess(actor, r) : { uid: actor.uid as never, teamIds: this.readable(actor).map((t) => t.id) as never };
+    return { r: { id: r.id, teamId: r.teamId, createdBy: r.createdBy, name: r.name, timezone: r.schedule.timezone }, access };
+  }
+
   async rowOf(actor: Actor, id: string): Promise<{ id: string; teamId: string | null; createdBy: string; bot: BotSettings | null; name: string }> {
     const { r } = await this.row(actor, id);
     return { id: r.id, teamId: r.teamId, createdBy: r.createdBy, bot: r.bot, name: r.name };
@@ -722,7 +735,16 @@ export class RoutineService {
     });
     if (!out.ok) throw refused(out.error);
     if (input.bot) this.d.folder?.touched(this.ownerOf(out.routine as unknown as RoutineRow), { routineId: String(out.routine.id), path: "", by: source === "app" ? { kind: "user", name: null } : { kind: "amb", name: source }, why: "created" });
+    // A bot without a schedule starts at once (docs/bots.md, "Wake-ups"): it plans its work and
+    // books its wake-ups. One with a schedule waits for it.
+    if (input.bot && input.schedule.every === "needed" && (input.enabled ?? true)) await this.firstRun(owner, String(out.routine.id));
     return this.get(actor, String(out.routine.id));
+  }
+
+  /** A bot without a schedule's first run, at once: it plans its work and books its wake-ups. */
+  private async firstRun(owner: Owner, id: string): Promise<void> {
+    const first = await sealMessage(this.d.keys, owner, { text: FIRST_RUN });
+    await this.d.control.m(api.bots.wake, { id, iv: first.iv, ct: first.ct, authorName: "Wake-up", run: true, now: this.now() });
   }
 
   /** `meta`: who changed a bot's prompt (its AGENTS.md) and why; by default the source says. */
@@ -756,6 +778,8 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    // A bot without a schedule that never ran (made paused, e.g. over MCP) starts once it's turned on.
+    if (r.bot && patch.enabled === true && !r.enabled && !r.lastRun && (patch.schedule ?? r.schedule).every === "needed") await this.firstRun(this.ownerOf(r), id);
     // A bot's name or settings changed (or it became a loop again): its mirror in git follows.
     if (this.d.folder && (r.bot || patch.bot) && (patch.name !== undefined || patch.schedule !== undefined || patch.enabled !== undefined || patch.bot !== undefined)) {
       this.d.folder.touched(this.ownerOf(r), { routineId: id, path: "", by: meta.by ?? (source === "app" ? { kind: "user", name: null } : { kind: "amb", name: source }), why: meta.why ?? "settings" });
@@ -1085,7 +1109,8 @@ export class RoutineService {
       routines: (out.routines as unknown as RoutineRow[]).map((r) => ({
         id: r.id,
         name: r.name,
-        onCalendar: onCalendar(r.schedule),
+        // "" with no schedule: runners before 0.14.0 skip it (they'd write OnCalendar=null), newer ones write no timer.
+        onCalendar: onCalendar(r.schedule) ?? "",
         enabled: r.enabled,
         runRequested: r.runRequestedAt !== null,
       })),
@@ -1171,7 +1196,9 @@ export class RoutineService {
             ? `${who} answered your question: ${body.text}`
             : out.resume.authorName === "GitHub" && !(out.resume as { authorId?: string | null }).authorId
               ? body.text
-              : `${who} wrote to you in the Ambient app: ${body.text}`,
+              : out.resume.authorName === "Wake-up" && !(out.resume as { authorId?: string | null }).authorId
+                ? `Wake-up: ${body.text}`
+                : `${who} wrote to you in the Ambient app: ${body.text}`,
         // Files sent with it: the runner fetches them with the run's token into the run's folder.
         ...(body.files?.length ? { files: body.files } : {}),
       };
@@ -1183,7 +1210,8 @@ export class RoutineService {
       const pendingId = (out.resume as { id?: string } | null)?.id ? String((out.resume as { id: string }).id) : null;
       const thread = await this.threadSince(owner, r.id, previous?.startedAt ?? 0, pendingId);
       const github = this.githubFor ? await this.githubFor(owner, r.id).catch(() => null) : null;
-      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github });
+      const wakes = this.wakesFor ? await this.wakesFor({ id: r.id, teamId: r.teamId, createdBy: r.createdBy, timezone: r.schedule.timezone }).catch(() => null) : null;
+      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github, wakes, scheduled: r.schedule.every !== "needed" });
       prompt = woken.prompt;
       resume = woken.resume;
       workspace = woken.workspace;
@@ -1309,4 +1337,13 @@ export function loadInstaller(dir: string, origin: string): string | undefined {
 function matchingModel(b: BotSettings): BotSettings {
   if (b.model && modelRuntime(b.model.model) !== b.runtime) throw refused("model_runtime");
   return b;
+}
+
+/** The first run of a bot without a schedule. */
+export const FIRST_RUN =
+  "Your first run: you were just made. Read your instructions and do what's due now. For the steps that come later, book wake-ups with wake_me (plan backwards from deadlines, leaving your owner time to review). Then tell your owner in a few lines what you'll do and when.";
+
+/** The earlier of two times; null when both are. */
+function soonest(a: number | null, b: number | null): number | null {
+  return a === null ? b : b === null ? a : Math.min(a, b);
 }

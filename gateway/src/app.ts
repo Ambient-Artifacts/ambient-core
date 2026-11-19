@@ -46,6 +46,7 @@ import { AdminService } from "./bots/admin.ts";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { DecisionService } from "./bots/decisions.ts";
 import { Heartbeat } from "./bots/heartbeat.ts";
+import { Wakes } from "./bots/wakes.ts";
 import { AppChannel } from "./channels/channel.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadInstaller, loadRunner, RoutineService } from "./routines/service.ts";
@@ -189,6 +190,10 @@ export function createApp(deps: AppDeps) {
     startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false,
     onQuestion: (q) => (onQuestion ? onQuestion(q) : undefined),
   });
+  // Wake-ups bots book for themselves (bots/wakes.ts): fired by its ticker, started at once.
+  const wakes = new Wakes({ routines, startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false });
+  folders.wakes = wakes;
+  routines.wakesFor = (r) => wakes.forRun(r);
   const userName = async (uid: string) => (await directory.user(uid))?.name;
   const readers: ReaderSource = {
     personal: (uid) => personal.reader(uid),
@@ -357,13 +362,14 @@ export function createApp(deps: AppDeps) {
   if (!deps.ambient?.noHeartbeat) {
     heartbeat.start();
     automations.start();
+    wakes.start();
     learning.start();
   }
   // Bots' runs read the brain too, as an employee's AI app would (mcp/bot-principal.ts).
   app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, people, upkeep: upkeepFor, version: VERSION, userName, botPrincipal: (h, t) => botPrincipal({ control, directory }, h, t) }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source, installSource: installer, teamBundle }));
-  app.use(botRunRouter({ bots, history: folders.history }));
+  app.use(botRunRouter({ bots, history: folders.history, wakes }));
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(internalRouter({ secret: config.serviceSecret, upkeep, relay: (host, req, ms) => computers.relay(host, req, ms) }));

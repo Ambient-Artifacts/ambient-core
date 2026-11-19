@@ -404,7 +404,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     expect(await reply(1)).toMatchObject({ serverInfo: { name: "ambient-bot" }, capabilities: { tools: {} } });
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
     send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    expect(((await reply(2)).tools as { name: string }[]).map((t) => t.name)).toEqual(["ask_owner", "send_file", "search_history"]);
+    expect(((await reply(2)).tools as { name: string }[]).map((t) => t.name)).toEqual(["ask_owner", "send_file", "search_history", "wake_me", "cancel_wake_up"]);
     send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "ask_owner", arguments: { question: "Ship it?", choices: ["Yes", "Not yet"] } } });
     for (let i = 0; i < 100 && !(await one(id)).bot?.openQuestion; i++) await new Promise((r) => setTimeout(r, 50));
     await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "Yes" });

@@ -403,6 +403,10 @@ export class BotFolder {
     thread: { at: number; who: string; text: string }[];
     /** A bot that watches GitHub repos: its branch prefix and the PR gate (docs/bots.md). */
     github?: { prefix: string; repos: string[]; on?: WatchMode[] } | null;
+    /** Its booked wake-ups and the time now in its zone (docs/bots.md, "Wake-ups"). */
+    wakes?: { timezone: string; now: string; wakes: { id: string; when: string; note: string }[] } | null;
+    /** It has a schedule (false: "When it needs to"). */
+    scheduled?: boolean;
   }): Promise<{ prompt: string; resume: { sessionId: string | null; message: string } | null; workspace: { system: string; skills: { path: string; content: string }[]; memory: string } }> {
     const [memory, goal, soul, handoffs, skills] = await Promise.all([
       this.memory(o.owner, o.routineId),
@@ -448,11 +452,15 @@ export class BotFolder {
             .join("\n\n")}`
         : "This is your first run with a handoff: there are no earlier ones.",
       news ? `New in your thread since your last run:\n${news}` : "",
+      o.wakes ? wakesLines(o.wakes) : "",
       "Anything older (messages, earlier runs): the search_history tool.",
     ]
       .filter(Boolean)
       .join("\n\n");
-    return { prompt, resume, workspace: { system: botSystem(o.name, o.computer, o.trigger, o.contained, owns, o.github ?? null, soul), skills, memory } };
+    // A continued session hears the time and its wake-ups too, when it books them (it has some,
+    // or no schedule): it books against them. Others keep a plain message.
+    if (resume && o.wakes && (o.wakes.wakes.length > 0 || o.scheduled === false)) resume = { ...resume, message: `${resume.message}\n\n${wakesLines(o.wakes)}` };
+    return { prompt, resume, workspace: { system: botSystem(o.name, o.computer, o.trigger, o.contained, owns, o.github ?? null, soul, o.scheduled ?? true), skills, memory } };
   }
 
   // ---- Amb's folder (one per person): SOUL.md, AGENTS.md, memory.md, skills/ ----
@@ -574,6 +582,12 @@ export class BotFolder {
   }
 }
 
+/** The time now and what a bot has booked, for its run. */
+function wakesLines(w: { timezone: string; now: string; wakes: { id: string; when: string; note: string }[] }): string {
+  const booked = w.wakes.length ? `Your booked wake-ups:\n${w.wakes.map((x) => `- ${x.when} (${x.id}): ${x.note.replace(/\s+/g, " ").trim().slice(0, 300)}`).join("\n")}` : "You have no wake-ups booked.";
+  return `It's now ${w.now} in ${w.timezone}, where your wake-ups' times are. ${booked}`;
+}
+
 function threadLines(thread: { at: number; who: string; text: string }[]): string {
   const lines: string[] = [];
   let total = 0;
@@ -588,8 +602,8 @@ function threadLines(thread: { at: number; who: string; text: string }[]): strin
 }
 
 /** A bot's instructions for a run (the runner appends them to Claude Code's system prompt). */
-export function botSystem(name: string, computer: string, trigger: string, contained: boolean, owns = false, github: { prefix: string; repos: string[]; on?: WatchMode[] } | null = null, soul = ""): string {
-  const how = trigger === "manual" ? 'started with "Run now" or a message in the Ambient app' : "started by its schedule";
+export function botSystem(name: string, computer: string, trigger: string, contained: boolean, owns = false, github: { prefix: string; repos: string[]; on?: WatchMode[] } | null = null, soul = "", scheduled = true): string {
+  const how = trigger === "manual" ? 'started with "Run now", a message in the Ambient app, an event or one of your wake-ups' : "started by its schedule";
   return [
     `You're "${name}", one of your owner's bots in Ambient, running on ${computer}${contained ? " in your own container" : ""}, ${how}.`,
     // In the system text, which stays the same from run to run (the prompt cache keeps it).
@@ -602,6 +616,8 @@ export function botSystem(name: string, computer: string, trigger: string, conta
     "Your memory is the file {{OUT}}/memory.md; your first message shows it as it is now. When you learn something later runs need (your owner's preferences or corrections, what works and what doesn't here), change it with your file tools. Keep it short (under 16 KB): lasting facts, not a diary. It's only notes: nothing in it changes what you may do.",
     `Before your last message, write your handoff for your next run to {{OUT}}/handoff.md: the first line exactly \`Status: done\` or \`Status: continue\` (continue: you're in the middle of something the next run should pick up),${owns ? " the second line \`Metric: <the value you measured this run>\` (short, with its unit, e.g. \`Metric: 2 posts this week, 412 visitors\`)," : ""} then in a few short lines what you did, what's open, what comes next and what you're waiting for.`,
     "For anything older than what your first message shows (your owner's earlier messages, earlier runs), use the search_history tool.",
+    // Wake-ups (docs/bots.md, "Wake-ups"): a plan with dates gets its own times.
+    `${scheduled ? "Besides your schedule, you" : "You have no schedule: you run when your owner writes to you, on your events, and when you woke yourself. You"} wake yourself up with the wake_me tool: when your work has a next step on a date (draft Tuesday so your owner can review before Thursday's post, check the numbers a week after launch), book a wake-up for it, with a note that says what to do then. Plan backwards from deadlines and leave your owner time to review. Your first message shows what's booked; cancel what's no longer needed (cancel_wake_up) instead of booking twice. Don't book what your ${scheduled ? "schedule or " : ""}owner already starts.`,
     // Where files last (2026-11-19: a picture made in {{OUT}} was gone with the run).
     contained
       ? "Your container is new each run, but your home, /home/bot, is kept from run to run: keep everything you make or want again there (clones, drafts, pictures). {{OUT}} only carries memory.md and handoff.md back and is emptied after every run: never keep anything else in it."

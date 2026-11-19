@@ -40,7 +40,8 @@ export interface BotTemplate {
   schedule: RoutineSchedule;
   questions: TemplateQuestion[];
   /** Its AGENTS.md, GOAL.md (or null) and skills from the answers. */
-  build: (a: Record<string, string>) => { agents: string; goal: string | null; skills: { path: string; content: string }[] };
+  /** `schedule`: when the answers change it (the Builder picks up issues on weekdays only with a label). */
+  build: (a: Record<string, string>) => { agents: string; goal: string | null; skills: { path: string; content: string }[]; schedule?: RoutineSchedule };
   /** How it talks and behaves: its SOUL.md to start with (docs/bots.md, "One folder for every bot"). */
   soul: string;
 }
@@ -118,8 +119,8 @@ export const BOT_TEMPLATES: BotTemplate[] = [
     secrets: [{ name: "GH_TOKEN", why: "a GitHub token that can read the repos and write pull request reviews and comments (fine-grained: Contents read, Pull requests read and write); no merge rights needed" }],
     report: "news",
     delegate: "brain",
-    // Its runs come from GitHub; once a weekday it also looks for pull requests nobody reviewed.
-    schedule: { every: "weekday", time: "09:00", timezone: vienna },
+    // Its runs come from GitHub's events (docs/bots.md, "Wake-ups"): no schedule of its own.
+    schedule: { every: "needed", time: "09:00", timezone: vienna },
     questions: [
       repos,
       {
@@ -147,7 +148,7 @@ export const BOT_TEMPLATES: BotTemplate[] = [
         a.focus?.trim() ? `- Look especially closely at: ${a.focus.trim()}.` : null,
         "- Inline comments on the line, each saying what's wrong and what to do instead. Then one review: request changes when something must change, otherwise comment.",
         "- When the change goes against a team decision or a product page, quote it and ask; don't decide.",
-        "- On your weekday run, list the open pull requests nobody has reviewed for a day, review them, and say which ones in your last message.",
+        "- When you're started without a pull request to review (your first run, or your owner asks), list the open pull requests nobody has reviewed for a day, review them, and say which ones in your last message.",
         "",
         "What you never do: approve a pull request whose checks aren't green, push to someone's branch, merge, or comment on formatting a linter catches.",
         "",
@@ -175,7 +176,8 @@ export const BOT_TEMPLATES: BotTemplate[] = [
     secrets: [{ name: "GH_TOKEN", why: "a GitHub token that can push branches and open pull requests in the repos (fine-grained: Contents read and write, Pull requests read and write, Issues read); no rights on the default branch needed" }],
     report: "news",
     delegate: "brain",
-    schedule: { every: "weekday", time: "09:00", timezone: vienna },
+    // On request; with a label it also looks for issues every weekday morning (build()).
+    schedule: { every: "needed", time: "09:00", timezone: vienna },
     questions: [
       repos,
       { id: "label", label: "Which issues should it pick up?", kind: "text", default: "ambient", required: false, hint: "Issues with this label. Empty: only what you write to it." },
@@ -202,6 +204,7 @@ export const BOT_TEMPLATES: BotTemplate[] = [
         ].join("\n"),
         goal: a.goal?.trim() ? `Outcome: ${a.goal.trim()}\nMetric: merged pull requests that came from issues or requests, per week (and how many needed a person's edits).\nTarget: as the outcome says.\nLimits: never merges; one change per pull request.` : null,
         skills: [{ path: "pr-gate/SKILL.md", content: PR_GATE }],
+        ...(label ? { schedule: { every: "weekday" as const, time: "09:00", timezone: vienna } } : {}),
       };
     },
   },
@@ -318,7 +321,7 @@ export async function createFromTemplate(
     {
       name: input.name ?? t.name,
       prompt: built.agents,
-      schedule: (input.schedule as RoutineSchedule | undefined) ?? t.schedule,
+      schedule: (input.schedule as RoutineSchedule | undefined) ?? built.schedule ?? t.schedule,
       ...(team ? { team } : {}),
       ...(input.computer ? { computer: input.computer } : {}),
       enabled: o.enabled,

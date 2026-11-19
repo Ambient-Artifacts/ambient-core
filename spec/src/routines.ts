@@ -18,8 +18,13 @@ export function isTimeZone(tz: string): boolean {
 
 export const RoutineSchedule = z
   .object({
-    /** hour: every hour at the minute of `time`; weekday: Monday to Friday; week: on `days`. */
-    every: z.enum(["hour", "day", "weekday", "week"]),
+    /**
+     * hour: every hour at the minute of `time`; weekday: Monday to Friday; week: on `days`;
+     * needed: no schedule at all ("When it needs to"): a bot that runs when it's written to, on
+     * events, and at the wake-ups it books itself (docs/bots.md, "Wake-ups"). `time` means nothing
+     * then; `timezone` is where its wake-ups' local times are.
+     */
+    every: z.enum(["hour", "day", "weekday", "week", "needed"]),
     days: z.array(z.enum(WEEKDAYS)).max(7).optional(),
     /** "HH:MM", 24-hour, in `timezone`. */
     time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
@@ -44,10 +49,12 @@ function sortedDays(days: readonly Weekday[] | undefined): Weekday[] {
   return WEEKDAYS.filter((d) => days?.includes(d));
 }
 
-/** The systemd calendar expression, e.g. `Wed *-*-* 08:52:00 Europe/Vienna`. */
-export function onCalendar(s: RoutineSchedule): string {
+/** The systemd calendar expression, e.g. `Wed *-*-* 08:52:00 Europe/Vienna`; null: no timer. */
+export function onCalendar(s: RoutineSchedule): string | null {
   const [hh, mm] = s.time.split(":");
   switch (s.every) {
+    case "needed":
+      return null;
     case "hour":
       return `*-*-* *:${mm}:00 ${s.timezone}`;
     case "day":
@@ -63,6 +70,8 @@ export function onCalendar(s: RoutineSchedule): string {
 export function describeSchedule(s: RoutineSchedule, opts: { withZone?: boolean } = {}): string {
   const zone = opts.withZone ? ` (${s.timezone})` : "";
   switch (s.every) {
+    case "needed":
+      return "When it needs to";
     case "hour":
       return `Every hour at :${s.time.slice(3)}${zone}`;
     case "day":
@@ -112,15 +121,16 @@ function offset(ts: number, tz: string): number {
 }
 
 /** The instant a wall-clock time in `tz` happens (the later reading across a DST change). */
-function zoned(y: number, mo: number, d: number, h: number, mi: number, tz: string): number {
+export function zoned(y: number, mo: number, d: number, h: number, mi: number, tz: string): number {
   const guess = Date.UTC(y, mo - 1, d, h, mi);
   let ts = guess - offset(guess, tz);
   ts = guess - offset(ts, tz);
   return ts;
 }
 
-/** When the routine runs next after `now` (ms since 1970). */
-export function nextRun(s: RoutineSchedule, now: number): number {
+/** When the routine runs next after `now` (ms since 1970); null without a schedule. */
+export function nextRun(s: RoutineSchedule, now: number): number | null {
+  if (s.every === "needed") return null;
   const [hh, mm] = s.time.split(":").map(Number) as [number, number];
   const today = parts(now, s.timezone);
   if (s.every === "hour") {
@@ -140,4 +150,32 @@ export function nextRun(s: RoutineSchedule, now: number): number {
     if (ts > now) return ts;
   }
   throw new Error("no next run");
+}
+
+// ---- wake-ups (docs/bots.md, "Wake-ups") ----
+
+/**
+ * The instant of a wake-up's time as a bot writes it: ISO 8601 with a `Z` or an offset
+ * (2026-11-24T09:00:00+01:00), or a local "2026-11-24 09:00" / "2026-11-24T09:00", read in
+ * `timezone`. Null when it isn't one.
+ */
+export function wakeTime(at: string, timezone: string): number | null {
+  const t = at.trim();
+  const local = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/.exec(t);
+  if (local) {
+    const [y, mo, d, h, mi] = local.slice(1).map(Number) as [number, number, number, number, number];
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59) return null;
+    return zoned(y, mo, d, h, mi, timezone);
+  }
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/.test(t)) return null;
+  const ms = Date.parse(t);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** "Tue 24 Nov, 09:00" in `timezone`. */
+export function describeWake(at: number, timezone: string): string {
+  const f = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const p: Record<string, string> = {};
+  for (const x of f.formatToParts(new Date(at))) p[x.type] = x.value;
+  return `${p.weekday} ${p.day} ${p.month}, ${p.hour}:${p.minute}`;
 }

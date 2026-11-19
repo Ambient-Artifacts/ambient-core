@@ -34,7 +34,7 @@ export const DELIVERIES = ["chat", "chat_silent", "thread"] as const;
 export type Delivery = (typeof DELIVERIES)[number];
 
 export const Trigger = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("time"), schedule: RoutineSchedule }),
+  z.object({ kind: z.literal("time"), schedule: RoutineSchedule.refine((s) => s.every !== "needed", { message: "a time automation needs a time" }) }),
   z.object({
     kind: z.literal("event"),
     events: z.array(z.enum(EVENT_KINDS)).min(1).max(EVENT_KINDS.length),
@@ -194,11 +194,11 @@ function localHourDay(ts: number, zone: string): { hour: number; day: string } {
 export function dueAt(schedule: RoutineSchedule, now: number, lastDueAt: number | null, createdAt: number): number | null {
   const from = Math.max(lastDueAt ?? createdAt, now - GRACE_MS - 1);
   let next = nextRun(schedule, from);
-  if (next > now) return null;
+  if (next === null || next > now) return null;
   // The latest due time not after now (several missed: only the last one runs).
   for (let i = 0; i < 100; i++) {
     const after = nextRun(schedule, next);
-    if (after > now) break;
+    if (after === null || after > now) break;
     next = after;
   }
   return next;
