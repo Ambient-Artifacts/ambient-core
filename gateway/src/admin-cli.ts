@@ -6,7 +6,7 @@ import { Control } from "./control.ts";
 
 const config = loadConfig();
 const convex = new ConvexHttpClient(config.convexUrl);
-const control = new Control({ query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args) }, config.serviceSecret);
+const control = new Control({ query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args), action: (fn, args) => convex.action(fn, args) }, config.serviceSecret);
 
 // A repo's access token comes on stdin (never as an argument).
 const readSecret = async () => {

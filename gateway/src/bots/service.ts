@@ -10,10 +10,11 @@ import { botLook } from "@brain/spec";
 import { api } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Channel, Inbound } from "../channels/channel.ts";
-import { claudeFix, openMessage, sealMessage, type ClaudeFix } from "./messages.ts";
+import { claudeFix, openMessage, sealMessage, type ClaudeFix, type MessageBody } from "./messages.ts";
 import { RoutineError, RUN_TOKEN_PREFIX, type Actor, type Routine, type RoutineService } from "../routines/service.ts";
 import type { Owner } from "../routines/keys.ts";
 import type { AutomationEvent } from "./automations.ts";
+import type { Attachments, FileRef, IncomingFile } from "./attachments.ts";
 
 export interface ThreadMessage {
   id: string;
@@ -21,6 +22,8 @@ export interface ThreadMessage {
   kind: "result" | "failure" | "question" | "answer" | "message";
   text: string;
   choices: string[] | null;
+  /** A question's work to decide on: the draft, the pull request's link, the file. */
+  details: string | null;
   runId: string | null;
   author: string | null;
   /** Written by whoever is asking (their own messages, in the app: on the right). */
@@ -30,6 +33,8 @@ export interface ThreadMessage {
   answered: boolean | null;
   /** A failure that's the computer's Claude account, not the bot: the app offers the fix. */
   fix: ClaudeFix | null;
+  /** Files sent with it (attachments.ts), fetched from /v1/app/routines/:id/thread/files/:file. */
+  files: FileRef[];
 }
 
 interface MessageRow {
@@ -46,6 +51,8 @@ interface MessageRow {
 }
 
 const QUESTION_MAX = 2_000;
+/** How long a question's work may be (a post, a PR's summary with its link). */
+const DETAILS_MAX = 20_000;
 const MESSAGE_MAX = 8_000;
 
 function refused(code: string, message: string, status = 400) {
@@ -63,8 +70,10 @@ export class BotService {
       channels: Channel[];
       /** Starts a bot's run on its computer at once (its long poll) instead of at the next check. */
       startNow?: (hostId: string, routineId: string) => boolean;
+      /** Files sent with messages in its thread, kept so the thread shows them again (attachments.ts). */
+      attachments?: Attachments;
       /** A bot's question goes to Ambient first (DecisionService); without it, straight to the channels. */
-      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; delegate: "never" | "brain" | "most"; team: string | null }) => void;
+      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; delegate: "never" | "brain" | "most"; team: string | null }) => void;
       now?: () => number;
     },
   ) {}
@@ -97,19 +106,21 @@ export class BotService {
   }
 
   private async message(owner: Owner, m: MessageRow, uid: string, computer?: string | null): Promise<ThreadMessage> {
-    const body = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => ({ text: "(couldn't be opened)", choices: undefined }));
+    const body: MessageBody = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => ({ text: "(couldn't be opened)" }));
     return {
       id: String(m.id),
       role: m.role,
       kind: m.kind,
       text: body.text,
       choices: body.choices?.length ? body.choices : null,
+      details: body.details ?? null,
       runId: m.runId ? String(m.runId) : null,
       author: m.authorName,
       mine: m.role === "user" && m.authorId !== null && String(m.authorId) === uid,
       createdAt: m.createdAt,
       answered: m.kind === "question" ? m.answeredAt !== null : null,
       fix: claudeFix(m.kind, body.text, computer),
+      files: body.files ?? [],
     };
   }
 
@@ -139,13 +150,17 @@ export class BotService {
     return this.post(actor, id, text, { asAmbient: true });
   }
 
-  async post(actor: Actor, id: string, text: string, opts: { asAmbient?: boolean } = {}): Promise<{ message: ThreadMessage; routine: Routine }> {
+  async post(actor: Actor, id: string, text: string, opts: { asAmbient?: boolean; files?: IncomingFile[] } = {}): Promise<{ message: ThreadMessage; routine: Routine }> {
     const r = await this.bot(actor, id);
     if (r.teamId ? !actor.canWriteTeams : !actor.canWritePersonal) throw refused("read_only", "This connection can't write to bots. Reconnect Ambient in this app and allow saving.", 403);
     const body = text.trim().slice(0, MESSAGE_MAX);
-    if (!body) throw refused("bad_request", "Write something first.");
+    const incoming = opts.files ?? [];
+    if (!body && !incoming.length) throw refused("bad_request", "Write something first.");
+    if (incoming.length && !this.d.attachments) throw refused("bad_attachment", "Files can't go to bots here.");
     const owner = this.ownerOf(r);
-    const sealed = await sealMessage(this.d.routines.keys, owner, { text: body });
+    const files = incoming.length ? await this.d.attachments!.save(owner, { routineId: id }, incoming) : [];
+    // The run reads the thread's text: it learns of the files there, and fetches them with its token.
+    const sealed = await sealMessage(this.d.routines.keys, owner, { text: body || "(See the attached files.)", files });
     const out = await this.d.routines.control.m(api.bots.post, { ...this.writeAccess(actor), id, iv: sealed.iv, ct: sealed.ct, now: this.now(), ...(opts.asAmbient ? { asAmbient: true } : {}) });
     if (!out.ok) {
       const messages: Record<string, [string, number]> = {
@@ -166,6 +181,22 @@ export class BotService {
     return { message: await this.message(owner, out.message as unknown as MessageRow, actor.uid), routine };
   }
 
+  /** A file sent in a bot's thread, to whoever may read the thread. */
+  async file(actor: Actor, id: string, fileId: string): Promise<{ name: string; type: string; bytes: Buffer }> {
+    const r = await this.bot(actor, id);
+    if (!this.d.attachments) throw refused("no_such_file", "There's no such file.", 404);
+    return this.d.attachments.read(this.ownerOf(r), { routineId: id }, fileId);
+  }
+
+  /** A file of the running bot's thread, for its run (its run token): it fetches what came with a message. */
+  async runFile(authorization: string | undefined, fileId: string): Promise<{ name: string; type: string; bytes: Buffer }> {
+    const who = await this.d.routines.control.q(api.bots.runOwner, { runTokenHash: this.tokenHash(authorization) });
+    if (!who) throw refused("run_over", "This run is over.", 409);
+    if (!this.d.attachments) throw refused("no_such_file", "There's no such file.", 404);
+    const owner = this.ownerOf({ teamId: who.teamId ? String(who.teamId) : null, createdBy: String(who.createdBy) });
+    return this.d.attachments.read(owner, { routineId: String(who.routineId) }, fileId);
+  }
+
   /** What arrives on a channel for a bot (Ambient's own messages go to AmbientChat). */
   async receive(actor: Actor, inbound: Inbound): Promise<{ message: ThreadMessage; routine: Routine }> {
     if (inbound.target.kind !== "bot") throw refused("bad_request", "That message isn't for a bot.");
@@ -181,14 +212,16 @@ export class BotService {
   }
 
   /** A run asks its bot's owner; every channel gets the question. Returns the question's id. */
-  async ask(authorization: string | undefined, question: string, choices: string[] = []): Promise<{ id: string }> {
+  /** `details`: what the question is about, shown with it (the draft, the PR's link, the file). */
+  async ask(authorization: string | undefined, question: string, choices: string[] = [], details?: string): Promise<{ id: string }> {
     const runTokenHash = this.tokenHash(authorization);
     const who = await this.d.routines.control.q(api.bots.runOwner, { runTokenHash });
     if (!who) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
     const owner = this.ownerOf({ teamId: who.teamId ? String(who.teamId) : null, createdBy: String(who.createdBy) });
     const text = question.trim().slice(0, QUESTION_MAX);
     const picks = choices.map((c) => c.trim().slice(0, 120)).filter(Boolean).slice(0, 6);
-    const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks });
+    const work = details?.trim().slice(0, DETAILS_MAX) || undefined;
+    const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks, ...(work ? { details: work } : {}) });
     const out = await this.d.routines.control.m(api.bots.ask, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
     this.onEvent?.({ kind: "bot_asked", uid: String(out.notify), routineId: String(out.routineId), bot: who.name, text, questionId: String(out.questionId) });
@@ -201,6 +234,7 @@ export class BotService {
         bot: { name: who.name, ...botLook(who.name, { face: who.face, color: who.color ?? undefined, wear: who.wear ?? undefined }) },
         question: text,
         choices: picks,
+        ...(work ? { details: work } : {}),
         delegate: (who as { delegate?: "never" | "brain" | "most" }).delegate ?? "brain",
         team: out.team,
       });

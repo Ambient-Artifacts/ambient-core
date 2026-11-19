@@ -7,7 +7,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { appCall, mcpClient, signIn, startStack, type AppSession, type Stack } from "./helpers.ts";
+import { appCall, appRaw, mcpClient, signIn, startStack, type AppSession, type Stack } from "./helpers.ts";
 
 const RUNNER = join(import.meta.dirname, "..", "..", "runner", "ambient-runner.mjs");
 const info = { hostname: "vps", os: "Linux 6.8", runner: "0.7.0", claude: "2.1.326 (Claude Code)" };
@@ -141,7 +141,7 @@ describe("Ambient's own turns", () => {
 });
 
 describe("files in the chat", () => {
-  it("reach the computer's job, and the history keeps only their names", async () => {
+  it("reach the computer's job, and the chat keeps them to show again", async () => {
     const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
     const waiting = hostCall(host, "GET", "/v1/host/ambient/next");
     await new Promise((r) => setTimeout(r, 100));
@@ -151,7 +151,13 @@ describe("files in the chat", () => {
     expect(job.attachments).toEqual([{ name: "shot.png", type: "image/png", data: png }]);
     await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { text: "A tiny PNG." });
     const c = await settled();
-    expect(c.messages.at(-2)?.text).toBe("What's in this?\n\n📎 shot.png");
+    const sentMessage = c.messages.at(-2) as unknown as { text: string; files: { id: string; name: string; type: string; size: number }[] };
+    expect(sentMessage.text).toBe("What's in this?");
+    expect(sentMessage.files).toEqual([{ id: expect.any(String), name: "shot.png", type: "image/png", size: 8 }]);
+    const file = await appRaw(s, lena.access_token, "GET", `/v1/app/ambient/chat/files/${sentMessage.files[0]!.id}`);
+    expect(file.status).toBe(200);
+    expect(file.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await file.arrayBuffer()).toString("hex")).toBe("89504e470d0a1a0a");
   });
 
   it("refuses what can't go with a message", async () => {

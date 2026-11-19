@@ -23,6 +23,8 @@ let history: { query: string; auth: string | undefined } | null = null;
 /** What the stand-in gateway hands a run on its next inbox call, and the answers it posted. */
 let inbox: { text: string; who: string; at: number }[] = [];
 let replies: string[] = [];
+/** Files a run fetched (docs/bots.md, "Files in the chat"). */
+let fileRequests: { id: string; auth: string | undefined }[] = [];
 let server: Server;
 let origin = "";
 let dir = "";
@@ -50,6 +52,9 @@ beforeAll(async () => {
       } else if (req.method === "POST" && url.pathname === "/v1/bot/reply") {
         replies.push((JSON.parse(body) as { text: string }).text);
         res.writeHead(204).end();
+      } else if (req.method === "GET" && url.pathname.startsWith("/v1/bot/files/")) {
+        fileRequests.push({ id: url.pathname.split("/").pop()!, auth: req.headers.authorization });
+        res.writeHead(200, { "content-type": "text/markdown" }).end("# Notes from Lena");
       } else if (req.method === "GET" && url.pathname === "/v1/bot/history") {
         history = { query: url.search, auth: req.headers.authorization };
         res.writeHead(200, { "content-type": "application/json" }).end(
@@ -162,6 +167,23 @@ describe("a bot's folder on the computer", () => {
     // Skills never go into the user's own ~/.claude, and the run's folder is gone afterwards.
     expect(existsSync(join(dir, ".claude"))).toBe(false);
     expect(existsSync(join(dir, "state", "runs", "run00000001"))).toBe(false);
+  });
+
+  it("fetches the files that came with its owner's message into its folder, and names them", async () => {
+    fileRequests = [];
+    start = {
+      run: { id: "run00000003", trigger: "message" },
+      routine: { id: "bot00000001", name: "Release notes", prompt: "Wake up: write the release notes.", folder: join(dir, "work") },
+      env: {},
+      bot: { face: "classic", runtime: "claude-code", isolation: "host", report: "news" },
+      resume: { sessionId: null, message: "Lena wrote to you in the Ambient app: (See the attached files.)", files: [{ id: "file00000001", name: "notes.md", type: "text/markdown", size: 17 }] },
+      runToken: RUN_TOKEN,
+      workspace: { system: "OUTDIR={{OUT}}", skills: [], memory: "" },
+    };
+    const out = await runner(["run", "bot00000001"]);
+    expect(out.code, out.out).toBe(0);
+    expect(fileRequests).toEqual([{ id: "file00000001", auth: `Bearer ${RUN_TOKEN}` }]);
+    expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toMatch(/Files that came with it \(open them with your file tools\):\n- \/.+\/runs\/run00000003\/out\/files\/notes\.md$/);
   });
 
   it("runs as before when the gateway sends no workspace", async () => {

@@ -45,6 +45,8 @@ export interface Decision {
   status: "open" | "answered" | "expired";
   from: { kind: "bot"; id: string; name: string; face: string; color?: string; wear?: string[] } | { kind: "ambient" };
   question: string;
+  /** What a bot's question is about: its draft, the pull request's link, the file. */
+  details: string | null;
   options: string[];
   recommendation: { option: string; why: string } | null;
   answer: { text: string; by: string | null; via: string | null; at: number } | null;
@@ -73,6 +75,8 @@ export interface DecisionRow {
 interface Sealed {
   q: string;
   o: string[];
+  /** The bot's work the question is about (the draft, the pull request). */
+  d?: string;
   r?: { option: string; why: string };
   bot?: { id: string; name: string; face: string; color?: string; wear?: string[] };
   a?: ProposedChange;
@@ -92,7 +96,7 @@ export function parseTriage(text: string): { action: "answer"; answer: string; w
   return null;
 }
 
-export function triagePrompt(o: { name: string; bot: string; question: string; choices: string[]; delegate: "brain" | "most" }): string {
+export function triagePrompt(o: { name: string; bot: string; question: string; choices: string[]; details?: string; delegate: "brain" | "most" }): string {
   const rule =
     o.delegate === "brain"
       ? `Answer it yourself only when ${o.name}'s brain makes the answer clear (search it: decisions, project pages, earlier answers). Otherwise ask ${o.name}.`
@@ -102,6 +106,8 @@ export function triagePrompt(o: { name: string; bot: string; question: string; c
     `Bot: ${o.bot}`,
     `Question: ${o.question}`,
     o.choices.length ? `Choices: ${o.choices.join(" / ")}` : "",
+    // What it's about (the draft, the pull request): look at it before suggesting anything.
+    o.details ? `What it's about (from the bot):\n<details>\n${o.details.slice(0, 12_000)}\n</details>` : `The bot showed nothing of the work it asks about: don't suggest approving work you haven't seen; say what's missing instead.`,
     rule,
     'Reply with only one line of JSON: {"action":"answer","answer":"<your answer, one of the choices if there are any>","why":"<one sentence, name the page>"} or {"action":"ask","suggest":"<what you would choose, or empty>","why":"<one sentence>"}.',
   ]
@@ -148,6 +154,7 @@ export class DecisionService {
       status: row.status,
       from: s.bot ? { kind: "bot", ...s.bot } : { kind: "ambient" },
       question: s.q,
+      details: s.d ?? null,
       options: s.o ?? [],
       recommendation: s.r ?? null,
       answer: answer !== null ? { text: answer, by: row.answeredBy, via: row.via, at: row.answeredAt ?? row.createdAt } : null,
@@ -177,12 +184,12 @@ export class DecisionService {
    * A bot asked its owner something (the run waits a few minutes). Ambient looks first, by the
    * bot's `delegate`; what it doesn't answer becomes a decision for the person. Never throws.
    */
-  async onBotQuestion(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; delegate: "never" | "brain" | "most"; team: string | null }): Promise<void> {
+  async onBotQuestion(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; delegate: "never" | "brain" | "most"; team: string | null }): Promise<void> {
     try {
       const name = (await this.d.actorFor(q.uid).catch(() => null)) ? await this.d.ambient.nameOf(q.uid) : "them";
       let suggestion: { option: string; why: string } | null = null;
       if (q.delegate !== "never") {
-        const verdict = await this.withTimeout(this.d.ambient.internalTurn(q.uid, name, triagePrompt({ name, bot: q.bot.name, question: q.question, choices: q.choices, delegate: q.delegate })), this.d.triageMs ?? TRIAGE_MS).catch(() => null);
+        const verdict = await this.withTimeout(this.d.ambient.internalTurn(q.uid, name, triagePrompt({ name, bot: q.bot.name, question: q.question, choices: q.choices, details: q.details, delegate: q.delegate })), this.d.triageMs ?? TRIAGE_MS).catch(() => null);
         const t = verdict ? parseTriage(verdict) : null;
         if (t?.action === "answer") {
           const actor = await this.d.actorFor(q.uid);
@@ -215,11 +222,13 @@ export class DecisionService {
   }
 
   /** To the person: a decision in Ambient's chat, and a push (the app channel). */
-  private async escalate(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; team: string | null }, suggestion: { option: string; why: string } | null) {
-    const body: Sealed = { q: q.question, o: q.choices, ...(suggestion ? { r: suggestion } : {}), bot: { id: q.routineId, name: q.bot.name, face: q.bot.face, ...(q.bot.color ? { color: q.bot.color } : {}), ...(q.bot.wear ? { wear: q.bot.wear } : {}) } };
+  private async escalate(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; team: string | null }, suggestion: { option: string; why: string } | null) {
+    const body: Sealed = { q: q.question, o: q.choices, ...(q.details ? { d: q.details } : {}), ...(suggestion ? { r: suggestion } : {}), bot: { id: q.routineId, name: q.bot.name, face: q.bot.face, ...(q.bot.color ? { color: q.bot.color } : {}), ...(q.bot.wear ? { wear: q.bot.wear } : {}) } };
     const sealed = await this.d.keys.seal(this.owner(q.uid), PURPOSE, JSON.stringify(body));
     const row = (await this.d.control.m(api.bots.createDecision, { uid: q.uid as never, routineId: q.routineId, questionId: q.questionId, iv: sealed.iv, ct: sealed.ciphertext, urgent: true, now: this.now() })) as unknown as DecisionRow;
-    const text = `${q.bot.name} asks: ${q.question}${suggestion ? `\n\nI'd go with “${suggestion.option}”${suggestion.why ? `: ${suggestion.why}` : "."}` : ""}`;
+    // The work comes with the question, so it's decided on what was done, not on its description.
+    const work = q.details ? `\n\n${q.details.length > 6_000 ? `${q.details.slice(0, 6_000)}…\n\n(The rest is in ${q.bot.name}'s thread.)` : q.details}` : "";
+    const text = `${q.bot.name} asks: ${q.question}${work}${suggestion ? `\n\nI'd go with “${suggestion.option}”${suggestion.why ? `: ${suggestion.why}` : "."}` : ""}`;
     await this.d.ambient.say(q.uid, text, String(row.id));
     for (const channel of this.d.channels) {
       void channel

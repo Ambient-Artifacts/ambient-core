@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { Directory } from "../directory.ts";
 import { RoutineError, type Actor, type RoutineService } from "../routines/service.ts";
 import { limiter } from "../limiter.ts";
-import { ChatAttachment, type AmbientChat } from "./ambient.ts";
+import { ChatAttachment, checkAttachments, type AmbientChat } from "./ambient.ts";
 import type { AdminService } from "./admin.ts";
 import type { DecisionService } from "./decisions.ts";
 import { ModelChoice } from "@brain/spec";
@@ -32,6 +32,23 @@ function fail(res: Response, err: unknown) {
 }
 
 const Text = z.object({ text: z.string().trim().min(1).max(8_000) });
+/** A message to a bot: text, files, or both (files: bots/attachments.ts). */
+const ThreadPost = z.object({ text: z.string().trim().max(8_000).default(""), attachments: z.array(ChatAttachment).max(4).default([]) });
+
+/** A kept file, as its owner sent it: inline (images, PDFs show in place), cached for good (its id never changes). */
+function sendFile(res: Response, file: { name: string; type: string; bytes: Buffer }) {
+  res
+    .type(file.type)
+    .set({
+      "cache-control": "private, max-age=31536000, immutable",
+      "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+      "x-content-type-options": "nosniff",
+      // A text file or a PDF never runs anything of ours: shown in a sandbox of its own.
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
+    })
+    .send(file.bytes);
+}
+
 
 export function botAppRoutes(
   r: Router,
@@ -173,15 +190,29 @@ export function botAppRoutes(
     }
   });
 
-  r.post("/v1/app/routines/:id/thread", d.auth, d.json, async (req, res) => {
-    const body = Text.safeParse(req.body);
-    if (!body.success) {
-      res.status(400).json({ error: "bad_request", message: "Write something first (up to 8,000 characters)." });
+  // Files come along base64, as in Ambient's chat (10 MB of files is about 14 MB of JSON).
+  r.post("/v1/app/routines/:id/thread", d.auth, express.json({ limit: "16mb" }), async (req, res) => {
+    const body = ThreadPost.safeParse(req.body);
+    if (!body.success || (!body.data.text && !body.data.attachments.length)) {
+      res.status(400).json({ error: "bad_request", message: "Write something first (up to 8,000 characters), with up to 4 files." });
       return;
     }
     try {
       const a = await actor(res);
+      if (body.data.attachments.length) {
+        res.json(await d.bots.post(a, id(req), body.data.text, { files: checkAttachments(body.data.attachments) }));
+        return;
+      }
       res.json(await d.bots.receive(a, { channel: "app", uid: a.uid, target: { kind: "bot", botId: id(req) }, text: body.data.text }));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // A file sent in a bot's thread, to whoever may read the thread.
+  r.get("/v1/app/routines/:id/thread/files/:file", d.auth, async (req, res) => {
+    try {
+      sendFile(res, await d.bots.file(await actor(res), id(req), String(req.params.file)));
     } catch (err) {
       fail(res, err);
     }
@@ -206,6 +237,17 @@ export function botAppRoutes(
       const name = (await d.directory.user(a.uid))?.name ?? "them";
       const { message, pending } = await d.ambient.send(a.uid, name, body.data.text, body.data.attachments);
       res.json({ message, pending });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // A file sent in the person's chat with Ambient (only theirs).
+  r.get("/v1/app/ambient/chat/files/:file", d.auth, async (req, res) => {
+    const a = await actor(res);
+    if (!d.routines.botsEnabled(a)) return notEnabled(res);
+    try {
+      sendFile(res, await d.ambient.file(a.uid, String(req.params.file)));
     } catch (err) {
       fail(res, err);
     }
@@ -724,19 +766,30 @@ export function botRunRouter(d: { bots: BotService; history?: HistorySearch }): 
 
   r.post("/v1/bot/ask", json, async (req, res) => {
     if (slowDown(req, res)) return;
-    const body = z.object({ question: z.string().trim().min(1).max(2_000), choices: z.array(z.string().max(120)).max(6).optional() }).safeParse(req.body);
+    const body = z.object({ question: z.string().trim().min(1).max(2_000), choices: z.array(z.string().max(120)).max(6).optional(), details: z.string().max(20_000).optional() }).safeParse(req.body);
     if (!body.success) {
-      res.status(400).json({ error: "bad_request", message: "Ask a question (up to 2,000 characters), with up to 6 choices." });
+      res.status(400).json({ error: "bad_request", message: "Ask a question (up to 2,000 characters), with up to 6 choices and up to 20,000 characters of details." });
       return;
     }
     try {
-      res.json(await d.bots.ask(req.headers.authorization, body.data.question, body.data.choices));
+      res.json(await d.bots.ask(req.headers.authorization, body.data.question, body.data.choices, body.data.details));
     } catch (err) {
       fail(res, err);
     }
   });
 
   // search_history for a run: its own thread and handoffs (docs/bots.md, "The computer's side").
+  // A file that came with the message that started this run (its run token): the runner puts it in the run's folder.
+  r.get("/v1/bot/files/:file", async (req, res) => {
+    try {
+      const file = await d.bots.runFile(req.headers.authorization, String(req.params.file));
+      res.type(file.type).set("cache-control", "no-store").send(file.bytes);
+    } catch (err) {
+      const e = err as { status?: number; code?: string; message?: string };
+      res.status(e.status ?? 500).json({ error: e.code ?? "failed", message: e.message });
+    }
+  });
+
   r.get("/v1/bot/history", async (req, res) => {
     if (slowDown(req, res)) return;
     if (!d.history) {

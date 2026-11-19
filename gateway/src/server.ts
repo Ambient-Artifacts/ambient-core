@@ -12,7 +12,7 @@ const convex = new ConvexHttpClient(config.convexUrl);
 const live = new ConvexClient(config.convexUrl);
 const { app, microsoftConnect, msteamsBots } = createApp({
   config,
-  convex: { query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args) },
+  convex: { query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args), action: (fn, args) => convex.action(fn, args) },
   apple: appleVerifier(config.appleAudiences),
   revisionSource: new ConvexRevisionSource(live, config.serviceSecret),
 });

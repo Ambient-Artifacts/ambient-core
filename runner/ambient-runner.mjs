@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.12.0";
+const VERSION = "0.12.2";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -1544,12 +1544,13 @@ function signInEnv(env) {
 const ASK_TOOL = {
   name: "ask_owner",
   description:
-    "Ask your owner (the person this bot works for) a question; by default wait a few minutes for the answer in the Ambient app. Use it for decisions only they can make. Give choices when there are a few clear options. wait: false hands it over without waiting (something ready for them: a pull request to merge, a post to publish): it reaches them as a decision, and their answer starts your next run.",
+    "Ask your owner (the person this bot works for) a question; by default wait a few minutes for the answer in the Ambient app. Use it for decisions only they can make. Give choices when there are a few clear options. Put what they decide on in details: the draft itself (the whole text), the pull request's link, the file's link or path, the numbers and where they come from. They decide from the question alone, so never write \"see my last message\". wait: false hands it over without waiting (something ready for them: a pull request to merge, a post to publish): it reaches them as a decision, and their answer starts your next run.",
   inputSchema: {
     type: "object",
     properties: {
       question: { type: "string", description: "One short question." },
       choices: { type: "array", items: { type: "string" }, maxItems: 6, description: "Answers to pick from, if there are a few clear options." },
+      details: { type: "string", maxLength: 20000, description: "What the question is about, shown with it (markdown): the draft, the pull request's link, the file, the numbers and their sources." },
       wait: { type: "boolean", description: "false: don't wait for the answer (default true)." },
     },
     required: ["question"],
@@ -1594,9 +1595,13 @@ async function botMcp() {
     if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
     return json;
   };
-  const ask = async ({ question, choices, wait }) => {
+  const ask = async ({ question, choices, wait, details }) => {
     if (typeof question !== "string" || !question.trim()) return { text: "Pass a question.", error: true };
-    const { id } = await api("POST", "/v1/bot/ask", { question, ...(Array.isArray(choices) && choices.length ? { choices: choices.map(String).slice(0, 6) } : {}) });
+    const { id } = await api("POST", "/v1/bot/ask", {
+      question,
+      ...(Array.isArray(choices) && choices.length ? { choices: choices.map(String).slice(0, 6) } : {}),
+      ...(typeof details === "string" && details.trim() ? { details: details.slice(0, 20000) } : {}),
+    });
     if (wait === false) {
       return { text: "Handed to your owner: it reaches them as a decision (Ambient looks at it first), and their answer starts your next run, in this same conversation. Finish this run now with your summary." };
     }
@@ -1898,6 +1903,28 @@ async function run(id) {
       log(`Its last session was kept in another settings folder: continuing in a new one`);
       carryOn = { ...carryOn, sessionId: null };
     }
+  }
+  // Files that came with the message that started this run (docs/bots.md, "Files in the chat"):
+  // fetched with the run's token into its out folder, and named in the message, as on Amb's computer.
+  if (carryOn && Array.isArray(carryOn.files) && carryOn.files.length && runToken && outDir) {
+    const dir = join(outDir, "files");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const fileOwner = contained ? { uid: 1000, gid: 1000 } : as;
+    if (fileOwner && process.getuid?.() === 0) chownSync(dir, fileOwner.uid, fileOwner.gid);
+    const saved = [];
+    for (const f of carryOn.files.slice(0, 4)) {
+      const name = String(f?.name ?? "file").replace(/[^A-Za-z0-9._ -]/g, "_").slice(-120) || "file";
+      try {
+        const res = await fetch(`${cfg.server}/v1/bot/files/${encodeURIComponent(String(f.id))}`, { headers: { authorization: `Bearer ${runToken}` }, signal: AbortSignal.timeout(120_000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        writeFileSync(join(dir, name), Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
+        if (fileOwner && process.getuid?.() === 0) chownSync(join(dir, name), fileOwner.uid, fileOwner.gid);
+        saved.push(`${contained ? CONTAINER_OUT : outDir}/files/${name}`);
+      } catch (err) {
+        log(`Couldn't fetch ${name} for the run: ${err.message}`);
+      }
+    }
+    if (saved.length) carryOn = { ...carryOn, message: `${carryOn.message}\n\nFiles that came with it (open them with your file tools):\n${saved.map((p) => `- ${p}`).join("\n")}` };
   }
   const mcpArg = codex ? mcpServer : mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile);
   // A bot's Claude Code run stays open for messages that come in while it works (stream-json in).

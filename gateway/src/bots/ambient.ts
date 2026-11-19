@@ -15,6 +15,7 @@ import { CHAT_PURPOSE, openMessage, sealMessage } from "./messages.ts";
 import type { AmbientComputers } from "./computer.ts";
 import type { Decision, DecisionRow } from "./decisions.ts";
 import { AGENTS, MEMORY, SOUL, type BotFolder } from "./folder.ts";
+import { filesLine, type Attachments, type FileRef } from "./attachments.ts";
 
 /** One of the person's own computers, connected and running Ambient there. */
 export interface AmbientComputer {
@@ -29,6 +30,8 @@ export interface ChatMessage {
   id: string;
   role: "user" | "ambient";
   text: string;
+  /** Files sent with it (attachments.ts): the app fetches each from /v1/app/ambient/chat/files/:id. */
+  files: FileRef[];
   createdAt: number;
   /** A decision this message brings (docs/bots.md, "Decisions"). */
   decision: Decision | null;
@@ -188,6 +191,8 @@ export class AmbientChat {
       nameOf?: (uid: string) => Promise<string | undefined>;
       /** Amb's memory of each person (docs/bots.md, "Amb's memory"). */
       folder?: BotFolder;
+      /** Files sent with messages, kept so the chat shows them again (attachments.ts). */
+      attachments?: Attachments;
       fetchImpl?: typeof fetch;
       now?: () => number;
     },
@@ -211,21 +216,31 @@ export class AmbientChat {
     const rows = await this.d.control.q(api.bots.chat, { uid: uid as never, limit });
     const owner = { kind: "user" as const, uid };
     const messages = await Promise.all(
-      rows.map(async (m) => ({
-        id: String(m.id),
-        role: m.role,
-        text: (await openMessage(this.d.keys, owner, m.iv, m.ct, CHAT_PURPOSE).catch(() => ({ text: "(couldn't be opened)" }))).text,
-        createdAt: m.createdAt,
-        decision: m.decision && this.decisionView ? await this.decisionView(uid, m.decision as unknown as DecisionRow).catch(() => null) : null,
-      })),
+      rows.map(async (m) => {
+        const body = await openMessage(this.d.keys, owner, m.iv, m.ct, CHAT_PURPOSE).catch(() => ({ text: "(couldn't be opened)", files: undefined }));
+        return {
+          id: String(m.id),
+          role: m.role,
+          text: body.text,
+          files: body.files ?? [],
+          createdAt: m.createdAt,
+          decision: m.decision && this.decisionView ? await this.decisionView(uid, m.decision as unknown as DecisionRow).catch(() => null) : null,
+        };
+      }),
     );
     return { messages, pending: this.isPending(uid) };
   }
 
-  private async add(uid: string, role: "user" | "ambient", text: string, decisionId?: string): Promise<ChatMessage> {
-    const sealed = await sealMessage(this.d.keys, { kind: "user", uid }, { text }, CHAT_PURPOSE);
+  private async add(uid: string, role: "user" | "ambient", text: string, decisionId?: string, files: FileRef[] = []): Promise<ChatMessage> {
+    const sealed = await sealMessage(this.d.keys, { kind: "user", uid }, { text, files }, CHAT_PURPOSE);
     const out = await this.d.control.m(api.bots.addChat, { uid: uid as never, role, iv: sealed.iv, ct: sealed.ct, ...(decisionId ? { decisionId } : {}), now: this.now() });
-    return { id: String(out.id), role, text, createdAt: out.createdAt, decision: null };
+    return { id: String(out.id), role, text, files, createdAt: out.createdAt, decision: null };
+  }
+
+  /** A file sent in the person's chat (only theirs, only this chat's). */
+  async file(uid: string, id: string): Promise<{ name: string; type: string; bytes: Buffer }> {
+    if (!this.d.attachments) throw new RoutineError("no_such_file", "There's no such file.", 404);
+    return this.d.attachments.read({ kind: "user", uid }, {}, id);
   }
 
   /** Shows a decision on a chat message (DecisionService sets it). */
@@ -301,10 +316,11 @@ export class AmbientChat {
     const files = checkAttachments(attachments);
     if (!body && !files.length) throw new RoutineError("bad_request", "Write something first.", 400);
     if (this.isPending(uid)) throw new RoutineError("busy", "Ambient is still answering your last message.", 409);
-    const history = (await this.list(uid, HISTORY)).messages.map((m): Turn => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
-    // The history keeps which files came, not the files: on a computer they're in its folder.
-    const stored = [body, files.map((f) => `📎 ${f.name}`).join("\n")].filter(Boolean).join("\n\n");
-    const message = await this.add(uid, "user", stored);
+    const history = (await this.list(uid, HISTORY)).messages.map((m): Turn => ({ role: m.role === "user" ? "user" : "assistant", text: [m.text, filesLine(m.files)].filter(Boolean).join("\n\n") }));
+    // The files are kept (attachments.ts), so the chat shows them again; without the store, only their names.
+    const kept = this.d.attachments && files.length ? await this.d.attachments.save({ kind: "user", uid }, {}, files) : [];
+    const stored = kept.length ? body : [body, files.map((f) => `📎 ${f.name}`).join("\n")].filter(Boolean).join("\n\n");
+    const message = await this.add(uid, "user", stored, undefined, kept);
     this.pending.set(uid, this.now());
     const done = this.reply(uid, name, history, body, files).finally(() => this.pending.delete(uid));
     return { message, pending: true, done };
@@ -400,6 +416,7 @@ export class AmbientChat {
   /** The whole history goes, for good (the memory stays: it's edited on its own). */
   async forget(uid: string): Promise<void> {
     this.unseen.delete(uid);
+    await this.d.attachments?.forgetChat(uid);
     for (let i = 0; i < 200; i++) {
       const out = await this.d.control.m(api.bots.forgetChat, { uid: uid as never, now: this.now() });
       if (!out.removed) break;
