@@ -348,14 +348,14 @@ export class AmbientChat {
 
   private async reply(uid: string, name: string, history: Turn[], question: string, files: ChatAttachment[] = []): Promise<void> {
     let text: string;
+    let made: ChatAttachment[] = [];
     const computer = await this.computer(uid);
     const memory = await this.memory(uid);
     if (computer) {
       const said = this.takeUnseen(uid);
       const note = said.length ? `[Since ${name}'s last message you wrote to them yourself:\n${said.map((t) => `- ${t.replace(/\s+/g, " ").slice(0, 600)}`).join("\n")}]\n\n` : "";
       try {
-        text =
-          (await this.d.computers!.ask(computer, {
+        const answer = await this.d.computers!.askWithFiles(computer, {
             text: `${note}${question}`,
             name,
             instructions: computerInstructions(name, computer.team ? `${computer.team}'s server` : computer.name, computer.team === null, true, memory),
@@ -365,7 +365,9 @@ export class AmbientChat {
             fresh: !history.some((t) => t.role === "user"),
             history: trimHistory(history),
             attachments: files,
-          })) || "I don't have an answer to that.";
+          });
+        text = answer.text || (answer.files.length ? "" : "I don't have an answer to that.");
+        made = answer.files;
       } catch (err) {
         // Not delivered: the note goes with the next message.
         if (said.length) this.unseen.set(uid, [...said, ...(this.unseen.get(uid) ?? [])].slice(-10));
@@ -398,7 +400,9 @@ export class AmbientChat {
         text = "That didn't work just now. Please try again in a minute.";
       }
     }
-    await this.add(uid, "ambient", text).catch((err: Error) => console.warn(`[ambient] couldn't store the reply: ${err.message}`));
+    // What Ambient made for the person (a picture, a PDF): shown with its reply, kept like their own files.
+    const kept = made.length && this.d.attachments ? await this.d.attachments.save({ kind: "user", uid }, {}, made).catch((err: Error) => (console.warn(`[ambient] couldn't keep the files: ${err.message}`), [])) : [];
+    await this.add(uid, "ambient", text, undefined, kept).catch((err: Error) => console.warn(`[ambient] couldn't store the reply: ${err.message}`));
   }
 
   /**
@@ -448,7 +452,11 @@ export function computerInstructions(name: string, computer: string, own = true,
     ambientInstructions(name, memory),
     `You run as Claude Code on ${computer}${own ? `, ${name}'s own computer` : ", Ambient's machine for the team, where the team's bots run too"}, with Ambient's tools (the mcp__ambient tools) and this machine's own. When ${name} asks you to do something here (look at a repo, run a script, check on a bot's workspace), do it, carefully: say what you'll change before anything that can't be undone.`,
     chat ? "This conversation continues across messages; earlier turns are yours." : `This is a short session of your own, beside your chat with ${name}: do what the message asks and answer once.`,
-  ].join("\n");
+    // Files Ambient makes come with its reply (runner: the outbox), shown in the chat like theirs.
+    chat ? `To show ${name} a file you made or found here (a picture, a chart, a PDF, a document), save it in the outbox folder of your working folder (./outbox/): it comes with your reply and they see it in the chat. Up to 4 files and 10 MB per reply; images, PDFs and text files. Your working folder is kept; the outbox is emptied once a file is sent.` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /** Claude's messages alternate and start with the person: drop what would break that. */

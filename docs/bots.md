@@ -732,6 +732,14 @@ Every bot's run reads the brain, the way an employee's AI app does (gateway/src/
 - **Who wrote it:** a correction says "the bot <name>", a work log's tool is "<name> (bot)"; both carry the owner as the person they're from.
 - **Its instructions** tell it to look in the brain before it answers or decides anything about people, projects, customers or earlier decisions.
 
+## Files agents make
+
+Bots and Ambient hand the person what they made (a picture for a post, a chart, a PDF) as files in the chat, stored like the files people send (sealed, Convex file storage; "Files in the chat").
+
+- **A bot:** the `send_file` tool (ambient-bot MCP, runner 0.13.0) reads up to 4 files (10 MB together; pictures, PDFs, text) from its container or folder and posts them into its thread (`POST /v1/bot/reply` with `files`). `ask_owner` takes `files` too, so a question shows the picture it asks about; Ambient's message about the question points to them in the bot's thread.
+- **Ambient:** files it saves in `./outbox/` of the person's folder on the computer go with its reply (`POST /v1/host/ambient/:jobId` with `files`) and show in the chat; sent ones move to `outbox/sent/`.
+- **Where files last:** a contained bot's home, `/home/bot`, is its own volume (`ambient-bot-<id>`), kept from run to run; the out folder (`{{OUT}}`) only carries memory.md and handoff.md back and is emptied after every run. Their instructions say so (2026-11-19: a picture made in the out folder was gone with the run).
+
 ## History: nothing is forgotten
 
 Amb's chat and every bot's thread are kept in full (sealed), no longer cut at the newest 200 or 300

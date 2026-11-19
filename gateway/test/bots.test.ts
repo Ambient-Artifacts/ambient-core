@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { botQuestionPush } from "../src/channels/channel.ts";
-import { appCall, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
+import { appCall, appRaw, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
 
 const RUNNER = join(import.meta.dirname, "..", "..", "runner", "ambient-runner.mjs");
 const daily = { every: "day", time: "09:00", timezone: "Europe/Vienna" };
@@ -404,12 +404,31 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the 
     expect(await reply(1)).toMatchObject({ serverInfo: { name: "ambient-bot" }, capabilities: { tools: {} } });
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
     send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    expect(((await reply(2)).tools as { name: string }[]).map((t) => t.name)).toEqual(["ask_owner", "search_history"]);
+    expect(((await reply(2)).tools as { name: string }[]).map((t) => t.name)).toEqual(["ask_owner", "send_file", "search_history"]);
     send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "ask_owner", arguments: { question: "Ship it?", choices: ["Yes", "Not yet"] } } });
     for (let i = 0; i < 100 && !(await one(id)).bot?.openQuestion; i++) await new Promise((r) => setTimeout(r, 50));
     await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "Yes" });
     const out = await reply(3);
     expect((out.content as { text: string }[])[0]!.text).toBe("Lena Vogel answered: Yes");
+
+    // A picture it made: into its thread, as a file the app shows and opens (send_file).
+    const pic = join(dir, "post1-visual.png");
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+    writeFileSync(pic, png);
+    send({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "send_file", arguments: { paths: [pic], caption: "The picture for post 1." } } });
+    expect(((await reply(4)).content as { text: string }[])[0]!.text).toContain("Sent post1-visual.png");
+    const sentMsg = (await thread(id)).messages.find((m) => m.text === "The picture for post 1.") as unknown as { files: { id: string; name: string; type: string }[] };
+    expect(sentMsg.files).toEqual([expect.objectContaining({ name: "post1-visual.png", type: "image/png" })]);
+    const got = await appRaw(s, lena.access_token, "GET", `/v1/app/routines/${id}/thread/files/${sentMsg.files[0]!.id}`);
+    expect(Buffer.from(await got.arrayBuffer())).toEqual(png);
+    // What can't go: said, not sent.
+    send({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "send_file", arguments: { paths: [join(dir, "nope.png")] } } });
+    expect(((await reply(5)).content as { text: string }[])[0]!.text).toContain("There's no file");
+    // A question with its picture.
+    send({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "ask_owner", arguments: { question: "Use this picture?", choices: ["Yes", "No"], files: [pic], wait: false } } });
+    await reply(6);
+    const q = (await thread(id)).messages.find((m) => m.text === "Use this picture?") as unknown as { files: { name: string }[] };
+    expect(q.files.map((f) => f.name)).toEqual(["post1-visual.png"]);
     p.kill();
   }, 30_000);
 

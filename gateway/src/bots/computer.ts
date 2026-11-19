@@ -16,6 +16,13 @@ import type { Turn } from "../ai/loop.ts";
 import type { LlmAnswer, WireRequest } from "@brain/team";
 import type { RelayRequest, RelayResponse } from "../relay.ts";
 
+/** A file Ambient made on the computer for the person (its outbox), as it comes with a reply. */
+export interface OutboxFile {
+  name: string;
+  type: string;
+  data: string;
+}
+
 /** Work for the computer that isn't a chat message: a root command, or a bot run to start now. */
 export type ControlJob =
   | { id: string; kind: "exec"; command: string; timeoutS: number }
@@ -83,6 +90,8 @@ export class AmbientComputers {
   private seen = new Map<string, number>();
   private pending = new Map<string, { hostId: string; resolve: (text: string) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
   private tokens = new Map<string, { token: string; expiresAt: number }>();
+  /** Files that came with a reply, until `askWithFiles` takes them. */
+  private replyFiles = new Map<string, OutboxFile[]>();
   private relays = new Map<string, { hostId: string; resolve: (r: RelayResponse) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
 
   constructor(
@@ -115,6 +124,11 @@ export class AmbientComputers {
 
   /** Hand a message to the computer and wait for Ambient's reply there. */
   async ask(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token" | "uid">): Promise<string> {
+    return (await this.askWithFiles(host, job)).text;
+  }
+
+  /** As `ask`, with the files Ambient made for the person there (its outbox), if any. */
+  async askWithFiles(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token" | "uid">): Promise<{ text: string; files: OutboxFile[] }> {
     const full: ComputerJob = { ...job, id: randomUUID(), uid: host.uid, token: await this.token(host.id, host.uid, host.name) };
     const reply = new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -125,7 +139,10 @@ export class AmbientComputers {
       this.pending.set(full.id, { hostId: host.id, resolve, reject, timer });
     });
     this.hand(host.id, full);
-    return reply;
+    const text = await reply;
+    const files = this.replyFiles.get(full.id) ?? [];
+    this.replyFiles.delete(full.id);
+    return { text, files };
   }
 
   /** To the computer's waiting long poll, or first in its queue. */
@@ -286,10 +303,11 @@ export class AmbientComputers {
     });
   }
 
-  /** The computer's reply to a message it took. */
-  reply(hostId: string, jobId: string, text: string): boolean {
+  /** The computer's reply to a message it took, with the files Ambient put in its outbox. */
+  reply(hostId: string, jobId: string, text: string, files: OutboxFile[] = []): boolean {
     const p = this.pending.get(jobId);
     if (!p || p.hostId !== hostId) return false;
+    if (files.length) this.replyFiles.set(jobId, files);
     this.pending.delete(jobId);
     clearTimeout(p.timer);
     p.resolve(text);

@@ -184,7 +184,7 @@ export class DecisionService {
    * A bot asked its owner something (the run waits a few minutes). Ambient looks first, by the
    * bot's `delegate`; what it doesn't answer becomes a decision for the person. Never throws.
    */
-  async onBotQuestion(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; delegate: "never" | "brain" | "most"; team: string | null }): Promise<void> {
+  async onBotQuestion(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; files?: string[]; delegate: "never" | "brain" | "most"; team: string | null }): Promise<void> {
     try {
       const name = (await this.d.actorFor(q.uid).catch(() => null)) ? await this.d.ambient.nameOf(q.uid) : "them";
       let suggestion: { option: string; why: string } | null = null;
@@ -222,13 +222,15 @@ export class DecisionService {
   }
 
   /** To the person: a decision in Ambient's chat, and a push (the app channel). */
-  private async escalate(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; team: string | null }, suggestion: { option: string; why: string } | null) {
+  private async escalate(q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; files?: string[]; team: string | null }, suggestion: { option: string; why: string } | null) {
     const body: Sealed = { q: q.question, o: q.choices, ...(q.details ? { d: q.details } : {}), ...(suggestion ? { r: suggestion } : {}), bot: { id: q.routineId, name: q.bot.name, face: q.bot.face, ...(q.bot.color ? { color: q.bot.color } : {}), ...(q.bot.wear ? { wear: q.bot.wear } : {}) } };
     const sealed = await this.d.keys.seal(this.owner(q.uid), PURPOSE, JSON.stringify(body));
     const row = (await this.d.control.m(api.bots.createDecision, { uid: q.uid as never, routineId: q.routineId, questionId: q.questionId, iv: sealed.iv, ct: sealed.ciphertext, urgent: true, now: this.now() })) as unknown as DecisionRow;
     // The work comes with the question, so it's decided on what was done, not on its description.
     const work = q.details ? `\n\n${q.details.length > 6_000 ? `${q.details.slice(0, 6_000)}…\n\n(The rest is in ${q.bot.name}'s thread.)` : q.details}` : "";
-    const text = `${q.bot.name} asks: ${q.question}${work}${suggestion ? `\n\nI'd go with “${suggestion.option}”${suggestion.why ? `: ${suggestion.why}` : "."}` : ""}`;
+    // Files with the question (a picture for a post) stay in the bot's thread, where they open.
+    const attached = q.files?.length ? `\n\n📎 ${q.files.join(", ")}: in ${q.bot.name}'s thread.` : "";
+    const text = `${q.bot.name} asks: ${q.question}${work}${attached}${suggestion ? `\n\nI'd go with “${suggestion.option}”${suggestion.why ? `: ${suggestion.why}` : "."}` : ""}`;
     await this.d.ambient.say(q.uid, text, String(row.id));
     for (const channel of this.d.channels) {
       void channel

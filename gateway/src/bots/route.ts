@@ -764,15 +764,17 @@ export function botRunRouter(d: { bots: BotService; history?: HistorySearch }): 
     return true;
   };
 
-  r.post("/v1/bot/ask", json, async (req, res) => {
+  r.post("/v1/bot/ask", express.json({ limit: "16mb" }), async (req, res) => {
     if (slowDown(req, res)) return;
-    const body = z.object({ question: z.string().trim().min(1).max(2_000), choices: z.array(z.string().max(120)).max(6).optional(), details: z.string().max(20_000).optional() }).safeParse(req.body);
+    const body = z
+      .object({ question: z.string().trim().min(1).max(2_000), choices: z.array(z.string().max(120)).max(6).optional(), details: z.string().max(20_000).optional(), files: z.array(ChatAttachment).max(4).default([]) })
+      .safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Ask a question (up to 2,000 characters), with up to 6 choices and up to 20,000 characters of details." });
       return;
     }
     try {
-      res.json(await d.bots.ask(req.headers.authorization, body.data.question, body.data.choices, body.data.details));
+      res.json(await d.bots.ask(req.headers.authorization, body.data.question, body.data.choices, body.data.details, checkAttachments(body.data.files)));
     } catch (err) {
       fail(res, err);
     }
@@ -815,15 +817,19 @@ export function botRunRouter(d: { bots: BotService; history?: HistorySearch }): 
     }
   });
 
-  r.post("/v1/bot/reply", json, async (req, res) => {
+  // A run's message while it works: an answer, or files it made for its owner (send_file).
+  r.post("/v1/bot/reply", express.json({ limit: "16mb" }), async (req, res) => {
     if (slowDown(req, res)) return;
-    const body = z.object({ text: z.string().trim().min(1).max(20_000) }).safeParse(req.body);
+    const body = z
+      .object({ text: z.string().trim().max(20_000).default(""), files: z.array(ChatAttachment).max(4).default([]) })
+      .refine((b) => b.text.length > 0 || b.files.length > 0)
+      .safeParse(req.body);
     if (!body.success) {
-      res.status(400).json({ error: "bad_request", message: "Send the answer's text." });
+      res.status(400).json({ error: "bad_request", message: "Send the answer's text, or files (up to 4)." });
       return;
     }
     try {
-      await d.bots.runReply(req.headers.authorization, body.data.text);
+      await d.bots.runReply(req.headers.authorization, body.data.text, checkAttachments(body.data.files));
       res.status(204).end();
     } catch (err) {
       fail(res, err);
@@ -900,16 +906,24 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
     res.status(ok ? 204 : 404).end();
   });
 
-  r.post("/v1/host/ambient/:jobId", json, async (req, res) => {
+  // Ambient's reply from the computer, with the files it put in its outbox for the person.
+  r.post("/v1/host/ambient/:jobId", express.json({ limit: "16mb" }), async (req, res) => {
     const h = await host(req, res);
     if (!h) return;
-    const body = z.object({ text: z.string().max(100_000).optional(), error: z.string().max(2_000).optional() }).safeParse(req.body);
+    const body = z.object({ text: z.string().max(100_000).optional(), error: z.string().max(2_000).optional(), files: z.array(ChatAttachment).max(4).optional() }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Send the reply's text, or what went wrong." });
       return;
     }
     const id = String(req.params.jobId);
-    const ok = body.data.error !== undefined ? d.computers.fail(h.id, id, body.data.error) : d.computers.reply(h.id, id, body.data.text ?? "");
+    let files: ChatAttachment[] = [];
+    try {
+      files = checkAttachments(body.data.files ?? []);
+    } catch (err) {
+      // Files that can't go with a message (a type or size the chat doesn't take): the text still does.
+      console.warn(`[ambient] files from ${h.name} left out: ${(err as Error).message}`);
+    }
+    const ok = body.data.error !== undefined ? d.computers.fail(h.id, id, body.data.error) : d.computers.reply(h.id, id, body.data.text ?? "", files);
     if (!ok) {
       res.status(404).json({ error: "no_such_message", message: "That message isn't waiting for a reply anymore." });
       return;

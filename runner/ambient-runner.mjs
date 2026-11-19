@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.12.2";
+const VERSION = "0.13.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -888,7 +888,10 @@ async function ambientService() {
     p.child.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: `${history}${job.text || "(See the attached files.)"}${files}` }] } })}\n`);
     try {
       const r = await result;
-      await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text } : { error: r.text || "Claude Code couldn't answer" });
+      // What Ambient put in its outbox for the person: with the reply, then moved to outbox/sent.
+      const sent = r.ok ? outbox(folderOf(uid)) : { files: [], moved: () => {} };
+      await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text, ...(sent.files.length ? { files: sent.files } : {}) } : { error: r.text || "Claude Code couldn't answer" });
+      sent.moved();
       log(`Answered ${uid} (${r.turns ?? "?"} turns${r.costUsd !== undefined ? `, $${r.costUsd.toFixed(2)}` : ""})`);
     } catch (err) {
       await call(cfg, "POST", `/v1/host/ambient/${job.id}`, { error: err.message.slice(0, 1900) }).catch(() => {});
@@ -1003,6 +1006,43 @@ async function ambientService() {
     }
     await call(cfg, "POST", `/v1/host/ambient/${job.id}`, body).catch(() => {});
     log(body.error ? `Upkeep: ${body.error.slice(0, 200)}` : `Upkeep: wrote the ${String(job.what || "answer").slice(0, 40)}`);
+  };
+
+  /**
+   * Ambient's outbox (its instructions say so): files it saved in ./outbox/ of the person's
+   * folder go with its reply and are shown in the chat; once sent they move to outbox/sent/.
+   * At most what a message takes; what doesn't fit waits for the next reply.
+   */
+  const outbox = (dir) => {
+    const box = join(dir, "outbox");
+    const none = { files: [], moved: () => {} };
+    if (!existsSync(box)) {
+      mkdirSync(box, { recursive: true });
+      own(box);
+      return none;
+    }
+    const names = readdirSync(box).filter((n) => !n.startsWith(".") && n !== "sent" && statSync(join(box, n)).isFile()).sort().slice(0, SHARE_MAX_FILES);
+    if (!names.length) return none;
+    const picked = [];
+    let total = 0;
+    for (const n of names) {
+      const size = statSync(join(box, n)).size;
+      if (!SHARE_TYPES[(n.split(".").pop() || "").toLowerCase()] || total + size > SHARE_MAX_BYTES) continue;
+      total += size;
+      picked.push(n);
+    }
+    const out = picked.length ? shareable(picked.map((n) => join(box, n))) : { files: [] };
+    if (out.error || !out.files.length) return none;
+    return {
+      files: out.files,
+      moved: () => {
+        const sentDir = join(box, "sent");
+        mkdirSync(sentDir, { recursive: true });
+        own(sentDir);
+        for (const n of picked) renameSync(join(box, n), join(sentDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${n}`));
+        log(`Sent ${picked.length} file(s) from the outbox with the reply`);
+      },
+    };
   };
 
   /** Each person's turns in order (a promise chain per uid): one chain for the chat, one for the rest. */
@@ -1330,7 +1370,7 @@ const ADAPTERS = {
       // `system`: the bot's instructions for this run from the gateway (runner 0.8.0 on); older
       // gateways send none, and the runner's own text stays.
       const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
-      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__search_history,mcp__ambient");
+      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__send_file,mcp__ambient-bot__search_history,mcp__ambient");
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
       return { args, stdin };
@@ -1541,6 +1581,54 @@ function signInEnv(env) {
 // ask_owner and search_history. Claude Code starts it from the run's MCP config, inside the bot's container when it
 // has one. It holds the run's token, which only asks while this run goes.
 
+/** What can go to the person as a file (the gateway takes the same): its type, by extension. */
+const SHARE_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", txt: "text/plain", md: "text/markdown", csv: "text/csv", json: "application/json", html: "text/html" };
+const SHARE_MAX_FILES = 4;
+const SHARE_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Files a bot or Ambient made, read to go to the person: `{ files }` (name, type, base64), or
+ * `{ error }` saying what's wrong (a path that isn't there, a type or size the chat doesn't take).
+ */
+function shareable(paths, base = process.cwd()) {
+  const list = (Array.isArray(paths) ? paths : [paths]).filter((p) => typeof p === "string" && p.trim()).slice(0, SHARE_MAX_FILES + 1);
+  if (!list.length) return { error: "Pass the path of a file." };
+  if (list.length > SHARE_MAX_FILES) return { error: `Up to ${SHARE_MAX_FILES} files at a time.` };
+  const files = [];
+  let total = 0;
+  for (const raw of list) {
+    const path = raw.startsWith("/") ? raw : join(base, raw);
+    let st;
+    try {
+      st = statSync(path);
+    } catch {
+      return { error: `There's no file at ${raw}.` };
+    }
+    if (!st.isFile()) return { error: `${raw} isn't a file.` };
+    const name = path.split("/").pop();
+    const type = SHARE_TYPES[(name.split(".").pop() || "").toLowerCase()];
+    if (!type) return { error: `${name}: only pictures (PNG, JPEG, GIF, WebP), PDFs and text files (txt, md, csv, json, html) can go to your owner.` };
+    total += st.size;
+    if (total > SHARE_MAX_BYTES) return { error: "Up to 10 MB together." };
+    files.push({ name, type, data: readFileSync(path).toString("base64") });
+  }
+  return { files };
+}
+
+const SEND_FILE_TOOL = {
+  name: "send_file",
+  description:
+    "Send your owner files you made (a picture, a chart, a PDF, a document): they show in your thread in the Ambient app, where your owner opens them. Paths in your container or working folder. Up to 4 files, 10 MB together; pictures, PDFs and text files. For a question about them, pass them to ask_owner as files instead.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 4, description: "The files to send." },
+      caption: { type: "string", description: "A line about them, shown with them." },
+    },
+    required: ["paths"],
+  },
+};
+
 const ASK_TOOL = {
   name: "ask_owner",
   description:
@@ -1551,6 +1639,7 @@ const ASK_TOOL = {
       question: { type: "string", description: "One short question." },
       choices: { type: "array", items: { type: "string" }, maxItems: 6, description: "Answers to pick from, if there are a few clear options." },
       details: { type: "string", maxLength: 20000, description: "What the question is about, shown with it (markdown): the draft, the pull request's link, the file, the numbers and their sources." },
+      files: { type: "array", items: { type: "string" }, maxItems: 4, description: "Paths of files the question is about (a picture for a post, a PDF), shown with it." },
       wait: { type: "boolean", description: "false: don't wait for the answer (default true)." },
     },
     required: ["question"],
@@ -1595,10 +1684,13 @@ async function botMcp() {
     if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
     return json;
   };
-  const ask = async ({ question, choices, wait, details }) => {
+  const ask = async ({ question, choices, wait, details, files }) => {
     if (typeof question !== "string" || !question.trim()) return { text: "Pass a question.", error: true };
+    const attached = Array.isArray(files) && files.length ? shareable(files) : { files: [] };
+    if (attached.error) return { text: `Couldn't attach the files: ${attached.error}`, error: true };
     const { id } = await api("POST", "/v1/bot/ask", {
       question,
+      ...(attached.files.length ? { files: attached.files } : {}),
       ...(Array.isArray(choices) && choices.length ? { choices: choices.map(String).slice(0, 6) } : {}),
       ...(typeof details === "string" && details.trim() ? { details: details.slice(0, 20000) } : {}),
     });
@@ -1614,6 +1706,12 @@ async function botMcp() {
     return {
       text: "No answer yet; they'll see the question in the Ambient app. Finish this run now: say in a sentence or two where you are and what you're waiting for. You'll be started again with the answer, in this same conversation.",
     };
+  };
+  const sendFile = async ({ paths, caption }) => {
+    const out = shareable(paths);
+    if (out.error) return { text: out.error, error: true };
+    await api("POST", "/v1/bot/reply", { text: typeof caption === "string" ? caption.slice(0, 2000) : "", files: out.files });
+    return { text: `Sent ${out.files.map((f) => f.name).join(", ")}: they're in your thread for your owner.` };
   };
   const search = async ({ query, from, to, limit }) => {
     if (typeof query !== "string" || !query.trim()) return { text: "Pass what to search for.", error: true };
@@ -1637,9 +1735,12 @@ async function botMcp() {
       if (m.method === "initialize") {
         send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: m.params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "ambient-bot", version: VERSION } } });
       } else if (m.method === "tools/list") {
-        send({ jsonrpc: "2.0", id: m.id, result: { tools: [ASK_TOOL, SEARCH_TOOL] } });
+        send({ jsonrpc: "2.0", id: m.id, result: { tools: [ASK_TOOL, SEND_FILE_TOOL, SEARCH_TOOL] } });
       } else if (m.method === "tools/call" && m.params?.name === "ask_owner") {
         const out = await ask(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't ask: ${err.message}. Decide yourself if you can, and say so in your summary.`, error: true }));
+        send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
+      } else if (m.method === "tools/call" && m.params?.name === "send_file") {
+        const out = await sendFile(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't send it: ${err.message}`, error: true }));
         send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: out.text }], ...(out.error ? { isError: true } : {}) } });
       } else if (m.method === "tools/call" && m.params?.name === "search_history") {
         const out = await search(m.params.arguments ?? {}).catch((err) => ({ text: `Couldn't search: ${err.message}`, error: true }));

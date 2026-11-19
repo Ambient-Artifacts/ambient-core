@@ -224,6 +224,8 @@ echo "$@" > args.txt
 n=0
 while IFS= read -r line; do
   n=$((n+1))
+  # Asked for a chart: it saves one in its outbox, which goes with the reply.
+  case "$line" in *"make a chart"*) mkdir -p outbox; printf 'chart-bytes' > outbox/chart.png ;; esac
   echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"is_error\\":false,\\"result\\":\\"reply $n\\",\\"session_id\\":\\"amb-1\\",\\"num_turns\\":1}"
 done
 `,
@@ -292,6 +294,16 @@ done
     // The chat's session goes on where it was: its next reply is its fourth.
     await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Third" });
     expect((await settled()).messages.at(-1)?.text, out).toBe("reply 4");
+    // A file it made: saved in its outbox, it comes with the reply and shows in the chat; the outbox
+    // is emptied (outbox/sent keeps it on the computer).
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "make a chart" });
+    const withChart = (await settled()).messages.at(-1) as unknown as { text: string; files: { id: string; name: string; type: string }[] };
+    expect(withChart.files, out).toEqual([expect.objectContaining({ name: "chart.png", type: "image/png" })]);
+    const chart = await appRaw(s, lena.access_token, "GET", `/v1/app/ambient/chat/files/${withChart.files[0]!.id}`);
+    expect(await chart.text()).toBe("chart-bytes");
+    const box = join(dir, "ambient", lena.user.uid, "outbox");
+    expect(readdirSync(box).filter((n) => n !== "sent")).toEqual([]);
+    expect(readdirSync(join(box, "sent")).some((n) => n.endsWith("chart.png"))).toBe(true);
     expect(JSON.parse(readFileSync(join(dir, "state", "state.json"), "utf8")).ambientSessions).toEqual({ [lena.user.uid]: "amb-1" });
     p.kill();
     await new Promise((r) => setTimeout(r, 200));
