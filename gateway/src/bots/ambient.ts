@@ -360,7 +360,7 @@ export class AmbientChat {
       text =
         this.d.computersOf && (await this.d.computersOf(uid).catch(() => [])).length
           ? "Your computer that runs Ambient isn't connected right now. Once it's back online, ask again."
-          : "I can't answer yet: Ambient runs on your own computer, and none is connected. Connect one in the app under Bots.";
+          : "I can't answer yet: I run on your own computer, a Linux server (a small VPS is enough) with Claude Code signed in to your Claude plan. Connect one in the app: Bots, then Connect a Computer (or Settings, then Computers). It takes about five minutes.";
     } else {
       try {
         text =
