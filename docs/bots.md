@@ -694,6 +694,15 @@ it (runner 0.9.2, Claude Code bots):
 
 Codex bots keep the old way for now (a message starts the next run).
 
+## The brain for bots
+
+Every bot's run reads the brain, the way an employee's AI app does (gateway/src/mcp/bot-principal.ts). Its MCP config has Ambient's MCP next to `ambient-bot` (ask_owner, search_history), signed in with the run's token, so it works only while the run goes (`mcp__ambient` in `--allowedTools`; for Codex `mcp_servers.ambient.url` with `bearer_token_env_var = "AMBIENT_RUN_TOKEN"`).
+
+- **What it reads:** what its owner may read. A personal bot gets the owner's wiki and their teams'; a team bot gets that team's only, never a member's personal wiki.
+- **What it may do:** `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items` and `transcript` to read; `suggest_correction` and `log_work` to write, as anyone may (`BOT_TOOLS`). It can't change pages, save notes in someone's name or share them, and none of the settings, bots, computers, accounts or secrets tools exist for it. Amb keeps all of them; it acts for the person.
+- **Who wrote it:** a correction says "the bot <name>", a work log's tool is "<name> (bot)"; both carry the owner as the person they're from.
+- **Its instructions** tell it to look in the brain before it answers or decides anything about people, projects, customers or earlier decisions.
+
 ## History: nothing is forgotten
 
 Amb's chat and every bot's thread are kept in full (sealed), no longer cut at the newest 200 or 300

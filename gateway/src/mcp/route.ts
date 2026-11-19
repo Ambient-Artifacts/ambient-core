@@ -54,6 +54,8 @@ export function mcpRouter(deps: {
   version: string;
   /** The user's name, for the instructions an app gets when it connects. */
   userName?: (uid: string) => Promise<string | undefined>;
+  /** A bot's run signing in with its run token (bot-principal.ts); null for any other token. */
+  botPrincipal?: (authorization: string | undefined, target: ResourceTarget) => Promise<Principal | null>;
   /** Teams and the person's profile, and their upkeep (account-tools.ts). */
   people?: PeopleService;
   upkeep?: (uid: string) => Promise<UpkeepState>;
@@ -98,7 +100,9 @@ export function mcpRouter(deps: {
     }
     try {
       const proof = req.headers.dpop;
-      res.locals.principal = await deps.verify(req.headers.authorization, where.target, { method: req.method, proof: typeof proof === "string" ? proof : undefined });
+      res.locals.principal =
+        (await deps.botPrincipal?.(req.headers.authorization, where.target)) ??
+        (await deps.verify(req.headers.authorization, where.target, { method: req.method, proof: typeof proof === "string" ? proof : undefined }));
     } catch (err) {
       if (!(err instanceof AuthError)) return next(err);
       if (err.strike) failures.add(address);
