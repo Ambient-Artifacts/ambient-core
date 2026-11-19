@@ -73,7 +73,7 @@ export class BotService {
       /** Files sent with messages in its thread, kept so the thread shows them again (attachments.ts). */
       attachments?: Attachments;
       /** A bot's question goes to Ambient first (DecisionService); without it, straight to the channels. */
-      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; delegate: "never" | "brain" | "most"; team: string | null }) => void;
+      onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; files?: string[]; delegate: "never" | "brain" | "most"; team: string | null }) => void;
       now?: () => number;
     },
   ) {}
@@ -213,7 +213,7 @@ export class BotService {
 
   /** A run asks its bot's owner; every channel gets the question. Returns the question's id. */
   /** `details`: what the question is about, shown with it (the draft, the PR's link, the file). */
-  async ask(authorization: string | undefined, question: string, choices: string[] = [], details?: string): Promise<{ id: string }> {
+  async ask(authorization: string | undefined, question: string, choices: string[] = [], details?: string, incoming: IncomingFile[] = []): Promise<{ id: string }> {
     const runTokenHash = this.tokenHash(authorization);
     const who = await this.d.routines.control.q(api.bots.runOwner, { runTokenHash });
     if (!who) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
@@ -221,7 +221,9 @@ export class BotService {
     const text = question.trim().slice(0, QUESTION_MAX);
     const picks = choices.map((c) => c.trim().slice(0, 120)).filter(Boolean).slice(0, 6);
     const work = details?.trim().slice(0, DETAILS_MAX) || undefined;
-    const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks, ...(work ? { details: work } : {}) });
+    // The files it asks about (a picture for a post, a PDF): shown with the question.
+    const files = incoming.length && this.d.attachments ? await this.d.attachments.save(owner, { routineId: String(who.routineId) }, incoming) : [];
+    const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks, ...(work ? { details: work } : {}), files });
     const out = await this.d.routines.control.m(api.bots.ask, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
     this.onEvent?.({ kind: "bot_asked", uid: String(out.notify), routineId: String(out.routineId), bot: who.name, text, questionId: String(out.questionId) });
@@ -235,6 +237,7 @@ export class BotService {
         question: text,
         choices: picks,
         ...(work ? { details: work } : {}),
+        ...(files.length ? { files: files.map((f) => f.name) } : {}),
         delegate: (who as { delegate?: "never" | "brain" | "most" }).delegate ?? "brain",
         team: out.team,
       });
@@ -280,12 +283,17 @@ export class BotService {
   }
 
   /** The run answered a message it took in: into the thread now, not only at the end of the run. */
-  async runReply(authorization: string | undefined, text: string): Promise<void> {
+  /**
+   * The run's message into its thread while it works: an answer to a message, or files it made
+   * for its owner to see (send_file: a picture, a PDF), stored like the files people send.
+   */
+  async runReply(authorization: string | undefined, text: string, incoming: IncomingFile[] = []): Promise<void> {
     const runTokenHash = this.tokenHash(authorization);
     const who = await this.d.routines.control.q(api.bots.runOwner, { runTokenHash });
     if (!who) throw refused("run_over", "This run is over.", 409);
     const owner = this.ownerOf({ teamId: who.teamId ? String(who.teamId) : null, createdBy: String(who.createdBy) });
-    const sealed = await sealMessage(this.d.routines.keys, owner, { text: text.trim().slice(0, MESSAGE_MAX) });
+    const files = incoming.length && this.d.attachments ? await this.d.attachments.save(owner, { routineId: String(who.routineId) }, incoming) : [];
+    const sealed = await sealMessage(this.d.routines.keys, owner, { text: text.trim().slice(0, MESSAGE_MAX), files });
     const out = await this.d.routines.control.m(api.bots.runReply, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over.", 409);
   }
