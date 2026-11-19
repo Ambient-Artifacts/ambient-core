@@ -209,7 +209,7 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
 }
 
 /** The computers' API, and the runner script itself (public: it holds no secrets). */
-export function hostRouter(d: { routines: RoutineService; directory: Directory; runnerSource?: string }): Router {
+export function hostRouter(d: { routines: RoutineService; directory: Directory; runnerSource?: string; installSource?: string }): Router {
   const r = express.Router();
   const json = express.json({ limit: "256kb" });
   // limiter() prunes only old entries: clearing the map when it filled up let anyone reset every
@@ -223,6 +223,15 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
       return;
     }
     res.type("text/javascript").set("cache-control", "no-store").send(d.runnerSource);
+  });
+
+  // The one-line setup: curl -fsSL <origin>/install.sh | sudo bash -s <code> (runner/install.sh).
+  r.get("/install.sh", (_req, res) => {
+    if (!d.installSource) {
+      res.status(404).end();
+      return;
+    }
+    res.type("text/x-shellscript").set("cache-control", "no-store").send(d.installSource);
   });
 
   const host = async (req: Request, res: Response, next: NextFunction) => {
@@ -268,6 +277,18 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
   r.get("/v1/host/claude", host, async (_req, res) => {
     try {
       res.set("cache-control", "no-store").json(await d.routines.hostClaude(hostOf(res)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // The computer stores its own Claude plan (install.sh, after `claude setup-token` there).
+  r.post("/v1/host/claude", host, json, async (req, res) => {
+    const body = ClaudeToken.safeParse(req.body);
+    if (!body.success) return badRequest(res, body.error);
+    try {
+      await d.routines.hostSetClaude(hostOf(res), body.data.kind, body.data.token);
+      res.status(204).end();
     } catch (err) {
       fail(res, err);
     }

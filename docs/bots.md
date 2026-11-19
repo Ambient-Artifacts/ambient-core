@@ -214,6 +214,18 @@ chat says no computer is connected.
 
 ## Whose Claude a computer uses
 
+- The computer can store its own Claude plan (runner 0.10.0, `install.sh` after `claude setup-token`
+  there): `POST /v1/host/claude` (computer token) with `{ "kind": "plan" | "key", "token": "…" }`
+  → 204. The same checks and sealing as the app's `PUT /v1/app/computers/:id/claude`; a team
+  server's is stored with `setClaudeByHost`, "by" the computer's setup.
+- Sync's `info` carries `claudeSignedIn` (runner 0.10.0): whether Claude Code can run there (a token
+  or key, or Claude Code's own login for the routine user). The gateway keeps it in memory, never in
+  Convex; computers in the app's API carry `claudeSignedIn: true | false | null` (null: not known
+  yet: an older runner, or no sync since the gateway started), true also while a stored plan or key
+  is in use.
+- Runs with a token or key get a Claude Code settings folder of the runner's
+  ([What the setup leaves alone](self-hosting.md#what-the-setup-leaves-alone)).
+
 Each computer (a person's own, or a team's server) signs its runs and Ambient in to Claude one
 way, set in the app or by Ambient: a person's Claude plan (a token from `claude setup-token`), an
 Anthropic API key, or whatever the computer itself has (`/etc/ambient-runner/extra.env`, the

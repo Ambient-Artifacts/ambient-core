@@ -186,13 +186,44 @@ The repo must be empty, or already an Ambient wiki. A personal wiki syncs every 
 
 ## Routines
 
-A routine is a prompt that Claude Code runs on a schedule on a computer you control: Linux with systemd, Node 18+ and Claude Code signed in. People create routines from any connected AI app (`create_routine`, `run_routine`, …). To connect a computer to someone's account:
+A routine is a prompt that Claude Code runs on a schedule on a computer you control: Linux with systemd. People create routines from any connected AI app (`create_routine`, `run_routine`, …). To connect a computer to someone's account:
 
 ```sh
 docker compose exec gateway admin computer-code you@example.com --name "Build box"
 ```
 
-It prints two commands to run on that computer. The runner it downloads already points at your server.
+It prints one line to run on that computer, the same line the app shows under Bots → Connect a Computer. See [Connect a computer](#connect-a-computer).
+
+## Connect a computer
+
+A computer runs Ambient's chat, a person's (or a team's) bots and routines: any Linux server with systemd, such as a small VPS (2 GB of memory is plenty for a few bots), with the person's own Claude plan. One line, as root, with the code from the app:
+
+```sh
+curl -fsSL https://<your server>/install.sh | sudo bash -s ABCD-1234
+```
+
+`install.sh` (served by the gateway from `runner/install.sh`, with its address in it) does, in order:
+
+1. **Checks.** Root, Linux, systemd; a note (not a stop) under 1.5 GB of memory or 3 GB of free disk.
+2. **Installs only what's missing.** git; Node for the whole system (Node 22 from NodeSource with apt or dnf, only when there's no Node 18 or newer that root owns); Claude Code for the bots' user (Anthropic's native installer, only when that user has none).
+3. **The bots' user.** A system user `ambient` (home `/var/lib/ambient`, no password) that Ambient's sessions and bots run as. `--user NAME` picks an existing user instead; a computer set up before keeps the user it has.
+4. **Connects.** Downloads the runner from the same server and runs `ambient-runner.mjs setup <code>`.
+5. **Signs Claude in.** Unless the computer already has a sign-in, it runs `claude setup-token` in the terminal (open the link, sign in, paste the code back), checks the token with one tiny request, and stores it in Ambient as the computer's Claude plan (`POST /v1/host/claude`, sealed with the owner's key, fetched back by the computer). With no terminal, or when skipped, the app's Claude sheet does the same.
+
+Running it again does only what's still missing.
+
+### What the setup leaves alone
+
+The computer may already run things, Claude Code among them (Remote Control, other jobs):
+
+- It never upgrades or replaces an installed Node, nvm, or Claude Code, and never touches another service. The runner's units are named `ambient-runner*` and `ambient-routine-*`; it only ever removes units with those names. Its files are `/etc/ambient-runner`, `/opt/ambient-runner`, `/var/lib/ambient-runner` and, in the bots' user's home, `ambient/` and `ambient-routines/`.
+- `claude setup-token` runs with a settings folder of its own, deleted after: an existing Claude Code login stays as it is.
+- **Ambient's sessions never use the user's own Claude Code settings.** With a sign-in from Ambient (or a token or key in `extra.env`), every run gets `CLAUDE_CONFIG_DIR=/var/lib/ambient-runner/claude/<user>`: the user's `~/.claude` (hooks, plugins, MCP servers, settings, CLAUDE.md, history) never reaches Ambient's sessions, and Ambient's sessions never show up in the user's `claude --resume`. Every run gets only Ambient's MCP servers (`--strict-mcp-config`). A computer that signs in with Claude Code's own login (nothing stored) needs that user's folder, so its runs read only project and local settings (`--setting-sources project,local`). `AMBIENT_CLAUDE_CONFIG=own` in `/etc/ambient-runner/runner.env` keeps the user's settings for everything, for a computer whose bots should use the user's own MCP servers.
+- A computer set up before runner 0.10.0 moves to the runner's settings folder with the update: sessions kept in the user's folder can't be resumed from it, so the next chat message and the next run of each bot start a new session once (a bot continues from its handoff).
+
+By hand, without the script: install Node 18+ and Claude Code, download `https://<your server>/runner/ambient-runner.mjs` and run `sudo node ambient-runner.mjs setup <code> [--user NAME]`.
+
+Status: `sudo node /opt/ambient-runner/ambient-runner.mjs status`. Logs: `journalctl -u ambient-runner -u ambient-runner-ambient -u 'ambient-routine-*'`. Remove it: `sudo node /opt/ambient-runner/ambient-runner.mjs uninstall` (then remove the computer in the app; the `ambient` user stays: `sudo userdel -r ambient`).
 
 ## Connect GitHub
 

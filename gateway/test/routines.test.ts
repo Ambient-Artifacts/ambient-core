@@ -44,8 +44,8 @@ describe("computers", () => {
     expect(added.status).toBe(200);
     const code = String(added.json.code);
     expect(code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
-    expect(String(added.json.commands)).toContain(`curl -fsSL ${s.origin}/runner/ambient-runner.mjs`);
-    expect(String(added.json.commands)).toContain(`setup ${code}`);
+    // One line: install.sh installs what's missing, connects with the code and signs Claude in.
+    expect(added.json.commands).toBe(`curl -fsSL ${s.origin}/install.sh | sudo bash -s ${code}`);
     expect((added.json.computer as { ready: boolean }).ready).toBe(false);
 
     const setup = await hostCall("", "POST", "/v1/host/setup", { code: code.toLowerCase(), info });
@@ -72,6 +72,46 @@ describe("computers", () => {
     const res = await fetch(`${s.origin}/runner/ambient-runner.mjs`);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain(`const DEFAULT_SERVER = "${s.origin}";`);
+  });
+
+  it("serve install.sh, pointed at this gateway, and valid bash", async () => {
+    const res = await fetch(`${s.origin}/install.sh`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/x-shellscript");
+    const script = await res.text();
+    expect(script).toContain(`DEFAULT_SERVER="${s.origin}"`);
+    expect(script).toContain(`"$SERVER/runner/ambient-runner.mjs"`);
+    const dir = mkdtempSync(join(tmpdir(), "ambient-install-"));
+    writeFileSync(join(dir, "install.sh"), script);
+    const check = spawn("bash", ["-n", join(dir, "install.sh")]);
+    expect(await new Promise((r) => check.on("close", r))).toBe(0);
+  });
+
+  it("say whether Claude can run there, from what the runner reports", async () => {
+    const computer = async () => ((await appCall(s, lena, "GET", "/v1/app/routines")).json.computers as { id: string; claudeSignedIn: boolean | null }[]).find((c) => c.id === computerId)!;
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info: { ...info, claudeSignedIn: false } })).status).toBe(200);
+    expect((await computer()).claudeSignedIn).toBe(false);
+    // Convex keeps the info without it (its validator has no such field).
+    const rows = await s.t.run(async (ctx) => ctx.db.query("routineHosts").collect());
+    expect(JSON.stringify(rows.map((r) => r.info))).not.toContain("claudeSignedIn");
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info: { ...info, claudeSignedIn: true } })).status).toBe(200);
+    expect((await computer()).claudeSignedIn).toBe(true);
+  });
+
+  it("store their own Claude plan (install.sh), sealed, and fetch it back", async () => {
+    const token = `sk-ant-oat01-${"x".repeat(40)}`;
+    expect((await hostCall(host, "POST", "/v1/host/claude", { kind: "plan", token: "not-a-token-at-all-really" })).json.error).toBe("bad_token");
+    expect((await hostCall("ambient_host_nope", "POST", "/v1/host/claude", { kind: "plan", token })).status).toBe(401);
+    expect((await hostCall(host, "POST", "/v1/host/claude", { kind: "plan", token })).status).toBe(204);
+    const rows = await s.t.run(async (ctx) => ctx.db.query("routineHosts").collect());
+    expect(JSON.stringify(rows)).not.toContain(token);
+    const got = await hostCall(host, "GET", "/v1/host/claude");
+    expect(got.json.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: token });
+    const list = await appCall(s, lena, "GET", "/v1/app/routines");
+    const c = (list.json.computers as { id: string; claudeSignedIn: boolean; claudeAccount: { use: string } }[]).find((x) => x.id === computerId)!;
+    expect(c).toMatchObject({ claudeSignedIn: true, claudeAccount: { use: "plan" } });
+    // Back to the computer's own sign-in for the tests after this one.
+    expect((await appCall(s, lena, "POST", `/v1/app/computers/${computerId}/claude/use`, { use: "computer" })).status).toBe(200);
   });
 
   it("refuse unknown tokens", async () => {
@@ -417,7 +457,9 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     expect(out.out).toContain("· Bash: git status");
     expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toBe("Draft next Monday's post.");
     const args = readFileSync(join(dir, "work", "args.txt"), "utf8");
-    expect(args).toContain("-p --output-format stream-json --verbose --permission-mode auto --append-system-prompt");
+    // No sign-in of its own here: the user's Claude Code login, with only project and local settings.
+    expect(args).toContain("-p --output-format stream-json --verbose --permission-mode auto --setting-sources project,local --append-system-prompt");
+    expect(readFileSync(join(dir, "work", "env.txt"), "utf8")).not.toContain("CLAUDE_CONFIG_DIR=");
     expect(args).toContain('Ambient routine "Blog draft"');
     const env = readFileSync(join(dir, "work", "env.txt"), "utf8");
     expect(env).not.toContain("AMBIENT_HOST_TOKEN");
@@ -425,6 +467,32 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     expect(out.out).not.toContain("ghp_personal_2");
     const runs = (await appCall(s, lena, "GET", `/v1/app/routines/${routineId}/runs`)).json.runs as { status: string; trigger: string; summary: string; costUsd: number }[];
     expect(runs[0]).toMatchObject({ status: "succeeded", trigger: "manual", summary: "Drafted the post and opened PR #3.", costUsd: 0.42 });
+  });
+
+  it("with a sign-in of its own, a run gets a settings folder of the runner's, never the user's ~/.claude", async () => {
+    const claudeEnv = join(dir, "claude-plan.env");
+    writeFileSync(claudeEnv, `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-${"t".repeat(30)}\n`);
+    const out = await runner(["run", routineId], { AMBIENT_CLAUDE_ENV: claudeEnv });
+    expect(out.code, out.out).toBe(0);
+    const args = readFileSync(join(dir, "work", "args.txt"), "utf8");
+    expect(args).not.toContain("--setting-sources");
+    const runEnv = readFileSync(join(dir, "work", "env.txt"), "utf8");
+    const configDir = /^CLAUDE_CONFIG_DIR=(.*)$/m.exec(runEnv)?.[1];
+    expect(configDir).toBe(join(env.AMBIENT_STATE_DIR!, "claude", "root"));
+    expect(existsSync(configDir!)).toBe(true);
+    // Turned off in runner.env: the user's own settings again.
+    const own = await runner(["run", routineId], { AMBIENT_CLAUDE_ENV: claudeEnv, AMBIENT_CLAUDE_CONFIG: "own" });
+    expect(own.code, own.out).toBe(0);
+    expect(readFileSync(join(dir, "work", "env.txt"), "utf8")).not.toContain("CLAUDE_CONFIG_DIR=");
+  });
+
+  it("claude-status says whether Claude can run here", async () => {
+    const claudeEnv = join(dir, "claude-plan.env");
+    expect((await runner(["claude-status"], { AMBIENT_CLAUDE_ENV: claudeEnv })).out.trim()).toBe("signed-in");
+    // The stand-in claude has no `auth status`: not signed in.
+    const missing = await runner(["claude-status"]);
+    expect(missing.out.trim()).toBe("missing");
+    expect(missing.code).toBe(1);
   });
 
   it("a missing folder fails the run with a sentence", async () => {

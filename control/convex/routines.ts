@@ -687,6 +687,23 @@ export const setClaude = mutation({
   },
 });
 
+/**
+ * The computer stores its own Claude plan (install.sh signed Claude in there with `claude
+ * setup-token`): sealed by the gateway, and used. For a team's server, whose sign-in only its
+ * owner and admins change in the app; a person's computer goes through setClaude as its owner.
+ */
+export const setClaudeByHost = mutation({
+  args: { ...secretArg, hostId: v.id("routineHosts"), kind: v.union(v.literal("plan"), v.literal("key")), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, hostId, kind, iv, ct, now }) => {
+    assertService(secret);
+    const h = await ctx.db.get(hostId);
+    if (!h?.tokenHash) return { ok: false as const, error: "no_such_computer" };
+    const stored = { iv, ct, by: "the computer's setup", at: now };
+    await ctx.db.patch(h._id, { claude: { ...(h.claude ?? {}), use: kind, [kind]: stored } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
 /** Switch which sign-in the computer uses. */
 export const useClaude = mutation({
   args: { ...secretArg, uid: v.id("users"), id: v.string(), use: v.union(v.literal("plan"), v.literal("key"), v.literal("computer")) },

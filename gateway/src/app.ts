@@ -48,7 +48,7 @@ import { DecisionService } from "./bots/decisions.ts";
 import { Heartbeat } from "./bots/heartbeat.ts";
 import { AppChannel } from "./channels/channel.ts";
 import { RoutineKeys } from "./routines/keys.ts";
-import { loadRunner, RoutineService } from "./routines/service.ts";
+import { loadInstaller, loadRunner, RoutineService } from "./routines/service.ts";
 import { sessionUploadRouter } from "./sessions/route.ts";
 import { SessionService } from "./sessions/service.ts";
 import { MicrosoftConnectFlow, MicrosoftConnector } from "./microsoft-connect.ts";
@@ -131,7 +131,9 @@ export function createApp(deps: AppDeps) {
   const verify = createBearerVerifier({ issuer: config.origin, signingKeys: config.signingKeys, directory, pats });
   const sessions = new SessionService({ control, personal, directory, teams });
   const notifier = new Notifier({ control, send: deps.push ?? apnsSender(config.apns) });
-  const runner = loadRunner(deps.runnerDir ?? fileURLToPath(new URL("../../runner/", import.meta.url)), config.origin);
+  const runnerDir = deps.runnerDir ?? fileURLToPath(new URL("../../runner/", import.meta.url));
+  const runner = loadRunner(runnerDir, config.origin);
+  const installer = loadInstaller(runnerDir, config.origin);
   const routineKeys = new RoutineKeys({ control, personal, master: config.masterKey });
   // Bots' folders, memory and handoffs, and Amb's memory (docs/bots.md, "A bot's folder").
   const folder = new BotFolder({ control, keys: routineKeys });
@@ -333,7 +335,7 @@ export function createApp(deps: AppDeps) {
   }
   app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, version: VERSION, userName }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
-  app.use(hostRouter({ routines, directory, runnerSource: runner?.source }));
+  app.use(hostRouter({ routines, directory, runnerSource: runner?.source, installSource: installer }));
   app.use(botRunRouter({ bots, history: folders.history }));
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(ambientHostRouter({ routines, directory, computers }));
