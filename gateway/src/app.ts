@@ -33,7 +33,7 @@ import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
 import { ambientHostRouter, botRunRouter, githubHookRouter } from "./bots/route.ts";
 import { GitHubEvents } from "./bots/github.ts";
-import { GitHubApp } from "./bots/github-app.ts";
+import { GitHubApps } from "./bots/github-apps.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
@@ -356,9 +356,11 @@ export function createApp(deps: AppDeps) {
   folders.github = github;
   routines.githubFor = (owner, id) => github.forRun(owner, id);
   // Connect GitHub: Ambient's GitHub App, when it's set up (docs/bots.md, "Connect GitHub").
-  const githubApp = config.githubApp ? new GitHubApp({ control, keys: routineKeys, config: config.githubApp, github, fetchImpl: deps.githubFetch ?? deps.fetchImpl }) : undefined;
+  // Ambient's GitHub Apps: the shared one (its config), the template roles' and bots' own (Convex).
+  const githubApp = new GitHubApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, github, shared: config.githubApp, apiBase: config.githubApp?.apiBase, fetchImpl: deps.githubFetch ?? deps.fetchImpl });
   folders.githubApp = githubApp;
-  if (githubApp) routines.githubToken = async (owner, id) => githubApp.tokenFor(owner, (await github.watchOf(owner, id)).repos);
+  github.appOf = async (owner, bot) => (await githubApp.appFor(owner, bot))?.key ?? null;
+  routines.githubToken = async (owner, id) => githubApp.tokenFor(owner, { id, ...(await github.watchOf(owner, id)) });
   if (!deps.ambient?.noHeartbeat) {
     heartbeat.start();
     automations.start();

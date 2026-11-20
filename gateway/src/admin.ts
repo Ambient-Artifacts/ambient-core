@@ -53,6 +53,11 @@ Teams
   server add <server-id> <url>
       Put a team server in the pool (the Docker setup does this for its own).
 
+GitHub
+  github-app new <builder|reviewer|wiki_keeper> --account <org-or-user>
+      A link to make a template role's GitHub App (Ambient Builder, Reviewer, Wiki Keeper), each
+      its own GitHub user with just its role's access. Open it, tap Create on GitHub: done.
+
 Wikis in your own git repo (https; the access token comes on stdin, e.g. < token.txt)
   repo <email> <url> [--existing]
       Keep the user's personal wiki in step with their repo (synced every 15 minutes).
@@ -374,6 +379,18 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     const next = [...rules.filter((r) => r.match !== match), { match, team: slug }];
     await d.control.m(api.sessions.setRules, { uid: u.uid, rules: next });
     return `${u.name}'s work sessions in ${match} now go to ${slug} (after the 30-minute hold). Rules: ${next.map((r) => `${r.match} → ${r.team}`).join(", ")}`;
+  }
+
+  if (cmd === "github-app" && sub === "new") {
+    const role = need(words[2], "The role (builder, reviewer or wiki_keeper)");
+    const account = typeof flags.account === "string" ? flags.account : "";
+    if (!account) throw new AdminError("Say whose GitHub account it's made under: --account <org-or-user>.");
+    const { GitHubApps } = await import("./bots/github-apps.ts");
+    const apps = new GitHubApps({ control: d.control, keys: undefined as never, master: d.config.masterKey, origin, github: undefined as never, apiBase: d.config.githubApp?.apiBase });
+    const url = await apps.roleAppUrl(role as never, account).catch((err: Error) => {
+      throw new AdminError(err.message);
+    });
+    return `Open this within an hour and tap Create on GitHub (it's made under ${account}):\n${url}`;
   }
 
   if (cmd === "server" && sub === "add") {

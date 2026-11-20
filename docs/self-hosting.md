@@ -263,6 +263,12 @@ repos, and bots get GitHub's events and a short-lived token for just those repos
 4. Check: in the app, a bot → GitHub → Connect GitHub; pick a repo on GitHub; you land on
    "Connected". The App's page on GitHub (Advanced → Recent Deliveries) shows the deliveries.
 
+The template roles' Apps (Ambient Builder, Reviewer, Wiki Keeper: each its own GitHub user with
+just its role's access, [bots.md](bots.md#github-apps)) need no settings: for each, run
+`admin github-app new <builder|reviewer|wiki_keeper> --account <your-org>`, open the link it prints
+and tap Create on GitHub. The gateway keeps the App (sealed in Convex) and it works at once. Then
+upload each one's icon in its settings on GitHub (Display information).
+
 ## Operating it
 
 **Logs:** `docker compose logs -f gateway`, `docker compose logs -f jobs team team-jobs`. Each job's output is prefixed with its name (`[sessions]`, `[personal]`, `[health]`, `[consolidate]`).

@@ -15,6 +15,7 @@ import type * as bots from "../bots.js";
 import type * as crons from "../crons.js";
 import type * as lib_service from "../lib/service.js";
 import type * as oauth from "../oauth.js";
+import type * as githubApps from "../githubApps.js";
 import type * as personal from "../personal.js";
 import type * as push from "../push.js";
 import type * as records from "../records.js";
@@ -42,6 +43,7 @@ declare const fullApi: ApiFromModules<{
   crons: typeof crons;
   "lib/service": typeof lib_service;
   oauth: typeof oauth;
+  githubApps: typeof githubApps;
   personal: typeof personal;
   push: typeof push;
   records: typeof records;

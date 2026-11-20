@@ -240,6 +240,8 @@ export const remove = mutation({
     const messages = await ctx.db.query("botMessages").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(1000);
     for (const m of messages) await ctx.db.delete(m._id);
     for (const w of await ctx.db.query("botWakes").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(500)) await ctx.db.delete(w._id);
+    // Its own GitHub App's record (the App itself stays on GitHub until someone deletes it there).
+    for (const g of await ctx.db.query("githubApps").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(10)) await ctx.db.delete(g._id);
     // The files sent in its thread go with it.
     for (const f of await ctx.db.query("attachments").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(500)) {
       await ctx.storage.delete(f.storageId);

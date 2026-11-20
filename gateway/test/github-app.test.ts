@@ -109,7 +109,7 @@ describe("the App's settings", () => {
 
 describe("connecting", () => {
   it("says the App is there, for who may change the owner's bots", async () => {
-    expect((await call("GET", "/v1/app/github")).json).toEqual({ app: { slug: "ambient-bots", configured: true }, installations: [] });
+    expect((await call("GET", "/v1/app/github")).json).toMatchObject({ app: { slug: "ambient-bots", configured: true }, installations: [] });
     expect((await call("GET", "/v1/app/github", undefined, ben)).status).toBe(403);
   });
 

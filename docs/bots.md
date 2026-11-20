@@ -919,6 +919,50 @@ next to it, and is what's left when the server has no App (`app: null`).
 - MCP: `connect_github` gives Amb the link to hand over; `github_webhook` points to it when the
   App is there.
 
+## GitHub Apps
+
+Besides the shared App above, each template role has an App of its own, and a bot can have its own
+too, so on GitHub each shows as its own user with just its role's access. A Reviewer can then
+approve a Builder's pull request (GitHub refuses a review of one's own).
+
+- **The role Apps:** Ambient Builder, Ambient Reviewer and Ambient Wiki Keeper. A server's
+  operator makes each once: `admin github-app new <builder|reviewer|wiki_keeper> --account <org>`
+  prints a link, the operator taps Create on GitHub, and GitHub sends the browser back to
+  `/v1/github/app-created`. The gateway trades the one-time code for the App's key and webhook
+  secret, seals both with its master key into Convex (`githubApps`), and the App works at once,
+  with no restart and nothing to copy. Each is public, so anyone using the server installs it.
+- **What each may do:**
+
+  | App | Code | Pull requests | Issues | Events |
+  |---|---|---|---|---|
+  | Builder | write | write | read | PRs, reviews, comments, checks, issues |
+  | Reviewer | write in the App, **read in each run's token** (write is for merging later) | write | read | PRs, reviews, comments, checks |
+  | Wiki keeper | write | write | none | PRs, reviews, comments, checks, push |
+  | shared and a bot's own | write | write | write | all of these |
+
+- **Which App a bot works through:** a bot from a template has its role (`app` in its GitHub watch
+  record). It works through its role's App once the owner installed that App on all its repos;
+  otherwise through the shared App when that covers them; otherwise through the owner's webhook
+  and `GH_TOKEN`. A bot's own App comes first.
+- **One event, once:** a delivery reaches only the bots whose App it came through. A delivery to
+  the owner's webhook reaches only bots no App covers. A failed CI run on the default branch is
+  told once, whichever App brings it first.
+- **Connecting:**
+  - `GET /v1/app/github?routine=<id>` adds `forBot: { app, slug, role, connected }` (the App that
+    bot is meant to work through, and whether it does) and `apps`.
+  - `POST /v1/app/github/connect?routine=<id>` gives that App's install link. Without `routine`
+    it gives the shared App's.
+  - The same `routine` goes on the MCP tool `connect_github` as `bot`.
+- **A bot's own App:** `POST /v1/app/routines/:id/github/app` with `{ "account"? }` (default: the
+  owner of its first repo) → `{ "url" }`. That's the gateway's page, which posts the manifest to
+  GitHub (an organization's settings, or the user's). After Create, GitHub comes back to the
+  gateway, which keeps the App and sends the browser straight on to its install. The App is
+  private to that account and named "<bot> (<account>)". Deleting the bot drops the App's record;
+  the App itself stays on GitHub until someone deletes it there. GitHub doesn't let a service set
+  an App's icon: that's uploaded by hand in its settings (Display information).
+- **Webhooks:** the shared App at `/v1/hooks/github-app`; every other App at
+  `/v1/hooks/github-app/<hookId>`, signed with its own secret.
+
 ## Automations
 
 Things Amb does **for the person** without being asked each time. The rule: templates are for
