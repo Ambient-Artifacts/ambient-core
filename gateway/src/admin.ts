@@ -285,6 +285,7 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
       pool: true,
     });
     if (!made.ok || !made.server) {
+      if (!made.ok && made.error === "one_team") throw new AdminError(`${owner.name} is in ${(made as { team?: string }).team ?? "a team"} already, and a person is in one team.`);
       if (!made.ok && made.error !== "no_server") throw new AdminError("Give the team a name.");
       throw new AdminError("No free team server. Start one and add it with: admin server add <server-id> <url>");
     }

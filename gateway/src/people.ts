@@ -35,6 +35,11 @@ export interface SessionRule {
   team: string;
 }
 
+/** One team per person (docs/architecture.md, "One team per person"): what to do when someone in one makes or joins another. */
+function oneTeam(team?: string): string {
+  return `You're in ${team ?? "a team"} already, and a person is in one team. Leave it first (its page in Settings), then make or join this one.`;
+}
+
 export class PeopleService {
   /** Creating and joining teams: 30 a minute per account, as the app's routes always allowed. */
   private limit = limiter(30);
@@ -74,6 +79,7 @@ export class PeopleService {
         console.warn("[gateway] team creation refused: the server pool is empty");
         return { status: 503, json: { error: "no_server", message: "We're setting up more team servers. Try again in a few hours; we've been told." } };
       }
+      if (made.error === "one_team") return { status: 409, json: { error: made.error, message: oneTeam((made as { team?: string }).team) } };
       if (made.error === "too_many_teams") return { status: 403, json: { error: made.error, message: "You already own three teams. Write to us if you need another." } };
       return { status: 400, json: { error: made.error, message: "Give the team a name." } };
     }
@@ -116,6 +122,7 @@ export class PeopleService {
       if (out.ok || out.error !== "invalid_code") break;
     }
     this.d.directory.invalidate(uid);
+    if (!out.ok && out.error === "one_team") return { status: 409, json: { error: out.error, message: oneTeam((out as { team?: string }).team) } };
     if (!out.ok) return { status: 400, json: { error: out.error } };
     return { status: 200, json: { team: { slug: out.team.slug, name: out.team.name, role: out.team.role, peopleSlug: out.team.peopleSlug } } };
   }

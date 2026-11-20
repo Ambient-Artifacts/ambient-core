@@ -73,6 +73,20 @@ export const ofUser = query({
 });
 
 /** Accept an invite code (hashed by the gateway). Returns the team or an error code. */
+/**
+ * One team per person (Nikolai, 2026-11-20): the apps switch between Personal and the one team,
+ * and Settings has one team's page. The team someone is in (an active one), if any; `except`, a
+ * team that doesn't count (the one they're joining again).
+ */
+export async function teamOfUser(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, except?: Id<"teams">): Promise<Doc<"teams"> | null> {
+  for (const m of await ctx.db.query("members").withIndex("by_user", (q) => q.eq("userId", uid)).collect()) {
+    if (m.teamId === except) continue;
+    const t = await ctx.db.get(m.teamId);
+    if (t && t.status === "active") return t;
+  }
+  return null;
+}
+
 export const joinWithInvite = mutation({
   args: { ...secretArg, uid: v.id("users"), codeHash: v.string(), peopleSlug: v.string(), now: v.number() },
   handler: async (ctx, { secret, uid, codeHash, peopleSlug, now }) => {
@@ -100,6 +114,8 @@ export const joinWithInvite = mutation({
       .withIndex("by_team_user", (q) => q.eq("teamId", team._id).eq("userId", uid))
       .unique();
     if (existing) return { ok: true as const, team: shape(team, existing) };
+    const other = await teamOfUser(ctx, uid, team._id);
+    if (other) return { ok: false as const, error: "one_team", team: other.name };
     // Keep people slugs unique inside a team (two "Anna Müller"s get -2), and never hand someone
     // a removed member's page by renaming themselves after them (their own comes back to them).
     const taken = new Set(
@@ -240,6 +256,8 @@ export const createOwned = mutation({
       if (m.role === "owner" && (await ctx.db.get(m.teamId))?.status === "active") owned++;
     }
     if (owned >= MAX_OWNED_TEAMS) return { ok: false as const, error: "too_many_teams" };
+    const other = await teamOfUser(ctx, uid);
+    if (other) return { ok: false as const, error: "one_team", team: other.name };
     const server = pool ? await ctx.db.query("teamServers").withIndex("by_status", (q) => q.eq("status", "free")).first() : null;
     if (pool && !server) return { ok: false as const, error: "no_server" };
     const base = clean.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "team";
