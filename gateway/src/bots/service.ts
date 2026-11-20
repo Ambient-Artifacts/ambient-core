@@ -6,6 +6,7 @@
 //
 // Who may do what is the loops' rule: whoever sees a bot reads its thread, whoever may change it
 // writes to it (a team bot's thread: everyone in the team). Every routine is a bot, for everyone.
+import type { LiveEvent, LiveText } from "./live.ts";
 import { botLook } from "@brain/spec";
 import { api } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
@@ -73,6 +74,8 @@ export class BotService {
       /** Files sent with messages in its thread, kept so the thread shows them again (attachments.ts). */
       attachments?: Attachments;
       /** A bot's question goes to Ambient first (DecisionService); without it, straight to the channels. */
+      /** Bots' answers as they're written (bots/live.ts): a thread that opens mid-answer shows it. */
+      live?: LiveText;
       onQuestion?: (q: { uid: string; routineId: string; questionId: string; bot: { name: string; face: string; color?: string; wear?: string[] }; question: string; choices: string[]; details?: string; files?: string[]; delegate: "never" | "brain" | "most"; team: string | null }) => void;
       now?: () => number;
     },
@@ -127,7 +130,7 @@ export class BotService {
    * A bot's thread, newest last, and its open question. With `markSeen` (the app showing it, or
    * the user reading it with their AI) what it said stops being news: it goes from done to asleep.
    */
-  async thread(actor: Actor, id: string, limit = 50, opts: { markSeen?: boolean } = {}): Promise<{ messages: ThreadMessage[]; openQuestion: ThreadMessage | null; routine: Routine }> {
+  async thread(actor: Actor, id: string, limit = 50, opts: { markSeen?: boolean } = {}): Promise<{ messages: ThreadMessage[]; openQuestion: ThreadMessage | null; routine: Routine; live: LiveEvent | null }> {
     const r = await this.bot(actor, id);
     const out = await this.d.routines.control.q(api.bots.thread, { ...this.access(actor), id, limit });
     if (!out) throw refused("no_such_bot", "There's no such bot.", 404);
@@ -137,7 +140,7 @@ export class BotService {
     const routine = await this.d.routines.get(actor, id);
     const messages = await Promise.all((out.messages as unknown as MessageRow[]).map((m) => this.message(owner, m, actor.uid, routine.computer?.id)));
     const openId = out.openQuestionId ? String(out.openQuestionId) : null;
-    return { messages, openQuestion: messages.find((m) => m.id === openId) ?? null, routine };
+    return { messages, openQuestion: messages.find((m) => m.id === openId) ?? null, routine, live: this.d.live?.snapshot(id) ?? null };
   }
 
   /**
@@ -320,5 +323,7 @@ export class BotService {
     const sealed = await sealMessage(this.d.routines.keys, owner, { text: text.trim().slice(0, MESSAGE_MAX), files });
     const out = await this.d.routines.control.m(api.bots.runReply, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over.", 409);
+    // This turn's answer is in the thread: its live text goes (the run goes on with the next).
+    this.d.live?.endTurn(String(who.routineId));
   }
 }

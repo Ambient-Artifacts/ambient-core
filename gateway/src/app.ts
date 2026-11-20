@@ -27,6 +27,7 @@ import { createProvider } from "./oauth/provider.ts";
 import { PersonalStore } from "./personal.ts";
 import { apnsSender, Notifier, type PushSender } from "./push.ts";
 import { PersonalRepos } from "./repos/personal.ts";
+import { LiveText } from "./bots/live.ts";
 import { EventHub, PollingRevisionSource, Revisions, type RevisionSource } from "./revisions.ts";
 import { hostRouter } from "./routines/route.ts";
 import { BotService } from "./bots/service.ts";
@@ -182,9 +183,12 @@ export function createApp(deps: AppDeps) {
   let onQuestion: ((q: Parameters<DecisionService["onBotQuestion"]>[0]) => void) | undefined;
   // Files sent in Ambient's chat and bots' threads, kept so they show again (bots/attachments.ts).
   const attachments = new Attachments({ control, keys: routines.keys });
+  // Bots' answers as they're written: from the runner to the readers' event streams (bots/live.ts).
+  const live = new LiveText({ control });
   const bots = new BotService({
     routines,
     attachments,
+    live,
     channels: [new AppChannel(notifier)],
     startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false,
     onQuestion: (q) => (onQuestion ? onQuestion(q) : undefined),
@@ -377,7 +381,7 @@ export function createApp(deps: AppDeps) {
   // Bots' runs read the brain too, as an employee's AI app would (mcp/bot-principal.ts).
   app.use(mcpRouter({ origin: config.origin, verify, readers, routines, bots, admin, decisions, folders, settings, voices, people, upkeep: upkeepFor, version: VERSION, userName, botPrincipal: (h, t) => botPrincipal({ control, directory }, h, t) }));
   app.use(contextRouter({ origin: config.origin, verify, readers, userName }));
-  app.use(hostRouter({ routines, directory, runnerSource: runner?.source, installSource: installer, teamBundle }));
+  app.use(hostRouter({ routines, directory, runnerSource: runner?.source, installSource: installer, teamBundle, live }));
   app.use(botRunRouter({ bots, history: folders.history, wakes }));
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(ambientHostRouter({ routines, directory, computers }));
@@ -419,6 +423,7 @@ export function createApp(deps: AppDeps) {
       appConfig: { minimumVersion: config.minAppVersion, updateUrl: config.appUpdateUrl },
       revisions,
       events,
+      live,
       streamMaxMs: deps.streamMaxMs,
     }),
   );
@@ -448,5 +453,5 @@ export function createApp(deps: AppDeps) {
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });
 
-  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, folders, automations, revisions, events, notifier, teams, microsoftConnect, msteamsBots };
+  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, folders, automations, revisions, events, live, notifier, teams, microsoftConnect, msteamsBots };
 }
