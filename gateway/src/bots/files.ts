@@ -115,6 +115,8 @@ export interface Folders {
   github?: import("./github.ts").GitHubEvents;
   /** Ambient's GitHub App, when it's set up (docs/bots.md, "Connect GitHub"). */
   githubApp?: import("./github-apps.ts").GitHubApps;
+  /** Bots' own Slack apps (docs/bots.md, "Slack"). */
+  slack?: import("./slack-apps.ts").SlackApps;
   /** How bots learn: signals, scorecards, lessons (docs/bots.md, "How bots learn"). */
   learning?: import("./learning.ts").BotLearning;
   /** Amb's settings per person (docs/bots.md, "Amb's settings"). */

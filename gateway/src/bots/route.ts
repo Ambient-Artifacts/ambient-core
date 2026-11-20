@@ -19,6 +19,7 @@ import type { HistorySearch } from "./history.ts";
 import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
 import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
 import { page as githubPage, type GitHubApps } from "./github-apps.ts";
+import { SlackError, type SlackApps } from "./slack-apps.ts";
 import { LEARN, lessonsOf, type BotLearning } from "./learning.ts";
 import { NOTIFY, type AmbSettings } from "./amb-settings.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "./bot-templates.ts";
@@ -64,6 +65,7 @@ export function botAppRoutes(
     automations?: () => Automations | undefined;
     github?: () => GitHubEvents | undefined;
     githubApp?: () => GitHubApps | undefined;
+    slack?: () => SlackApps | undefined;
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
     wakes?: () => Wakes | undefined;
@@ -406,6 +408,87 @@ export function botAppRoutes(
       res.status(204).end();
     } catch (err) {
       fail(res, err);
+    }
+  });
+
+  // ---- Slack: the workspace once, then a bot's own Slack app in one tap (docs/bots.md, "Slack") ----
+  const slackFail = (res: Response, err: unknown) => {
+    if (err instanceof SlackError) return res.status(err.status).json({ error: err.code, message: err.message });
+    fail(res, err);
+  };
+  r.get("/v1/app/slack", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      res.json(await sl.workspace(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.put("/v1/app/slack", d.auth, d.json, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    const body = z.object({ refreshToken: z.string().trim().min(10).max(500) }).safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send the configuration token's refresh token (it starts with xoxe-), from api.slack.com/apps → Your App Configuration Tokens." });
+    try {
+      const owner = d.routines.botOwner(await actor(res), teamOf(req));
+      res.json({ connected: true, ...(await sl.connect(owner, body.data.refreshToken)) });
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.delete("/v1/app/slack", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      await sl.disconnect(d.routines.botOwner(await actor(res), teamOf(req)));
+      res.status(204).end();
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.get("/v1/app/routines/:id/slack", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), false);
+      res.json(await sl.status(f.owner, f.routineId));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.post("/v1/app/routines/:id/slack", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      const a = await actor(res);
+      const f = await d.routines.folderOf(a, id(req), true);
+      res.json(await sl.add(f.owner, { id: f.routineId, name: f.name }, a.uid));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.put("/v1/app/routines/:id/slack/icon", d.auth, express.raw({ type: ["image/png", "application/octet-stream"], limit: "4mb" }), async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "bad_request", message: "Send the icon as a PNG (content-type image/png)." });
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      await sl.setIcon(f.owner, f.routineId, req.body);
+      res.status(204).end();
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.delete("/v1/app/routines/:id/slack", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      if (!(await sl.remove(f.owner, f.routineId))) return res.status(404).json({ error: "no_app", message: "This bot has no Slack app." });
+      res.status(204).end();
+    } catch (err) {
+      slackFail(res, err);
     }
   });
 
@@ -1144,6 +1227,48 @@ export function githubHookRouter(github: () => GitHubEvents | undefined, app: ()
     const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const out = await gh.receive(hook, { event: header("x-github-event"), signature: header("x-hub-signature-256"), delivery: header("x-github-delivery") }, body);
     res.status(out.status).json({ result: out.result });
+  });
+  return r;
+}
+
+/**
+ * What Slack sends for bots' own apps: their events (an @mention, a DM), and the browser after
+ * Allow (docs/bots.md, "Slack").
+ */
+export function slackHookRouter(slack: () => SlackApps | undefined): Router {
+  const r = express.Router();
+  const perHook = limiter(600);
+  r.post("/v1/hooks/slack/:hook", express.raw({ type: "*/*", limit: "1mb" }), async (req, res) => {
+    const sl = slack();
+    const hook = String(req.params.hook);
+    if (!sl) return res.status(404).json({ error: "not_found" });
+    if (!perHook(hook)) return res.status(429).json({ error: "slow_down" });
+    const header = (n: string) => (typeof req.headers[n] === "string" ? (req.headers[n] as string) : undefined);
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const out = await sl.receive(hook, { signature: header("x-slack-signature"), timestamp: header("x-slack-request-timestamp"), retry: header("x-slack-retry-num") }, body).catch((err: Error) => {
+      console.warn(`[slack] an event wasn't handled: ${err.message}`);
+      return { status: 200, body: { ok: false } };
+    });
+    res.status(out.status).json(out.body);
+  });
+  r.get("/v1/slack/installed", async (req, res) => {
+    const sl = slack();
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    if (!sl) return res.status(404).send(githubPage("Not set up", "<p>Slack isn't set up on this Ambient server.</p>"));
+    if (typeof req.query.error === "string") return res.status(400).send(githubPage("Not added", "<p>Slack wasn't allowed. Tap Add to Slack again in Ambient whenever you like.</p>"));
+    try {
+      const out = await sl.installed(typeof req.query.code === "string" ? req.query.code : "", typeof req.query.state === "string" ? req.query.state : "");
+      res.send(
+        githubPage(
+          `${esc(out.name)} is in Slack`,
+          `<p>Mention <b>@${esc(out.name)}</b> in a channel (invite it there first) or send it a direct message${out.teamName ? ` in ${esc(out.teamName)}` : ""}. It answers in the thread.</p><p><a href="ambient://slack/connected">Back to Ambient</a></p>`,
+        ),
+      );
+    } catch (err) {
+      res.status(err instanceof SlackError ? err.status : 500).send(githubPage("Not added", `<p>${esc(err instanceof SlackError ? err.message : "That didn't work. Tap Add to Slack again in Ambient.")}</p>`));
+    }
   });
   return r;
 }

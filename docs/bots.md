@@ -1013,6 +1013,59 @@ approve a Builder's pull request (GitHub refuses a review of one's own).
 - **Webhooks:** the shared App at `/v1/hooks/github-app`; every other App at
   `/v1/hooks/github-app/<hookId>`, signed with its own secret.
 
+## Slack
+
+Each bot can have its own Slack app, so in Slack it's its own @handle with its own face: `@chatty`
+in a channel or a direct message reaches Chatty, and Chatty answers in that thread. Ambient makes
+the app; the person taps Allow once (`gateway/src/bots/slack-apps.ts`).
+
+- **The workspace, once.** Slack makes apps from a manifest with an app configuration token. The
+  person generates one at api.slack.com/apps → "Your App Configuration Tokens" → Generate Token,
+  and gives Ambient its refresh token (`xoxe-…`): `PUT /v1/app/slack` `{ "refreshToken" }`
+  (`?team=<slug>` for a team's bots, by its owners and admins). Ambient renews it at once
+  (`tooling.tokens.rotate`: that checks it and starts its 12 hours) and again whenever less than
+  15 minutes are left; a refresh token works once, so renewals for one workspace never overlap.
+  `GET /v1/app/slack` → `{ "connected", "teamId" }`; `DELETE` forgets it.
+- **A bot's app, one tap.** `POST /v1/app/routines/:id/slack` → `{ "url", "installed" }`: Ambient
+  creates the app from a manifest (`apps.manifest.create`: the bot's name, a bot user, the scopes
+  below, events to `/v1/hooks/slack/<hook>`, the redirect to `/v1/slack/installed`) and returns
+  Slack's Allow link. Asking again before it's installed gives the same app. After Allow, Slack
+  sends the browser to `/v1/slack/installed`, the code becomes the bot's token (`oauth.v2.access`),
+  and the page says how to reach it. `GET /v1/app/routines/:id/slack` →
+  `{ "workspace": bool, "app": { "appId", "installed", "botUserId", "teamName" } | null }`.
+- **Its face.** `PUT /v1/app/routines/:id/slack/icon` with a PNG (512 to 2000 px square;
+  `apps.icon.set`). The app renders the bot's face and sends it.
+- **Scopes:** `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`,
+  `im:history`, `im:read`, `im:write`, `reactions:write`, `users:read`. **Events:**
+  `app_mention`, `message.im`.
+- **What Slack sends.** The hook in the event URL is signed by Ambient and names the bot and its
+  owner, so an event finds its app without a table; each event is then checked with that app's
+  signing secret (`v0` HMAC, at most 5 minutes old). Slack's first check of the URL
+  (`url_verification`, while the app is being made) only needs the hook to be Ambient's. An event
+  Slack sends again is taken once.
+- **Who it listens to.** Whoever installed it (the Slack user who tapped Allow): its runs hold its
+  owner's secrets. Anyone else who mentions it is told once per thread that it takes instructions
+  from that person. Its own messages, other bots', edits and joins are left out.
+- **A message.** An @mention or a DM goes into the bot's thread from "Slack" ("Lena wrote to you
+  on Slack (in a channel): …", Slack's links as text), gets a 👀 on Slack, and starts a run
+  like its owner's message. A paused bot says so in the Slack thread.
+- **The answer.** What the run says while it works (its reply, its question with the choices) and
+  its result at the end go back to the Slack thread of the message that started it, as Slack's
+  markup (bold, links, headings; code as is), in parts of at most 3,500 characters. The run's end
+  closes that thread, so a later scheduled run's result stays out of Slack; so does one more than
+  6 hours after the message.
+- **Posting on its own.** A bot with an installed app gets its token as `SLACK_BOT_TOKEN` in every
+  run (unless it has a secret of that name), so it can post as itself: a nightly digest in a
+  channel it was invited to.
+- **Taking it out.** `DELETE /v1/app/routines/:id/slack` deletes the app in Slack
+  (`apps.manifest.delete`) and forgets it here.
+- **Where it's kept.** The workspace's tokens, each app's client secret, signing secret and bot
+  token, and where its answer goes: sealed records (kinds `slack:workspace`, `slack:app`,
+  `slack:reply`), no table of their own, so nothing in Convex changes.
+- **Not yet:** Slack's partners can install an app without the Allow tap (`managed_apps:install`),
+  but that scope isn't open to developers. Team members other than the installer, and a shared
+  "Ambient" app for bots without their own, come later.
+
 ## Automations
 
 Things Amb does **for the person** without being asked each time. The rule: templates are for

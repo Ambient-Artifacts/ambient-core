@@ -1,0 +1,515 @@
+// A bot's own Slack app (docs/bots.md, "Slack"): one Slack app per bot, so each has its own
+// @handle and face in Slack, made by Ambient with Slack's manifest API. The person connects their
+// Slack workspace once (an app configuration token, which Ambient keeps fresh), then each bot is
+// one tap: Ambient creates the app from a manifest, and the person taps Allow once to install it.
+//
+//   the app ──▶ PUT /v1/app/slack (config token + refresh token, once per workspace)
+//   a bot   ──▶ POST /v1/app/routines/:id/slack ──▶ apps.manifest.create ──▶ the Allow link
+//   Slack   ──▶ /v1/slack/installed (code) ──▶ oauth.v2.access ──▶ the bot's token, sealed
+//   Slack   ──▶ /v1/hooks/slack/<hook> (an @mention, a DM) ──▶ the bot's thread, a run starts
+//   a run's answer (its reply or its result) ──▶ back into that Slack thread
+//   a run ──▶ SLACK_BOT_TOKEN in its environment (it posts as itself, e.g. a nightly digest)
+//
+// Slack's partners can skip the Allow step (managed_apps:install); that scope isn't open to
+// developers, so one tap per bot stays.
+//
+// Everything is kept in the sealed records (no table of its own): the workspace per owner, each
+// bot's app (its client secret, signing secret and bot token) and where its answer goes. The
+// hook in an app's event URL is signed and names the bot, so an event finds its app without a
+// lookup; each event is then checked with that app's own signing secret.
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { api, type Control } from "../control.ts";
+import type { MasterKey } from "../crypto.ts";
+import type { Owner, RoutineKeys } from "../routines/keys.ts";
+import { sealMessage } from "./messages.ts";
+
+const WORKSPACE = "slack:workspace";
+const APP = "slack:app";
+const REPLY = "slack:reply";
+const STATE_TTL_MS = 60 * 60_000;
+/** A config token is renewed when it has less than this left (they last 12 hours). */
+const RENEW_BEFORE_MS = 15 * 60_000;
+/** An answer goes back to Slack only for a message this recent (a later scheduled run doesn't). */
+const REPLY_FOR_MS = 6 * 60 * 60_000;
+/** Slack's limit for an app's name. */
+const NAME_MAX = 35;
+/** A Slack message's text is cut at 40,000; long answers go out in parts well below that. */
+const PART_MAX = 3_500;
+export const SLACK_SCOPES = ["app_mentions:read", "chat:write", "channels:history", "groups:history", "im:history", "im:read", "im:write", "reactions:write", "users:read"];
+export const SLACK_EVENTS = ["app_mention", "message.im"];
+
+interface Workspace {
+  token: string;
+  refresh: string;
+  /** When the token expires (ms). */
+  exp: number;
+  teamId: string | null;
+  userId: string | null;
+}
+
+interface AppRecord {
+  appId: string;
+  clientId: string;
+  clientSecret: string;
+  signingSecret: string;
+  name: string;
+  /** Set once the person tapped Allow. */
+  botToken?: string;
+  botUserId?: string;
+  teamId?: string;
+  teamName?: string;
+  /** The Slack user who installed it: the one it takes instructions from. */
+  installer?: string;
+}
+
+interface Reply {
+  channel: string;
+  ts: string;
+  at: number;
+}
+
+/** What a hook or an install's state names: the bot and its owner. */
+interface Ref {
+  k: "user" | "team";
+  i: string;
+  r: string;
+}
+
+export class SlackError extends Error {
+  constructor(
+    public code: string,
+    message: string,
+    public status = 400,
+  ) {
+    super(message);
+  }
+}
+
+const b64url = (b: Buffer | string) => Buffer.from(b).toString("base64url");
+const ownerOf = (ref: Ref): Owner => (ref.k === "team" ? { kind: "team", teamId: ref.i } : { kind: "user", uid: ref.i });
+const refOf = (owner: Owner, routineId: string): Ref => ({ k: owner.kind, i: owner.kind === "user" ? owner.uid : owner.teamId, r: routineId });
+const ownerArgs = (owner: Owner) => ({ ownerKind: owner.kind, ownerId: owner.kind === "user" ? owner.uid : owner.teamId });
+
+export class SlackApps {
+  /** One renewal of a workspace's token at a time (a refresh token works once). */
+  private renewing = new Map<string, Promise<Workspace>>();
+  /** Event ids seen lately: Slack sends an event again when we're slow. */
+  private seen = new Map<string, number>();
+  private names = new Map<string, string>();
+  private warned = new Set<string>();
+  private pending = new Set<Promise<unknown>>();
+
+  constructor(
+    private d: {
+      control: Control;
+      keys: RoutineKeys;
+      master: MasterKey;
+      origin: string;
+      /** A bot's computer starts its run now (not at its next check-in). */
+      startNow?: (hostId: string, routineId: string) => void;
+      fetchImpl?: typeof fetch;
+      /** Slack's Web API (tests: a stand-in). */
+      apiBase?: string;
+      now?: () => number;
+    },
+  ) {}
+
+  private now(): number {
+    return this.d.now?.() ?? Date.now();
+  }
+
+  private base(): string {
+    return this.d.origin.replace(/\/$/, "");
+  }
+
+  /** Tests: wait for what events started. */
+  async idle(): Promise<void> {
+    while (this.pending.size) await Promise.all([...this.pending]);
+  }
+
+  private track<T>(p: Promise<T>): void {
+    const q = p.catch((err: Error) => console.warn(`[slack] ${err.message}`)).finally(() => this.pending.delete(q));
+    this.pending.add(q);
+  }
+
+  // ---- Slack's Web API ----
+
+  private async call<T extends Record<string, unknown>>(method: string, token: string | null, args: Record<string, unknown>, opts: { form?: boolean } = {}): Promise<T & { ok: boolean; error?: string }> {
+    const url = `${(this.d.apiBase ?? "https://slack.com/api").replace(/\/$/, "")}/${method}`;
+    const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+    let body: string;
+    if (opts.form) {
+      headers["content-type"] = "application/x-www-form-urlencoded";
+      body = new URLSearchParams(Object.entries(args).map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)])).toString();
+    } else {
+      headers["content-type"] = "application/json; charset=utf-8";
+      body = JSON.stringify(args);
+    }
+    const res = await (this.d.fetchImpl ?? fetch)(url, { method: "POST", headers, body, signal: AbortSignal.timeout(20_000) }).catch((err: Error) => {
+      throw new SlackError("slack_unreachable", `Slack didn't answer (${err.message}).`, 502);
+    });
+    const out = (await res.json().catch(() => ({ ok: false, error: `http_${res.status}` }))) as T & { ok: boolean; error?: string };
+    return out;
+  }
+
+  // ---- records ----
+
+  private async put(owner: Owner, kind: string, key: string, value: unknown, deleted = false): Promise<void> {
+    const sealed = await this.d.keys.seal(owner, `record:${kind}`, JSON.stringify(value));
+    await this.d.control.m(api.records.put, { ...ownerArgs(owner), kind, key, iv: sealed.iv, ct: sealed.ciphertext, size: sealed.ciphertext.length, byKind: "user", ...(deleted ? { deleted: true } : {}), keep: 1, now: this.now() });
+  }
+
+  private async get<T>(owner: Owner, kind: string, key: string): Promise<T | null> {
+    const r = (await this.d.control.q(api.records.get, { ...ownerArgs(owner), kind, key })) as { iv: string; ct: string; deleted: boolean } | null;
+    if (!r || r.deleted) return null;
+    const raw = await this.d.keys.open(owner, `record:${kind}`, r.iv, r.ct).catch(() => null);
+    if (raw === null) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- signed refs (a hook in an app's event URL; an install's state) ----
+
+  private key(purpose: string): Buffer {
+    return createHmac("sha256", this.d.master.key).update(`ambient:slack:${purpose}`).digest();
+  }
+
+  private sign(purpose: string, value: object): string {
+    const body = b64url(JSON.stringify(value));
+    return `${body}.${b64url(createHmac("sha256", this.key(purpose)).update(body).digest().subarray(0, 18))}`;
+  }
+
+  private verify<T>(purpose: string, signed: string): T | null {
+    const [body, sig] = signed.split(".");
+    if (!body || !sig) return null;
+    const want = createHmac("sha256", this.key(purpose)).update(body).digest().subarray(0, 18);
+    const got = Buffer.from(sig, "base64url");
+    if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+    try {
+      return JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- the workspace (once per person or team) ----
+
+  /**
+   * Connects a Slack workspace with an app configuration token's refresh token (api.slack.com/apps
+   * → "Your App Configuration Tokens" → Generate Token). Renewed at once: that checks it and starts
+   * the 12-hour clock.
+   */
+  async connect(owner: Owner, refresh: string): Promise<{ teamId: string | null }> {
+    if (!refresh.trim().startsWith("xoxe-")) throw new SlackError("bad_token", "That's not the refresh token (it starts with xoxe-).", 400);
+    const ws = await this.rotate(refresh.trim());
+    await this.put(owner, WORKSPACE, "workspace", ws);
+    return { teamId: ws.teamId };
+  }
+
+  async disconnect(owner: Owner): Promise<void> {
+    await this.put(owner, WORKSPACE, "workspace", {}, true);
+  }
+
+  async workspace(owner: Owner): Promise<{ connected: boolean; teamId: string | null }> {
+    const ws = await this.get<Workspace>(owner, WORKSPACE, "workspace");
+    return { connected: !!ws, teamId: ws?.teamId ?? null };
+  }
+
+  private async rotate(refresh: string): Promise<Workspace> {
+    const out = await this.call<{ token?: string; refresh_token?: string; exp?: number; team_id?: string; user_id?: string }>("tooling.tokens.rotate", null, { refresh_token: refresh }, { form: true });
+    if (!out.ok || !out.token || !out.refresh_token) {
+      throw new SlackError("slack_token", out.error === "invalid_refresh_token" ? "Slack doesn't take that refresh token anymore. Generate a new configuration token in Slack and connect again." : `Slack refused the configuration token (${out.error ?? "no reason"}).`, 400);
+    }
+    return { token: out.token, refresh: out.refresh_token, exp: (out.exp ?? Math.floor(this.now() / 1000) + 12 * 3600) * 1000, teamId: out.team_id ?? null, userId: out.user_id ?? null };
+  }
+
+  /** The workspace's configuration token, renewed when it's about to run out. */
+  private async configToken(owner: Owner): Promise<Workspace> {
+    const ws = await this.get<Workspace>(owner, WORKSPACE, "workspace");
+    if (!ws) throw new SlackError("no_workspace", "Connect your Slack workspace first (Settings → Connect → Slack).", 400);
+    if (ws.exp - this.now() > RENEW_BEFORE_MS) return ws;
+    const id = JSON.stringify(ownerArgs(owner));
+    let p = this.renewing.get(id);
+    if (!p) {
+      p = (async () => {
+        const fresh = { ...(await this.rotate(ws.refresh)), teamId: ws.teamId, userId: ws.userId };
+        await this.put(owner, WORKSPACE, "workspace", fresh);
+        return fresh;
+      })().finally(() => this.renewing.delete(id));
+      this.renewing.set(id, p);
+    }
+    return p;
+  }
+
+  // ---- a bot's app ----
+
+  /** What the app shows for a bot: whether the workspace is connected, and its app. */
+  async status(owner: Owner, routineId: string): Promise<{ workspace: boolean; app: { appId: string; installed: boolean; botUserId: string | null; teamName: string | null } | null }> {
+    const [ws, app] = await Promise.all([this.get<Workspace>(owner, WORKSPACE, "workspace"), this.get<AppRecord>(owner, APP, routineId)]);
+    return { workspace: !!ws, app: app ? { appId: app.appId, installed: !!app.botToken, botUserId: app.botUserId ?? null, teamName: app.teamName ?? null } : null };
+  }
+
+  /** The manifest Slack gets: the bot's name, Ambient's addresses, what it may read and say. */
+  manifest(name: string, hook: string): Record<string, unknown> {
+    const shown = name.trim().slice(0, NAME_MAX) || "Bot";
+    return {
+      display_information: { name: shown, description: `${shown}, a bot in Ambient. Mention it or send it a message.`.slice(0, 140), background_color: "#2f2f31" },
+      features: {
+        app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
+        bot_user: { display_name: shown, always_online: true },
+      },
+      oauth_config: { redirect_urls: [`${this.base()}/v1/slack/installed`], scopes: { bot: SLACK_SCOPES } },
+      settings: {
+        event_subscriptions: { request_url: `${this.base()}/v1/hooks/slack/${hook}`, bot_events: SLACK_EVENTS },
+        org_deploy_enabled: false,
+        socket_mode_enabled: false,
+        token_rotation_enabled: false,
+      },
+    };
+  }
+
+  /**
+   * Gives a bot its own Slack app and returns the link that installs it (one tap: Allow). The app
+   * is made once; asking again before it's installed gives the same link.
+   */
+  async add(owner: Owner, bot: { id: string; name: string }, uid: string): Promise<{ url: string; installed: boolean }> {
+    let app = await this.get<AppRecord>(owner, APP, bot.id);
+    if (app?.botToken) return { url: this.installUrl(owner, bot.id, uid, app), installed: true };
+    const ws = await this.configToken(owner);
+    if (!app) {
+      const hook = this.sign("hook", refOf(owner, bot.id));
+      const out = await this.call<{ app_id?: string; credentials?: { client_id?: string; client_secret?: string; signing_secret?: string }; errors?: { message?: string; pointer?: string }[] }>("apps.manifest.create", ws.token, { manifest: JSON.stringify(this.manifest(bot.name, hook)) }, { form: true });
+      if (!out.ok || !out.app_id || !out.credentials?.client_id || !out.credentials.client_secret || !out.credentials.signing_secret) {
+        const why = out.errors?.map((e) => `${e.pointer ?? ""} ${e.message ?? ""}`.trim()).join("; ");
+        throw new SlackError("slack_failed", `Slack didn't make the app (${out.error ?? "no reason"}${why ? `: ${why}` : ""}).`, 502);
+      }
+      app = { appId: out.app_id, clientId: out.credentials.client_id, clientSecret: out.credentials.client_secret, signingSecret: out.credentials.signing_secret, name: bot.name };
+      await this.put(owner, APP, bot.id, app);
+    }
+    return { url: this.installUrl(owner, bot.id, uid, app, ws.teamId), installed: false };
+  }
+
+  private installUrl(owner: Owner, routineId: string, uid: string, app: AppRecord, teamId?: string | null): string {
+    const state = this.sign("install", { ...refOf(owner, routineId), u: uid, n: randomBytes(9).toString("base64url"), e: this.now() + STATE_TTL_MS });
+    const q = new URLSearchParams({ client_id: app.clientId, scope: SLACK_SCOPES.join(","), redirect_uri: `${this.base()}/v1/slack/installed`, state });
+    if (teamId ?? app.teamId) q.set("team", (teamId ?? app.teamId)!);
+    return `https://slack.com/oauth/v2/authorize?${q.toString()}`;
+  }
+
+  /** Slack sends the browser back after Allow: the code becomes the bot's token. */
+  async installed(code: string, state: string): Promise<{ name: string; botUserId: string; teamName: string | null }> {
+    const s = this.verify<Ref & { u: string; e: number }>("install", state);
+    if (!s) throw new SlackError("bad_state", "This link isn't from Ambient.", 400);
+    if (s.e < this.now()) throw new SlackError("state_expired", "This link has expired. Tap Add to Slack again in Ambient.", 400);
+    if (!code || code.length > 200) throw new SlackError("bad_request", "Slack sent no code.", 400);
+    const owner = ownerOf(s);
+    const app = await this.get<AppRecord>(owner, APP, s.r);
+    if (!app) throw new SlackError("no_app", "This bot's Slack app is gone. Tap Add to Slack again in Ambient.", 404);
+    const out = await this.call<{ access_token?: string; bot_user_id?: string; team?: { id?: string; name?: string }; authed_user?: { id?: string } }>(
+      "oauth.v2.access",
+      null,
+      { client_id: app.clientId, client_secret: app.clientSecret, code, redirect_uri: `${this.base()}/v1/slack/installed` },
+      { form: true },
+    );
+    if (!out.ok || !out.access_token || !out.bot_user_id) throw new SlackError("slack_failed", `Slack didn't install it (${out.error ?? "no reason"}). Tap Add to Slack again in Ambient.`, 502);
+    const done: AppRecord = { ...app, botToken: out.access_token, botUserId: out.bot_user_id, teamId: out.team?.id, teamName: out.team?.name, installer: out.authed_user?.id };
+    await this.put(owner, APP, s.r, done);
+    return { name: app.name, botUserId: out.bot_user_id, teamName: out.team?.name ?? null };
+  }
+
+  /** The bot's face as its app's icon (a PNG, 512 to 2000 px square). */
+  async setIcon(owner: Owner, routineId: string, png: Buffer): Promise<void> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app) throw new SlackError("no_app", "This bot has no Slack app yet.", 404);
+    const ws = await this.configToken(owner);
+    const form = new FormData();
+    form.set("app_id", app.appId);
+    form.set("file", new Blob([new Uint8Array(png)], { type: "image/png" }), "icon.png");
+    const url = `${(this.d.apiBase ?? "https://slack.com/api").replace(/\/$/, "")}/apps.icon.set`;
+    const res = await (this.d.fetchImpl ?? fetch)(url, { method: "POST", headers: { authorization: `Bearer ${ws.token}` }, body: form, signal: AbortSignal.timeout(20_000) });
+    const out = (await res.json().catch(() => ({ ok: false, error: `http_${res.status}` }))) as { ok: boolean; error?: string };
+    if (!out.ok) throw new SlackError("slack_failed", out.error === "invalid_icon_size" ? "The icon must be a square PNG of 512 to 2000 pixels." : `Slack didn't take the icon (${out.error ?? "no reason"}).`, 400);
+  }
+
+  /** Takes the bot out of Slack: its app is deleted there, and forgotten here. */
+  async remove(owner: Owner, routineId: string): Promise<boolean> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app) return false;
+    const ws = await this.configToken(owner).catch(() => null);
+    if (ws) {
+      const out = await this.call("apps.manifest.delete", ws.token, { app_id: app.appId }, { form: true });
+      if (!out.ok && out.error !== "app_not_found") console.warn(`[slack] couldn't delete the app ${app.appId}: ${out.error}`);
+    }
+    await this.put(owner, APP, routineId, {}, true);
+    await this.put(owner, REPLY, routineId, {}, true);
+    return true;
+  }
+
+  /** A run's Slack token (SLACK_BOT_TOKEN): it posts as the bot itself. */
+  async botToken(owner: Owner, routineId: string): Promise<string | null> {
+    return (await this.get<AppRecord>(owner, APP, routineId))?.botToken ?? null;
+  }
+
+  // ---- what Slack sends ----
+
+  /**
+   * An event for a bot's app (`hook` from its event URL). Checked with that app's signing secret;
+   * Slack's first check of the URL (url_verification, while the app is being made and its secret
+   * isn't known yet) only needs the hook to be Ambient's.
+   */
+  async receive(hook: string, headers: { signature?: string; timestamp?: string; retry?: string }, raw: Buffer): Promise<{ status: number; body: unknown }> {
+    const ref = this.verify<Ref>("hook", hook);
+    if (!ref) return { status: 404, body: { error: "not_found" } };
+    let payload: { type?: string; challenge?: string; event_id?: string; event?: SlackEvent; team_id?: string };
+    try {
+      payload = JSON.parse(raw.toString("utf8")) as typeof payload;
+    } catch {
+      return { status: 400, body: { error: "bad_request" } };
+    }
+    if (payload.type === "url_verification") return { status: 200, body: { challenge: payload.challenge ?? "" } };
+    const owner = ownerOf(ref);
+    const app = await this.get<AppRecord>(owner, APP, ref.r);
+    if (!app) return { status: 404, body: { error: "not_found" } };
+    if (!this.signed(app.signingSecret, headers, raw)) return { status: 401, body: { error: "bad_signature" } };
+    if (payload.type !== "event_callback" || !payload.event) return { status: 200, body: { ok: true } };
+    // Slack sends again after 3 s without an answer: taken once.
+    const id = payload.event_id ?? `${payload.event.channel}:${payload.event.ts}`;
+    const now = this.now();
+    for (const [k, at] of this.seen) if (now - at > 30 * 60_000) this.seen.delete(k);
+    if (this.seen.has(id)) return { status: 200, body: { ok: true } };
+    this.seen.set(id, now);
+    this.track(this.onEvent(owner, ref.r, app, payload.event));
+    return { status: 200, body: { ok: true } };
+  }
+
+  private signed(secret: string, h: { signature?: string; timestamp?: string }, raw: Buffer): boolean {
+    const ts = Number(h.timestamp);
+    if (!h.signature || !Number.isFinite(ts) || Math.abs(this.now() / 1000 - ts) > 5 * 60) return false;
+    const want = Buffer.from(`v0=${createHmac("sha256", secret).update(`v0:${h.timestamp}:`).update(raw).digest("hex")}`);
+    const got = Buffer.from(h.signature);
+    return got.length === want.length && timingSafeEqual(got, want);
+  }
+
+  private async onEvent(owner: Owner, routineId: string, app: AppRecord, e: SlackEvent): Promise<void> {
+    const dm = e.type === "message" && e.channel_type === "im";
+    if (e.type !== "app_mention" && !dm) return;
+    // Its own messages, other bots', edits and joins: not for it.
+    if (e.bot_id || e.subtype || !e.user || !e.channel || !e.ts || !app.botToken) return;
+    if (e.user === app.botUserId) return;
+    const thread = e.thread_ts ?? e.ts;
+    // It takes instructions from whoever installed it (its runs hold its owner's secrets).
+    if (app.installer && e.user !== app.installer) {
+      const warnKey = `${routineId}:${e.channel}:${thread}`;
+      if (!this.warned.has(warnKey)) {
+        this.warned.add(warnKey);
+        await this.post(app.botToken, e.channel, thread, `I only take instructions from <@${app.installer}> for now.`, true);
+      }
+      return;
+    }
+    const text = (e.text ?? "").replace(new RegExp(`<@${app.botUserId}>`, "g"), "").trim();
+    if (!text) return;
+    const who = await this.nameOf(app.botToken, e.user);
+    const where = dm ? "in a direct message" : "in a channel";
+    const body = `${who} wrote to you on Slack (${where}): ${slackToPlain(text)}\n\n(Your answer goes back to that Slack thread on its own.)`;
+    await this.put(owner, REPLY, routineId, { channel: e.channel, ts: thread, at: this.now() } satisfies Reply);
+    void this.call("reactions.add", app.botToken, { channel: e.channel, timestamp: e.ts, name: "eyes" }).catch(() => undefined);
+    const sealed = await sealMessage(this.d.keys, owner, { text: body });
+    const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Slack", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
+    if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
+    if (out.ok && !out.enabled) await this.post(app.botToken, e.channel, thread, "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", true);
+  }
+
+  private async nameOf(token: string, user: string): Promise<string> {
+    const cached = this.names.get(user);
+    if (cached) return cached;
+    const out = await this.call<{ user?: { real_name?: string; profile?: { display_name?: string; real_name?: string } } }>("users.info", token, { user }, { form: true }).catch(() => null);
+    const name = out?.user?.profile?.display_name || out?.user?.real_name || out?.user?.profile?.real_name || "Someone";
+    this.names.set(user, name);
+    return name;
+  }
+
+  /** Into a Slack thread: a bot's Markdown (`mrkdwn`: Ambient's own notice, already Slack's markup). */
+  private async post(token: string, channel: string, threadTs: string, text: string, mrkdwn = false): Promise<void> {
+    for (const part of splitText(mrkdwn ? text : markdownToSlack(text))) {
+      const out = await this.call("chat.postMessage", token, { channel, thread_ts: threadTs, text: part, unfurl_links: false });
+      if (!out.ok) throw new SlackError("slack_failed", `Slack didn't take the message (${out.error ?? "no reason"}).`, 502);
+    }
+  }
+
+  /**
+   * The bot said something in its thread (a run's reply, its question, or its result). It goes
+   * back to the Slack thread of the message that started it, if that's recent; a run's end
+   * (`final`) closes that thread, so a later scheduled run doesn't post there.
+   */
+  said(owner: Owner, routineId: string, text: string, final: boolean): void {
+    this.track(
+      (async () => {
+        const target = await this.get<Reply>(owner, REPLY, routineId);
+        if (!target?.channel || this.now() - target.at > REPLY_FOR_MS) return;
+        const app = await this.get<AppRecord>(owner, APP, routineId);
+        if (!app?.botToken) return;
+        if (text.trim()) await this.post(app.botToken, target.channel, target.ts, text);
+        if (final) await this.put(owner, REPLY, routineId, {}, true);
+      })(),
+    );
+  }
+}
+
+interface SlackEvent {
+  type?: string;
+  subtype?: string;
+  channel_type?: string;
+  user?: string;
+  bot_id?: string;
+  text?: string;
+  channel?: string;
+  ts?: string;
+  thread_ts?: string;
+}
+
+/** Slack's markup in a message, as plain text for the bot (<url|label>, <#C1|name>, &amp;). */
+export function slackToPlain(text: string): string {
+  return text
+    .replace(/<(https?:[^|>]+)\|([^>]+)>/g, "$2 ($1)")
+    .replace(/<(https?:[^>]+)>/g, "$1")
+    .replace(/<#[A-Z0-9]+\|([^>]+)>/g, "#$1")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+/** A bot's Markdown as Slack's mrkdwn: bold, links, headings; code stays as it is. */
+export function markdownToSlack(md: string): string {
+  return md
+    .split(/(```[\s\S]*?```)/g)
+    .map((part) =>
+      part.startsWith("```")
+        ? part
+        : part
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/^#{1,6}\s+(.+)$/gm, "*$1*")
+            .replace(/\*\*(.+?)\*\*/g, "*$1*")
+            .replace(/__(.+?)__/g, "*$1*")
+            .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, "<$2|$1>"),
+    )
+    .join("");
+}
+
+/** Long answers in parts, cut at a line where it can. */
+export function splitText(text: string, max = PART_MAX): string[] {
+  const parts: string[] = [];
+  let rest = text.trim();
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf("\n", max);
+    if (cut < max / 2) cut = max;
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) parts.push(rest);
+  return parts;
+}

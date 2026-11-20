@@ -32,9 +32,10 @@ import { EventHub, PollingRevisionSource, Revisions, type RevisionSource } from 
 import { hostRouter } from "./routines/route.ts";
 import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
-import { ambientHostRouter, botRunRouter, githubHookRouter } from "./bots/route.ts";
+import { ambientHostRouter, botRunRouter, githubHookRouter, slackHookRouter } from "./bots/route.ts";
 import { GitHubEvents } from "./bots/github.ts";
 import { GitHubApps } from "./bots/github-apps.ts";
+import { SlackApps } from "./bots/slack-apps.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
@@ -102,6 +103,8 @@ export interface AppDeps {
   githubBatchMs?: number;
   /** Tests: Ambient's GitHub App against a stand-in GitHub API. */
   githubFetch?: typeof fetch;
+  /** Tests: bots' Slack apps against a stand-in Slack Web API. */
+  slack?: { apiBase?: string; fetchImpl?: typeof fetch };
   /** Tests: how long after a signal Amb looks at a bot (default 10 minutes). */
   learning?: { reviewAfterMs?: number };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
@@ -372,6 +375,12 @@ export function createApp(deps: AppDeps) {
   folders.githubApp = githubApp;
   github.appOf = async (owner, bot) => (await githubApp.appFor(owner, bot))?.key ?? null;
   routines.githubToken = async (owner, id) => githubApp.tokenFor(owner, { id, ...(await github.watchOf(owner, id)) });
+  // Bots' own Slack apps (docs/bots.md, "Slack"): one app per bot, made by Ambient, one tap to install.
+  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
+  folders.slack = slack;
+  routines.slackToken = (owner, id) => slack.botToken(owner, id);
+  routines.onBotSaid = (owner, id, text, final) => slack.said(owner, id, text, final);
+  bots.onSaid = (owner, id, text) => slack.said(owner, id, text, false);
   if (!deps.ambient?.noHeartbeat) {
     heartbeat.start();
     automations.start();
@@ -384,6 +393,7 @@ export function createApp(deps: AppDeps) {
   app.use(hostRouter({ routines, directory, runnerSource: runner?.source, installSource: installer, teamBundle, live }));
   app.use(botRunRouter({ bots, history: folders.history, wakes }));
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
+  app.use(slackHookRouter(() => folders.slack));
   app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(internalRouter({ secret: config.serviceSecret, upkeep, relay: (host, req, ms) => computers.relay(host, req, ms) }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));

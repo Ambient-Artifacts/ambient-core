@@ -416,6 +416,10 @@ export class RoutineService {
   githubFor?: (owner: Owner, routineId: string) => Promise<{ prefix: string; repos: string[]; on?: import("../bots/github.ts").WatchMode[] } | null>;
   /** A GitHub token for a bot's run from Ambient's GitHub App (docs/bots.md, "Connect GitHub"); null: none covers it. */
   githubToken?: (owner: Owner, routineId: string) => Promise<string | null>;
+  /** A bot's own Slack app's token, for its run as SLACK_BOT_TOKEN (bots/slack-apps.ts). */
+  slackToken?: (owner: Owner, routineId: string) => Promise<string | null>;
+  /** A bot said something at the end of a run (its result): Slack answers the thread that asked. */
+  onBotSaid?: (owner: Owner, routineId: string, text: string, final: boolean) => void;
 
   constructor(
     private d: {
@@ -1142,6 +1146,14 @@ export class RoutineService {
         env.GITHUB_TOKEN = token;
       }
     }
+    // A bot with its own Slack app posts as itself (a digest, an answer in a channel).
+    if (r.bot && !env.SLACK_BOT_TOKEN && this.slackToken) {
+      const token = await this.slackToken(owner, r.id).catch((err: Error) => {
+        console.warn(`[slack] no token for a run: ${err.message}`);
+        return null;
+      });
+      if (token) env.SLACK_BOT_TOKEN = token;
+    }
     let resume: { sessionId: string | null; message: string; files?: FileRef[] } | null = null;
     if (r.bot && out.resume) {
       const body = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch(() => ({ text: "", files: undefined }));
@@ -1151,7 +1163,7 @@ export class RoutineService {
         message:
           out.resume.kind === "answer"
             ? `${who} answered your question: ${body.text}`
-            : out.resume.authorName === "GitHub" && !(out.resume as { authorId?: string | null }).authorId
+            : (out.resume.authorName === "GitHub" || out.resume.authorName === "Slack") && !(out.resume as { authorId?: string | null }).authorId
               ? body.text
               : out.resume.authorName === "Wake-up" && !(out.resume as { authorId?: string | null }).authorId
                 ? `Wake-up: ${body.text}`
@@ -1226,6 +1238,8 @@ export class RoutineService {
       const w = who as unknown as { routineId: string; startedAt: number; name: string };
       await this.d.folder.afterRun(owner, { routineId: String(w.routineId), name: w.name, runId, startedAt: w.startedAt }, { memory: result.memory, handoff: result.handoff, summary: clipped, failed: result.status === "failed" });
     }
+    // A run a Slack message started: its result goes back to that Slack thread.
+    if (who.bot && this.onBotSaid) this.onBotSaid(owner, String((who as unknown as { routineId: string }).routineId), clipped ?? "", true);
     if (who.bot && result.status === "failed") {
       const w = who as unknown as { routineId: string; name: string };
       this.onBotEvent?.({ kind: "bot_failed", uid: String(who.uid), routineId: String(w.routineId), bot: w.name, text: clipped ?? "", runId });

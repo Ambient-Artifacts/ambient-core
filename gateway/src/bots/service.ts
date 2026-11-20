@@ -63,6 +63,8 @@ function refused(code: string, message: string, status = 400) {
 export class BotService {
   /** What happened in a bot's thread, for automations (docs/bots.md, "Automations"). */
   onEvent?: (e: AutomationEvent) => void;
+  /** The bot said something while it runs (a reply, a question): Slack answers the thread that asked. */
+  onSaid?: (owner: Owner, routineId: string, text: string) => void;
 
   constructor(
     private d: {
@@ -244,6 +246,7 @@ export class BotService {
     const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks, ...(work ? { details: work } : {}), files });
     const out = await this.d.routines.control.m(api.bots.ask, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
+    this.onSaid?.(owner, String(out.routineId), [text, ...(picks.length ? [picks.map((p) => `• ${p}`).join("\n")] : []), "(Answer here or in Ambient.)"].join("\n\n"));
     this.onEvent?.({ kind: "bot_asked", uid: String(out.notify), routineId: String(out.routineId), bot: who.name, text, questionId: String(out.questionId) });
     // Ambient looks first (DecisionService): it answers for the owner, or brings it to them.
     if (this.d.onQuestion) {
@@ -325,5 +328,6 @@ export class BotService {
     if (!out.ok) throw refused("run_over", "This run is over.", 409);
     // This turn's answer is in the thread: its live text goes (the run goes on with the next).
     this.d.live?.endTurn(String(who.routineId));
+    if (text.trim()) this.onSaid?.(owner, String(who.routineId), text.trim().slice(0, MESSAGE_MAX));
   }
 }
