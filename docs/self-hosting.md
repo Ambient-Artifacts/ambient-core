@@ -266,7 +266,8 @@ repos, and bots get GitHub's events and a short-lived token for just those repos
 The template roles' Apps (Ambient Builder, Reviewer, Wiki Keeper: each its own GitHub user with
 just its role's access, [bots.md](bots.md#github-apps)) need no settings: for each, run
 `admin github-app new <builder|reviewer|wiki_keeper> --account <your-org>`, open the link it prints
-and tap Create on GitHub. The gateway keeps the App (sealed in Convex) and it works at once. Then
+and tap Create on GitHub. App names are unique across GitHub, so each is named after your account
+("Ambient Reviewer (your-org)"); `--name` picks another. The gateway keeps the App (sealed in Convex) and it works at once. Then
 upload each one's icon in its settings on GitHub (Display information).
 
 ## Operating it

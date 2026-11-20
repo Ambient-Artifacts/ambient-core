@@ -54,6 +54,8 @@ interface Making {
   /** "role": a template role's App (the operator); "bot": a bot's own. */
   p: "role" | "bot";
   role?: RoleApp;
+  /** The App's name on GitHub, when the operator chose one (names are unique across GitHub). */
+  nm?: string;
   /** A bot's: its owner, its id and name, and who started it. */
   k?: "user" | "team";
   i?: string;
@@ -127,7 +129,16 @@ export class GitHubApps {
   /** The Apps in Convex, once (a new one is added as it's made). */
   private async load(): Promise<void> {
     this.loaded ??= (async () => {
-      const rows = ((await this.d.control.q(api.githubApps.list, {}).catch(() => [])) as unknown as AppRow[]) ?? [];
+      let rows: AppRow[];
+      try {
+        rows = ((await this.d.control.q(api.githubApps.list, {})) as unknown as AppRow[]) ?? [];
+      } catch (err) {
+        // Not cached: the next call loads again (Convex restarting at startup must not drop
+        // every role and bot App until the gateway restarts).
+        this.loaded = null;
+        console.warn(`[github-apps] couldn't load the GitHub Apps: ${(err as Error).message}`);
+        throw err;
+      }
       for (const r of rows) {
         try {
           this.add({ ...r, routineId: r.routineId ? String(r.routineId) : null });
@@ -141,7 +152,7 @@ export class GitHubApps {
 
   /** Whether any App is set up (Connect GitHub shows at all). */
   async any(): Promise<boolean> {
-    await this.load();
+    await this.load().catch(() => undefined);
     return this.apps.size > 0;
   }
 
@@ -264,10 +275,34 @@ export class GitHubApps {
     return ((await res.json()) as { type?: string }).type === "Organization";
   }
 
-  /** The operator's link to make a template role's App (once per server; `admin github-app new`). */
-  async roleAppUrl(role: RoleApp, account: string): Promise<string> {
+  /**
+   * The operator's link to make a template role's App (once per server; `admin github-app new`).
+   * An App's name is unique across all of GitHub, so by default it carries the account: "Ambient
+   * Reviewer (acme)". `name` sets it (Ambient's own server: "Ambient Reviewer").
+   */
+  async roleAppUrl(role: RoleApp, account: string, name?: string): Promise<string> {
     if (!(ROLE_APPS as readonly string[]).includes(role)) throw new GitHubError("bad_request", `Roles: ${ROLE_APPS.join(", ")}.`, 400);
-    return this.startUrl({ p: "role", role, acct: account, org: await this.isOrg(account), h: randomBytes(18).toString("base64url"), n: randomBytes(12).toString("base64url"), e: this.now() + STATE_TTL_MS });
+    const nm = name?.trim();
+    if (nm !== undefined && (nm.length < 1 || nm.length > NAME_MAX)) throw new GitHubError("bad_request", `A GitHub App's name is 1 to ${NAME_MAX} characters.`, 400);
+    return this.startUrl({ p: "role", role, ...(nm ? { nm } : {}), acct: account, org: await this.isOrg(account), h: randomBytes(18).toString("base64url"), n: randomBytes(12).toString("base64url"), e: this.now() + STATE_TTL_MS });
+  }
+
+  /** A role App's name on GitHub: the operator's, or the role's with the account (unique across GitHub). */
+  static roleAppName(role: RoleApp, account: string, name?: string): string {
+    if (name) return name;
+    // Shortened at the account, so it still reads "Ambient Wiki Keeper (Ambient-A…)".
+    const room = NAME_MAX - ROLE_NAMES[role].length - 3;
+    return `${ROLE_NAMES[role]} (${account.length > room ? `${account.slice(0, room - 1)}…` : account})`;
+  }
+
+  /**
+   * A bot's own App, for the app's route and the MCP tool alike: made under `account`, or the
+   * owner of its first repo; then installed. Refused when it has no repos and no account given.
+   */
+  async ownAppLink(owner: Owner, bot: { id: string; name: string }, uid: string, account?: string): Promise<string> {
+    const acct = account?.trim() || (await this.d.github.watchOf(owner, bot.id)).repos[0]?.split("/")[0];
+    if (!acct) throw new GitHubError("no_account", "Add its repos first, or say which GitHub account they're in.", 400);
+    return this.botAppUrl(owner, bot, uid, acct);
   }
 
   /** A bot's own App: made under `account` (the owner of its repos), then installed. */
@@ -291,7 +326,7 @@ export class GitHubApps {
   /** The manifest GitHub gets: name, Ambient's addresses, the role's access and events. */
   private manifest(m: Making): Record<string, unknown> {
     const role: Exclude<AppRole, "shared"> = m.p === "role" ? m.role! : "bot";
-    const name = m.p === "role" ? ROLE_NAMES[m.role!] : `${m.b ?? "Bot"} (${m.acct})`.slice(0, NAME_MAX);
+    const name = m.p === "role" ? GitHubApps.roleAppName(m.role!, m.acct, m.nm) : `${m.b ?? "Bot"} (${m.acct})`.slice(0, NAME_MAX);
     return {
       name,
       url: this.base(),

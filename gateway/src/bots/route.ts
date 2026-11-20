@@ -384,10 +384,7 @@ export function botAppRoutes(
     try {
       const a = await actor(res);
       const f = await d.routines.folderOf(a, id(req), true);
-      const watch = await gh.watchOf(f.owner, f.routineId);
-      const account = body.data.account || watch.repos[0]?.split("/")[0];
-      if (!account) return res.status(400).json({ error: "no_account", message: "Add its repos first, or say which GitHub account they're in." });
-      res.json({ url: await gha.botAppUrl(f.owner, { id: f.routineId, name: f.name }, a.uid, account) });
+      res.json({ url: await gha.ownAppLink(f.owner, { id: f.routineId, name: f.name }, a.uid, body.data.account) });
     } catch (err) {
       fail(res, err);
     }

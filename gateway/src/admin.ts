@@ -54,9 +54,10 @@ Teams
       Put a team server in the pool (the Docker setup does this for its own).
 
 GitHub
-  github-app new <builder|reviewer|wiki_keeper> --account <org-or-user>
-      A link to make a template role's GitHub App (Ambient Builder, Reviewer, Wiki Keeper), each
-      its own GitHub user with just its role's access. Open it, tap Create on GitHub: done.
+  github-app new <builder|reviewer|wiki_keeper> --account <org-or-user> [--name <name>]
+      A link to make a template role's GitHub App, each its own GitHub user with just its role's
+      access. Open it, tap Create on GitHub: done. Names are unique across GitHub: by default
+      "Ambient Reviewer (<account>)"; --name sets it.
 
 Wikis in your own git repo (https; the access token comes on stdin, e.g. < token.txt)
   repo <email> <url> [--existing]
@@ -387,7 +388,7 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     if (!account) throw new AdminError("Say whose GitHub account it's made under: --account <org-or-user>.");
     const { GitHubApps } = await import("./bots/github-apps.ts");
     const apps = new GitHubApps({ control: d.control, keys: undefined as never, master: d.config.masterKey, origin, github: undefined as never, apiBase: d.config.githubApp?.apiBase });
-    const url = await apps.roleAppUrl(role as never, account).catch((err: Error) => {
+    const url = await apps.roleAppUrl(role as never, account, typeof flags.name === "string" ? flags.name : undefined).catch((err: Error) => {
       throw new AdminError(err.message);
     });
     return `Open this within an hour and tap Create on GitHub (it's made under ${account}):\n${url}`;

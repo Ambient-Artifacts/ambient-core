@@ -977,6 +977,26 @@ function registerGitHubTools(
           return result(`[Connect GitHub](${url}) (${target.slug})${now}`, { url, app: target.slug, installations: list });
         }),
     );
+
+    server.registerTool(
+      "github_app_for_bot",
+      {
+        title: "Give a bot its own GitHub account",
+        description:
+          "The link that gives a bot its own GitHub App, so on GitHub it shows as itself (\"<bot> (<account>)\") instead of the shared Ambient Bots: GitHub opens with the App filled in, the user taps Create and then Install. Made under the GitHub account its repos are in (the owner of its first repo, or `account`). Only when the user asked for it; give it as a Markdown link. Template bots (Builder, Reviewer, Wiki keeper) have their role's App already: connect_github.",
+        inputSchema: {
+          bot: z.string().max(64).describe("The bot (its id)."),
+          account: z.string().max(39).optional().describe("The GitHub organization or user its repos are in; by default its first repo's owner."),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ bot, account }) =>
+        guard(async () => {
+          const f = await routines.folderOf(actor, bot, true);
+          const url = await apps.ownAppLink(f.owner, { id: f.routineId, name: f.name }, actor.uid, account);
+          return result(`[Give ${f.name} its own GitHub account](${url}): tap Create on GitHub, then Install on its repos. It works for an hour.`, { url });
+        }),
+    );
   }
 
   server.registerTool(

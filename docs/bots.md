@@ -926,11 +926,14 @@ too, so on GitHub each shows as its own user with just its role's access. A Revi
 approve a Builder's pull request (GitHub refuses a review of one's own).
 
 - **The role Apps:** Ambient Builder, Ambient Reviewer and Ambient Wiki Keeper. A server's
-  operator makes each once: `admin github-app new <builder|reviewer|wiki_keeper> --account <org>`
-  prints a link, the operator taps Create on GitHub, and GitHub sends the browser back to
+  operator makes each once: `admin github-app new <builder|reviewer|wiki_keeper> --account <org>
+  [--name <name>]` prints a link, the operator taps Create on GitHub, and GitHub sends the browser back to
   `/v1/github/app-created`. The gateway trades the one-time code for the App's key and webhook
   secret, seals both with its master key into Convex (`githubApps`), and the App works at once,
   with no restart and nothing to copy. Each is public, so anyone using the server installs it.
+  App names are unique across all of GitHub, so by default the name carries the account
+  ("Ambient Reviewer (acme)", shortened to GitHub's 34 characters); Ambient's own server uses
+  `--name "Ambient Reviewer"`.
 - **What each may do:**
 
   | App | Code | Pull requests | Issues | Events |
@@ -954,7 +957,8 @@ approve a Builder's pull request (GitHub refuses a review of one's own).
     it gives the shared App's.
   - The same `routine` goes on the MCP tool `connect_github` as `bot`.
 - **A bot's own App:** `POST /v1/app/routines/:id/github/app` with `{ "account"? }` (default: the
-  owner of its first repo) → `{ "url" }`. That's the gateway's page, which posts the manifest to
+  owner of its first repo) → `{ "url" }`; the MCP tool `github_app_for_bot` (`bot`, `account`?)
+  gives the same link. That's the gateway's page, which posts the manifest to
   GitHub (an organization's settings, or the user's). After Create, GitHub comes back to the
   gateway, which keeps the App and sends the browser straight on to its install. The App is
   private to that account and named "<bot> (<account>)". Deleting the bot drops the App's record;

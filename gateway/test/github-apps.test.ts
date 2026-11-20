@@ -7,7 +7,8 @@ import { createHmac, createVerify, generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { appCall, signIn, startStack, type AppSession, type Stack } from "./helpers.ts";
+import { GitHubApps } from "../src/bots/github-apps.ts";
+import { appCall, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
 
 const info = { hostname: "srv-apps", os: "Linux 6.8", runner: "0.14.0", claude: "2.1.326 (Claude Code)" };
 const keyPair = () => generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
@@ -103,7 +104,8 @@ afterAll(() => {
 
 describe("a template role's App", () => {
   it("is made with GitHub's manifest flow: the gateway's page posts it, GitHub's code comes back to the gateway", async () => {
-    const url = await s.folders.githubApp!.roleAppUrl("reviewer", "Ambient-Artifacts");
+    // Ambient's own server names it plainly; by default the name carries the account (names are unique across GitHub).
+    const url = await s.folders.githubApp!.roleAppUrl("reviewer", "Ambient-Artifacts", "Ambient Reviewer");
     const pageRes = await fetch(url.replace(/^https?:\/\/[^/]+/, s.origin));
     const html = await pageRes.text();
     expect(html).toContain('action="https://github.com/organizations/Ambient-Artifacts/settings/apps/new?state=');
@@ -121,6 +123,31 @@ describe("a template role's App", () => {
     expect(JSON.stringify(rows)).not.toContain("reviewer-secret");
     // The same link again: refused.
     expect((await fetch(`${s.origin}/v1/github/app-created?code=code-reviewer&state=${encodeURIComponent(stateOf(url))}`)).status).toBe(400);
+  });
+
+  it("is named per server by default, so every self-hosted server can make its own", async () => {
+    expect(GitHubApps.roleAppName("reviewer", "acme")).toBe("Ambient Reviewer (acme)");
+    expect(GitHubApps.roleAppName("reviewer", "other-co")).toBe("Ambient Reviewer (other-co)");
+    const long = GitHubApps.roleAppName("wiki_keeper", "Ambient-Artifacts");
+    expect(long.length).toBeLessThanOrEqual(34);
+    expect(long).toMatch(/^Ambient Wiki Keeper \(Ambient-A.*…\)$/);
+    const html = await (await fetch((await s.folders.githubApp!.roleAppUrl("builder", "acme")).replace(/^https?:\/\/[^/]+/, s.origin))).text();
+    expect(html).toContain("Ambient Builder (acme)");
+    await expect(s.folders.githubApp!.roleAppUrl("builder", "acme", "x".repeat(40))).rejects.toThrow(/1 to 34/);
+  });
+
+  it("loads again after a failed first load instead of dropping every App until a restart", async () => {
+    let calls = 0;
+    const control = {
+      q: async (fn: unknown, args: unknown) => {
+        if (calls++ === 0) throw new Error("Convex is restarting");
+        return s.control.q(fn as never, args as never);
+      },
+      m: s.control.m.bind(s.control),
+    };
+    const apps = new GitHubApps({ control: control as never, keys: undefined as never, master: s.config.masterKey, origin: s.origin, github: s.folders.github! });
+    await expect(apps.app("reviewer")).rejects.toThrow("restarting");
+    await expect(apps.app("reviewer")).resolves.toMatchObject({ slug: "ambient-reviewer" });
   });
 });
 
@@ -190,6 +217,11 @@ describe("a bot's own App", () => {
     const start = (await hostCall(host, "POST", `/v1/host/routines/${fixie}/runs`)).json as { run: { id: string }; env: Record<string, string> };
     expect(start.env.GH_TOKEN).toBe("ghs_300_3");
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "ok" });
+    // The same link over MCP (agents first): github_app_for_bot.
+    const pat = String((await call("POST", "/v1/app/pats", { label: "Claude" })).json.token);
+    const mcp = await mcpClient(`${s.origin}/mcp`, pat);
+    const viaMcp = text(await mcp.callTool({ name: "github_app_for_bot", arguments: { bot: fixie, account: "Acme-Org" } }));
+    expect(viaMcp).toMatch(new RegExp(`\\(${s.origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/v1/github/new-app\\?state=`));
     // Deleting the bot takes its App's record with it.
     await call("DELETE", `/v1/app/routines/${fixie}`);
     expect((await s.t.run(async (ctx) => ctx.db.query("githubApps").collect())).map((a) => a.key)).toEqual(["reviewer"]);
