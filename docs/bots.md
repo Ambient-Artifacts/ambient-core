@@ -5,8 +5,8 @@ Bots are loops with a face, a thread and a chat with Ambient on top. A bot is a 
 it as a small character whose face says how it's doing. Ambient, the master bot, is a chat in the
 app that answers from the brain and looks after the bots.
 
-The first version is switched on per account and per team (`BRAIN_BOTS`; a team's people get bots of their own too); everyone else keeps
-today's loops exactly as they are. Claude Code is the only runtime, behind the seams that let
+Bots are everyone's: there's no switch, and every routine is a bot. Claude Code and Codex are the
+runtimes, behind the seams that let
 others in later: a `runtime` field, the bot spec in `spec/src/bots.ts`, the runner's adapter, run
 events in Ambient's own shape, and a channel interface with the app as its first channel.
 
@@ -59,8 +59,8 @@ accounts and teams the gate doesn't include (features answers `{"bots": false}`)
 
 ### Routines carry `bot`
 
-`GET /v1/app/routines`, `GET`/`PATCH`/`POST` of one routine: each routine has `bot` (null for a
-plain loop):
+`GET /v1/app/routines`, `GET`/`PATCH`/`POST` of one routine: each routine has `bot` (every
+routine is a bot):
 
 ```json
 "bot": {
@@ -79,8 +79,8 @@ plain loop):
 
 `POST /v1/app/routines` and `PATCH /v1/app/routines/:id` take `bot` as input:
 `{ "face"?, "color"?, "wear"?: [..], "isolation"?, "secrets"?: [names] | null, "report"? }` (all optional; `runtime` may be
-sent and must be `claude-code`). Sending `bot` on a plain loop makes it a bot; `"bot": null` on
-PATCH makes it a plain loop again.
+sent and must be `claude-code` or `codex`). Without it a new routine gets a bot's defaults;
+`"bot": null` on PATCH is refused (`bots_only`).
 
 ### A bot's thread
 
@@ -154,20 +154,20 @@ nothing.
 
 ## Loops are bots
 
-With bots on for an account or team, there are no plain loops anymore: every routine is a bot.
-`GET /v1/app/features` says so (`{ "bots": true, "loopsAreBots": true }`); accounts and teams
-without bots keep loops exactly as they are (`loopsAreBots` false).
+There are no plain loops: every routine is a bot, for everyone (there was a switch, `BRAIN_BOTS`,
+until 2026-11-20). `GET /v1/app/features` still says so for apps that ask
+(`{ "bots": true, "loopsAreBots": true }`).
 
 - A routine made without `bot` settings (app or `create_routine`) is a new bot: its own container,
-  no keys until granted, news only. A bot of one's own still needs a computer.
+  no keys until granted, news only. A bot of one's own needs a computer.
 - `PATCH { "bot": null }` (back to a plain loop) answers `400 bots_only`.
-- Loops made before bots were on stay loops (`bot: null`) until they're adopted:
-  `admin bots adopt-loops <email|user id> [--team <slug>] [--dry-run]` makes each one a bot that
-  runs exactly as before (on the computer itself, all of the owner's keys, news only; its schedule,
-  computer, folder and prompt unchanged; its prompt AGENTS.md's first version, "was a loop"), with a
-  face and colour picked from its id. `--team` does the team's loops, as that person (an owner or
-  admin). A personal loop without a computer is skipped: it never runs. Running it again changes
-  nothing.
+- Loops from before (a server that had bots off) become bots at the gateway's start
+  (`bots.adoptPlainLoops`, once and safely): each runs exactly as before, on the computer itself
+  with all of its owner's keys, reporting news, with a face and colour picked from its id.
+  `admin bots adopt-loops <email|user id> [--team <slug>] [--dry-run]` does the same for one
+  person or team, and also records the prompt as AGENTS.md's first version ("was a loop").
+- Ambient's background work (the heartbeat, Amb's nightly memory, automations, learning) is for
+  everyone with bots or a chat with Ambient (Convex `bots.people`).
 
 ## The computer's side
 

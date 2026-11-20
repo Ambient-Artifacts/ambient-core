@@ -491,6 +491,57 @@ export const resolveDecision = mutation({
 // ---- Ambient's heartbeat ----
 
 /** The people with bots: listed accounts and the members of teams that have them. */
+/**
+ * Everyone Ambient's background work is for (the heartbeat, Amb's nightly memory, automations,
+ * learning): people with bots of their own or in a team with bots, and people who talk to Ambient.
+ * Bots are everyone's (docs/bots.md); this is who actually has something to look at.
+ */
+export const people = query({
+  args: { ...secretArg },
+  handler: async (ctx, { secret }) => {
+    assertService(secret);
+    const out = new Set<string>();
+    const teams = new Set<string>();
+    for (const r of await ctx.db.query("routines").take(5000)) {
+      if (!r.bot) continue;
+      if (r.teamId) teams.add(r.teamId);
+      else out.add(r.userId);
+    }
+    for (const t of teams) {
+      const teamId = ctx.db.normalizeId("teams", t);
+      if (!teamId) continue;
+      for (const m of await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(200)) out.add(m.userId);
+    }
+    for (const s of await ctx.db.query("ambientState").take(5000)) out.add(s.userId);
+    return { users: [...out], teams: [...teams] };
+  },
+});
+
+/**
+ * Loops from before every loop was a bot (a self-hosted server that had BRAIN_BOTS off) become
+ * bots that run exactly as before: on the computer itself, with all of their owner's keys,
+ * reporting news (as `admin bots adopt-loops`). The gateway runs this at start; safe to run again.
+ */
+export const adoptPlainLoops = mutation({
+  args: { ...secretArg, now: v.number() },
+  handler: async (ctx, { secret, now }) => {
+    assertService(secret);
+    const shapes = ["dome", "pebble", "cap", "ridge", "cloud", "drop"];
+    // BOT_SHAPES and BOT_COLORS in @brain/spec.
+    const colors = ["sky", "sage", "sand", "clay", "lake", "rose", "moss", "stone"];
+    let adopted = 0;
+    for (const r of await ctx.db.query("routines").take(5000)) {
+      if (r.bot) continue;
+      // A look from its id, the same every time.
+      let h = 0;
+      for (const ch of String(r._id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      await ctx.db.patch(r._id, { bot: { face: shapes[h % shapes.length]!, color: colors[(h >>> 8) % colors.length], runtime: "claude-code", isolation: "host", report: "news" }, updatedAt: now });
+      adopted++;
+    }
+    return { adopted };
+  },
+});
+
 export const heartbeatPeople = query({
   args: { ...secretArg, users: v.array(v.string()), teams: v.array(v.string()) },
   handler: async (ctx, { secret, users, teams }) => {

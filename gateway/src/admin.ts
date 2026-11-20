@@ -227,7 +227,7 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     const personal = new PersonalStore(d.control, d.config.masterKey);
     const keys = new RoutineKeys({ control: d.control, personal, master: d.config.masterKey });
     const folder = new BotFolder({ control: d.control, keys });
-    const routines = new RoutineService({ control: d.control, keys, codes: new CodeHasher(d.config.masterKey), origin, bots: d.config.bots, folder });
+    const routines = new RoutineService({ control: d.control, keys, codes: new CodeHasher(d.config.masterKey), origin, folder });
     const teams = await new Directory(d.control, 0).teamsOf(u.uid);
     if (slug && !teams.some((t) => t.slug === slug)) throw new AdminError(`${u.name} isn't in a team "${slug}".`);
     const actor = { uid: u.uid, teams, personal: true, canWritePersonal: true, canWriteTeams: true };

@@ -39,7 +39,7 @@ const settled = async () => {
 
 beforeAll(async () => {
   // No server key: Ambient answers only on the computer.
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: { apiKey: undefined } });
+  s = await startStack({ ambient: { apiKey: undefined } });
   lena = await signIn(s, "apple-lena", "Lena Vogel");
   const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "VPS" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
@@ -49,7 +49,6 @@ afterAll(() => s.close());
 describe("Ambient on the person's computer", () => {
   it("keeps a person's own computer connected (upkeep runs there, bots or not), and sync says so", async () => {
     expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
-    s.config.bots!.users.push(lena.user.uid);
     expect((await hostCall(host, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
   });
 
@@ -179,7 +178,6 @@ describe("Ambient on the team's server", () => {
     // A team's computer keeps its connection (the team's brain may be reached through it); Ambient
     // answers the team's people there once the team has bots.
     expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
-    s.config.bots!.teams.push(slug);
     expect((await hostCall(teamHost, "POST", "/v1/host/sync", { info })).json.ambient).toBe(true);
 
     const waiting = hostCall(teamHost, "GET", "/v1/host/ambient/next");

@@ -43,7 +43,7 @@ const myTeam = async (who: AppSession) => ((await appCall(s, who.access_token, "
 
 beforeAll(async () => {
   delete process.env.BRAIN_TEAM_POOL;
-  s = await startStack({ bots: { users: [], teams: [] }, teamBundle: async () => ({ source: bundle, version: "test-1", sha256 }) });
+  s = await startStack({ teamBundle: async () => ({ source: bundle, version: "test-1", sha256 }) });
   lena = await signIn(s, "apple-lena-club", "Lena Vogel");
   mia = await signIn(s, "apple-mia-club", "Mia Berg");
 });

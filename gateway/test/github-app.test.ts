@@ -81,10 +81,9 @@ beforeAll(async () => {
   });
   await new Promise<void>((r) => gh.listen(0, "127.0.0.1", r));
   apiBase = `http://127.0.0.1:${(gh.address() as AddressInfo).port}`;
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: {}, githubBatchMs: 60_000, githubApp: { appId: APP_ID, slug: "ambient-bots", privateKey, webhookSecret: SECRET, apiBase } });
+  s = await startStack({ ambient: {}, githubBatchMs: 60_000, githubApp: { appId: APP_ID, slug: "ambient-bots", privateKey, webhookSecret: SECRET, apiBase } });
   lena = await signIn(s, "apple-lena-ghapp", "Lena Vogel");
   ben = await signIn(s, "apple-ben-ghapp", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
   const computer = ((await call("GET", "/v1/app/routines")).json.computers as { id: string }[])[0]!.id;
@@ -110,7 +109,8 @@ describe("the App's settings", () => {
 describe("connecting", () => {
   it("says the App is there, for who may change the owner's bots", async () => {
     expect((await call("GET", "/v1/app/github")).json).toMatchObject({ app: { slug: "ambient-bots", configured: true }, installations: [] });
-    expect((await call("GET", "/v1/app/github", undefined, ben)).status).toBe(403);
+    // Ben's own: nothing of Lena's.
+    expect((await call("GET", "/v1/app/github", undefined, ben)).json).toMatchObject({ installations: [] });
   });
 
   it("links an installation when GitHub sends the browser back with the state, once", async () => {
@@ -227,10 +227,9 @@ describe("unlinking and the tools", () => {
 
 describe("without the App", () => {
   it("answers app: null, and the routes that need it say it isn't set up", async () => {
-    const plain = await startStack({ bots: { users: [], teams: [] }, ambient: {} });
+    const plain = await startStack({ ambient: {} });
     try {
       const who = await signIn(plain, "apple-nora-ghapp", "Nora Ost");
-      plain.config.bots!.users.push(who.user.uid);
       expect((await appCall(plain, who.access_token, "GET", "/v1/app/github")).json).toEqual({ app: null, installations: [] });
       expect((await appCall(plain, who.access_token, "POST", "/v1/app/github/connect")).status).toBe(404);
       expect((await fetch(`${plain.origin}/v1/hooks/github-app`, { method: "POST", body: "{}" })).status).toBe(404);

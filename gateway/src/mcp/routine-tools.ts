@@ -190,8 +190,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
       throw err;
     }
   };
-  // Bots only for accounts and teams that have them (BRAIN_BOTS).
-  const hasBots = Boolean(bots) && routines.botsEnabled(actor);
+  const hasBots = Boolean(bots);
   const teamArg: Record<string, z.ZodTypeAny> =
     !onlyTeam && principal.teams.length
       ? { team: z.string().max(80).optional().describe(`A team's slug (${principal.teams.map((t) => t.slug).join(", ")}): the routine belongs to the team and runs on its server. Leave out for the user's own.`) }

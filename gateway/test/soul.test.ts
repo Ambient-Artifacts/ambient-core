@@ -30,10 +30,9 @@ const enc = encodeURIComponent;
 type Start = { run: { id: string }; workspace?: { system: string } };
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: {} });
+  s = await startStack({ ambient: {} });
   lena = await signIn(s, "apple-lena-soul", "Lena Vogel");
   ben = await signIn(s, "apple-ben-soul", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
   const setup = await hostCall("", "POST", "/v1/host/setup", { code, info });
   host = String(setup.json.token);
@@ -123,9 +122,11 @@ describe("Amb's own folder", () => {
     expect(learning.changes.map((c) => c.path)).toEqual(expect.arrayContaining(["SOUL.md", "memory.md"]));
   });
 
-  it("is only for the person, and only with bots on", async () => {
-    expect((await call("GET", "/v1/app/ambient/files", undefined, ben)).status).toBe(403);
-    expect((await call("PUT", "/v1/app/ambient/files/content?path=SOUL.md", { content: "x" }, ben)).status).toBe(403);
+  it("is only for the person: someone else's Amb has its own", async () => {
+    const own = await call("PUT", "/v1/app/ambient/files/content?path=SOUL.md", { content: "Ben's own soul." }, ben);
+    expect(own.status, JSON.stringify(own.json)).toBe(200);
+    const lenas = await call("GET", "/v1/app/ambient/files/content?path=SOUL.md");
+    expect(JSON.stringify(lenas.json)).not.toContain("Ben's own soul.");
   });
 
   it("is read and changed by Amb over MCP", async () => {

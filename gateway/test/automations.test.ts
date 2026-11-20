@@ -88,9 +88,8 @@ const setNow = (t: number | undefined) => {
 };
 
 beforeAll(async () => {
-  s = await startStack({ push: sender, bots: { users: [], teams: [] }, ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic }, learningAfterMs: 20 });
+  s = await startStack({ push: sender, ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic }, learningAfterMs: 20 });
   lena = await signIn(s, "apple-lena", "Lena Vogel");
-  s.config.bots!.users.push(lena.user.uid);
   auto = s.automations;
   await call("PUT", "/v1/app/push-device", { token: "ab".repeat(32), sandbox: true, platform: "ios", timeZone: "Europe/Vienna" });
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);

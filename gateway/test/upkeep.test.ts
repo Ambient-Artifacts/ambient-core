@@ -51,7 +51,7 @@ const overview: OverviewWriter = {
 };
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: { apiKey: undefined } });
+  s = await startStack({ ambient: { apiKey: undefined } });
   lena = await signIn(s, "apple-lena-upkeep", "Lena Vogel");
 });
 afterAll(() => s.close());
