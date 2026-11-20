@@ -270,6 +270,35 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
   };
   const hostOf = (res: Response) => res.locals.host as Host;
 
+  // Live text has a limit of its own (bots/live.ts): a few updates a second while a bot writes
+  // would use up the computer's 120 a minute within half a minute, and its result and everything
+  // else would get 429s (Reviewi on #80). And the computer is looked up once per 30 seconds, not
+  // on every update.
+  const perLive = limiter(600);
+  const liveHosts = new Map<string, { host: Host; at: number }>();
+  const hostLive = async (req: Request, res: Response, next: NextFunction) => {
+    const key = req.headers.authorization ?? "";
+    const now = Date.now();
+    let h = liveHosts.get(key);
+    if (!h || now - h.at > 30_000) {
+      const found = await d.routines.authenticate(key);
+      if (!found || (found.uid && !(await d.directory.user(found.uid)))) {
+        liveHosts.delete(key);
+        res.status(401).json({ error: "invalid_token" });
+        return;
+      }
+      if (liveHosts.size > 1_000) liveHosts.clear();
+      h = { host: found, at: now };
+      liveHosts.set(key, h);
+    }
+    if (!perLive(h.host.id)) {
+      res.status(429).json({ error: "slow_down" });
+      return;
+    }
+    res.locals.host = h.host;
+    next();
+  };
+
   r.post("/v1/host/setup", json, async (req, res) => {
     if (!perSetupAddress(addressKey(req.ip))) {
       res.status(429).json({ error: "slow_down" });
@@ -346,7 +375,7 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
 
   // The text a bot's run is writing, a few times a second (docs/bots.md, "Live text"). In memory
   // only; 404 for a run that isn't this computer's or is over, and the runner stops sending.
-  r.post("/v1/host/runs/:runId/live", host, json, async (req, res) => {
+  r.post("/v1/host/runs/:runId/live", hostLive, json, async (req, res) => {
     const body = LiveUpdate.safeParse(req.body);
     if (!body.success) return badRequest(res, body.error);
     if (!d.live) return res.status(404).json({ error: "no_live_text" });

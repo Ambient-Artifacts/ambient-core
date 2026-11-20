@@ -136,6 +136,16 @@ describe("a bot's answer as it's written", () => {
     expect(after.messages.at(-1)!.text).toBe("Found the bug: the retry never resets.");
   }, 30_000);
 
+  it("has a limit of its own: a long answer doesn't use up the computer's calls for its result", async () => {
+    const id = ((await appCall(s, lena.access_token, "GET", "/v1/app/routines")).json.routines as { id: string; name: string }[]).find((r) => r.name === "Fixer")!.id;
+    const start = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    const runId = (start.json.run as { id: string }).id;
+    // More than the computer's 120 a minute: a minute of writing at two updates a second, and more.
+    for (let i = 1; i <= 150; i++) expect((await hostCall(host, "POST", `/v1/host/runs/${runId}/live`, { seq: i, text: `word ${i}` })).status).toBe(204);
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info })).status).toBe(200);
+    expect((await hostCall(host, "POST", `/v1/host/runs/${runId}`, { status: "succeeded", summary: "Done." })).status).toBe(204);
+  });
+
   it("isn't taken from another computer, nor for a run that's over", async () => {
     const other = await signIn(s, "apple-ben-live", "Ben Weiss");
     const code = String((await appCall(s, other.access_token, "POST", "/v1/app/computers", { name: "Ben's server" })).json.code);

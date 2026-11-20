@@ -2248,19 +2248,26 @@ async function run(id) {
   let liveDirty = false;
   let liveOn = Boolean(bot);
   let liveBusy = false;
+  // Refused for sending too much (429): wait, so the computer's other calls aren't held up.
+  let liveHoldUntil = 0;
   const sendLive = async () => {
-    if (!liveOn || !liveDirty || liveBusy) return;
+    if (!liveOn || !liveDirty || liveBusy || Date.now() < liveHoldUntil) return;
     liveDirty = false;
     liveBusy = true;
     try {
       await call(cfg, "POST", `/v1/host/runs/${runInfo.id}/live`, { seq: ++liveSeq, text: liveText.slice(-8_000), tool: liveTool }, { retries: 0 });
     } catch (err) {
-      if (/HTTP 404|no_such_run|no_live_text|Not Found/i.test(err.message)) liveOn = false;
+      // Not this run's any more, or a gateway without live text: stop. Too many: wait a little.
+      if (err.status === 404 || err.status === 401) liveOn = false;
+      else if (err.status === 429) {
+        liveHoldUntil = Date.now() + 5_000;
+        liveDirty = true;
+      }
     } finally {
       liveBusy = false;
     }
   };
-  const liveTimer = setInterval(() => void sendLive(), 200);
+  const liveTimer = setInterval(() => void sendLive(), 250);
   liveTimer.unref();
 
   const ctx = {};
