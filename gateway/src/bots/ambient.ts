@@ -231,6 +231,22 @@ export class AmbientChat {
     return { messages, pending: this.isPending(uid) };
   }
 
+  /**
+   * For the Bots list's Ambient row: its newest message (a line of it) and whether it came after
+   * the person last opened the chat.
+   */
+  async summary(uid: string): Promise<{ unread: boolean; last: { text: string; at: number } | null }> {
+    const out = await this.d.control.q(api.bots.chatSummary, { uid: uid as never });
+    if (!out.last) return { unread: false, last: null };
+    const body = await openMessage(this.d.keys, { kind: "user", uid }, out.last.iv, out.last.ct, CHAT_PURPOSE).catch(() => ({ text: "" }));
+    return { unread: out.unread, last: { text: body.text.replace(/\s+/g, " ").trim().slice(0, 200), at: out.last.createdAt } };
+  }
+
+  /** The person opened the chat: Ambient's messages until now are read. */
+  async seen(uid: string): Promise<void> {
+    await this.d.control.m(api.bots.chatSeen, { uid: uid as never, now: this.now() });
+  }
+
   private async add(uid: string, role: "user" | "ambient", text: string, decisionId?: string, files: FileRef[] = []): Promise<ChatMessage> {
     const sealed = await sealMessage(this.d.keys, { kind: "user", uid }, { text, files }, CHAT_PURPOSE);
     const out = await this.d.control.m(api.bots.addChat, { uid: uid as never, role, iv: sealed.iv, ct: sealed.ct, ...(decisionId ? { decisionId } : {}), now: this.now() });

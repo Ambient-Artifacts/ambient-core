@@ -126,6 +126,16 @@ to `canEdit` (its settings, run, delete: still the team's owners and admins).
 - **Read is each person's own** (Convex `botReads`): one person opening the thread doesn't take
   the "done" news away from the others. A personal bot keeps `routines.seenAt`.
 
+#### Unread
+
+The Bots list marks what's new, as Messages does. A bot is `unread` (in `bot`) when its newest
+message came after the person last opened its thread (`seenAt`; a team bot's read is each person's,
+`botReads`). Ambient's chat is unread when Ambient wrote after the person last opened it
+(`ambientState.chatSeenAt`): `GET /v1/app/ambient/summary` answers `{ unread, last: { text, at } }`
+for its row. Opening reads: `GET …/thread` and `GET /v1/app/ambient/chat` mark it, unless they're
+asked with `?seen=0` (a fetch ahead nobody looks at yet). Reading and Ambient's messages move the
+`routines` revision, so the person's other devices follow.
+
 #### Live text
 
 A bot's answer shows as it's written, like Claude's own apps. The runner (0.15.0 on) starts Claude

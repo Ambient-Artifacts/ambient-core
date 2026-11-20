@@ -661,6 +661,8 @@ export default defineSchema({
     seen: v.array(v.string()),
     /** "New chat": the app shows the chat from here; older messages stay findable (docs/bots.md, "History"). */
     chatClearedAt: v.optional(v.number()),
+    /** When the person last opened the chat in the app: Ambient's messages after it are unread. */
+    chatSeenAt: v.optional(v.number()),
     /** The day (Vienna) Amb last went through the day to keep its memory. */
     memoryDay: v.optional(v.string()),
   }).index("by_user", ["userId"]),

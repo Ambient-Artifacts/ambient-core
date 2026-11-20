@@ -328,6 +328,8 @@ export interface BotView {
   openQuestion: { id: string; text: string; choices: string[] | null; askedAt: number } | null;
   /** The newest thing it said: a result, a failure or a question; `fix` for a Claude account problem. */
   lastMessage: { text: string; kind: string; at: number; fix: ClaudeFix | null } | null;
+  /** It said something since the person last opened its thread (theirs: a team bot's read is each person's). */
+  unread: boolean;
 }
 
 interface LatestRow {
@@ -550,6 +552,7 @@ export class RoutineService {
       state: botState({ enabled: r.enabled, ready, lastRunStatus: r.lastRun?.status ?? null, openQuestion: r.openQuestionId !== null, news }),
       openQuestion: q ? { id: String(q.m.id), text: q.body.text, choices: q.body.choices ?? null, askedAt: q.m.createdAt } : null,
       lastMessage: last ? { text: last.body.text, kind: last.m.kind, at: last.m.createdAt, fix: claudeFix(last.m.kind, last.body.text, computer) } : null,
+      unread: Boolean(last && last.m.createdAt > (r.seenAt ?? 0)),
     };
   }
 

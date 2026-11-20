@@ -349,6 +349,37 @@ export const chat = query({
   },
 });
 
+/** The chat's newest message from Ambient, and whether it came after the person last opened it. */
+export const chatSummary = query({
+  args: { ...secretArg, uid: v.id("users") },
+  handler: async (ctx, { secret, uid }) => {
+    assertService(secret);
+    const state = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    const from = state?.chatClearedAt ?? 0;
+    const last = await ctx.db
+      .query("ambientChat")
+      .withIndex("by_user", (q) => q.eq("userId", uid).gte("createdAt", from))
+      .order("desc")
+      .filter((q) => q.eq(q.field("role"), "ambient"))
+      .first();
+    return { last: last ? { iv: last.iv, ct: last.ct, createdAt: last.createdAt } : null, unread: Boolean(last && last.createdAt > (state?.chatSeenAt ?? 0)) };
+  },
+});
+
+/** The person opened the chat: what Ambient wrote until now is read. */
+export const chatSeen = mutation({
+  args: { ...secretArg, uid: v.id("users"), now: v.number() },
+  handler: async (ctx, { secret, uid, now }) => {
+    assertService(secret);
+    const state = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    if (state) {
+      if ((state.chatSeenAt ?? 0) < now) await ctx.db.patch(state._id, { chatSeenAt: now });
+    } else {
+      await ctx.db.insert("ambientState", { userId: uid, lastBeatAt: 0, day: "", sentToday: 0, seen: [], chatSeenAt: now });
+    }
+  },
+});
+
 export const addChat = mutation({
   args: { ...secretArg, uid: v.id("users"), role: v.union(v.literal("user"), v.literal("ambient")), iv: v.string(), ct: v.string(), decisionId: v.optional(v.string()), now: v.number() },
   handler: async (ctx, { secret, uid, role, iv, ct, decisionId, now }) => {
