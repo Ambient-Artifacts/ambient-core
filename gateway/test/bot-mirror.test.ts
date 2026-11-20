@@ -175,6 +175,9 @@ describe("a team's bots", () => {
     await call("POST", "/v1/app/teams/join", { code: INVITE });
     await s.t.run(async (ctx) => {
       for (const m of await ctx.db.query("members").collect()) await ctx.db.patch(m._id, { role: "admin" });
+      // A computer for the team's bots (a team's bot is refused without one).
+      const team = (await ctx.db.query("teams").collect()).find((t) => t.slug === "acme")!;
+      await ctx.db.insert("routineHosts", { teamId: team._id, name: "Team server", tokenHash: "h1:test", createdAt: Date.now() });
     });
     const made = await call("POST", "/v1/app/routines", { name: "Release notes", prompt: "Write the release notes.", schedule: daily, team: "acme", bot: {} });
     expect(made.status, JSON.stringify(made.json)).toBe(200);

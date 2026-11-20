@@ -52,7 +52,8 @@ const MESSAGES: Record<string, [string, number]> = {
   no_computer: ["This loop has no computer to run on. Pick one first.", 400],
   bots_only: ["With bots, every loop is a bot: it can't be turned back into a plain loop. Pause it instead, or delete it.", 400],
   bot_needs_computer: ["A bot of your own runs on one of your computers, and none is picked. Connect a computer in the Ambient app (Bots, then Computers) or pick one, then try again. A team's bots run on the team's server.", 400],
-  no_team_server: ["The team's server isn't set up for loops yet.", 400],
+  no_team_server: ["The team has no computer for its bots yet. An owner or admin connects one on the team's page in the Ambient app (Computers), with the same one-line command as a computer of your own.", 400],
+  team_needs_computer: ["The team has no computer for its bots yet. An owner or admin connects one on the team's page in the Ambient app (Computers), with the same one-line command as a computer of your own. Then make the bot again, or make it one of your own.", 400],
   team_routine_computer: ["A team's loops run on the team's server; leave the computer out.", 400],
   not_a_member: ["You're not in that team.", 403],
   admins_only: ["Only the team's owners and admins can change its loops and secrets.", 403],
@@ -734,7 +735,8 @@ export class RoutineService {
     });
     if (!out.ok) throw refused(out.error);
     // A bot without a schedule that never ran (made paused, e.g. over MCP) starts once it's turned on.
-    if (r.bot && patch.enabled === true && !r.enabled && !r.lastRun && (patch.schedule ?? r.schedule).every === "needed") await this.firstRun(this.ownerOf(r), id);
+    // Switched on before it ever ran: its first run, unless the one from when it was made still waits.
+    if (r.bot && patch.enabled === true && !r.enabled && !r.lastRun && !r.runRequestedAt && (patch.schedule ?? r.schedule).every === "needed") await this.firstRun(this.ownerOf(r), id);
     // A bot's name or settings changed (or it became a loop again): its mirror in git follows.
     if (this.d.folder && (r.bot || patch.bot) && (patch.name !== undefined || patch.schedule !== undefined || patch.enabled !== undefined || patch.bot !== undefined)) {
       this.d.folder.touched(this.ownerOf(r), { routineId: id, path: "", by: meta.by ?? (source === "app" ? { kind: "user", name: null } : { kind: "amb", name: source }), why: meta.why ?? "settings" });
