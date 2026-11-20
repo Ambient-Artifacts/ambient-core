@@ -5,7 +5,7 @@ import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
-import { routineFor } from "./routines.js";
+import { routineFor, teamComputer } from "./routines.js";
 
 const access = { uid: v.id("users"), teamIds: v.array(v.id("teams")) };
 /** How much of the chat the app shows at once. Nothing is cut off: the history is kept in full. */
@@ -113,8 +113,7 @@ export const post = mutation({
     if (!r.teamId && r.userId !== uid) return { ok: false as const, error: "admins_only" };
     if (!r.teamId && !r.hostId) return { ok: false as const, error: "no_computer" };
     if (r.teamId) {
-      const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
-      if (!server?.tokenHash) return { ok: false as const, error: "no_team_server" };
+      if (!(await teamComputer(ctx, r.teamId))) return { ok: false as const, error: "no_team_server" };
     }
     const user = await ctx.db.get(uid);
     const open = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
@@ -194,8 +193,7 @@ export const wake = mutation({
     const messageId = await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "user", kind: "message", iv, ct, authorName, createdAt: now });
     let hostId: string | null = r.hostId ?? null;
     if (r.teamId) {
-      const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
-      hostId = server?._id ?? null;
+      hostId = (await teamComputer(ctx, r.teamId))?._id ?? null;
     }
     if (run && r.enabled) {
       const pending = r.pendingMessageId ? await ctx.db.get(r.pendingMessageId) : null;

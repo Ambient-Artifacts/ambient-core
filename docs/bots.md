@@ -1113,7 +1113,9 @@ template says which rights in words (no merge rights for any).
 
 A bot of one's own always has a computer: creating one without (here, `POST /v1/app/routines`,
 the MCP tools), making a loop without one a bot, or taking a bot's computer away answers
-`400 bot_needs_computer`. A team's bots run on the team's server.
+`400 bot_needs_computer`. A team's bots run on the team's computer (its server, or a computer
+an owner or admin connected for the team): a team's bot made while the team has none answers
+`400 team_needs_computer`, and writing to one whose team lost it, `400 no_team_server`.
 
 MCP tools: `bot_templates`, `create_bot_from_template` (made paused, as anything an AI app
 creates).

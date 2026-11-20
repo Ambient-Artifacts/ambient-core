@@ -155,6 +155,15 @@ export const list = query({
   },
 });
 
+/**
+ * The computer a team's bots run on: one set up (with a token) among the team's. A code still
+ * waiting for setup isn't one, whichever row comes first.
+ */
+export async function teamComputer(ctx: { db: QueryCtx["db"] }, teamId: Id<"teams">): Promise<Doc<"routineHosts"> | null> {
+  const hosts = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(MAX_HOSTS * 2);
+  return hosts.find((h) => h.tokenHash) ?? null;
+}
+
 export const create = mutation({
   args: {
     ...secretArg,
@@ -183,6 +192,9 @@ export const create = mutation({
       host = await ownHost(ctx, uid, hostId);
       if (!host) return { ok: false as const, error: "no_such_computer" };
     }
+    // A team's bot without a computer for the team's bots would only ever sit there asleep (as a
+    // personal one without a computer, bot_needs_computer): refused up front.
+    if (teamId && fields.bot && !(await teamComputer(ctx, teamId))) return { ok: false as const, error: "team_needs_computer" };
     const id = await ctx.db.insert("routines", { userId: uid, teamId, ...fields, hostId: host?._id, createdAt: now, updatedAt: now });
     return { ok: true as const, routine: routineShape((await ctx.db.get(id))!) };
   },
@@ -272,8 +284,7 @@ export const requestRun = mutation({
     if (!r) return { ok: false as const, error: "no_such_routine" };
     if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     if (r.teamId) {
-      const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
-      if (!server?.tokenHash) return { ok: false as const, error: "no_team_server" };
+      if (!(await teamComputer(ctx, r.teamId))) return { ok: false as const, error: "no_team_server" };
     } else if (!r.hostId) return { ok: false as const, error: "no_computer" };
     const userId = ctx.db.normalizeId("users", uid);
     const user = userId ? await ctx.db.get(userId) : null;

@@ -168,7 +168,7 @@ export class BotService {
         admins_only: ["Only whoever may change this bot can write to it.", 403],
         not_yours: ["Only the bot's maker, or their Ambient, answers its questions.", 403],
         no_computer: ["This bot has no computer to run on. Pick one first.", 400],
-        no_team_server: ["The team's server isn't set up for loops yet.", 400],
+        no_team_server: ["The team has no computer for its bots yet. An owner or admin connects one on the team's page in the Ambient app (Computers), with the same one-line command as a computer of your own.", 400],
       };
       const [m, s] = messages[out.error] ?? ["That didn't work.", 400];
       throw refused(out.error, m, s);

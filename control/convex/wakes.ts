@@ -7,7 +7,7 @@ import type { Doc, Id } from "./_generated/dataModel.js";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { runByToken } from "./bots.js";
 import { assertService, secretArg } from "./lib/service.js";
-import { manages, routineFor } from "./routines.js";
+import { manages, routineFor, teamComputer } from "./routines.js";
 
 const access = { uid: v.id("users"), teamIds: v.array(v.id("teams")) };
 
@@ -160,8 +160,7 @@ export const fire = mutation({
     const messageId = await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "user", kind: "message", iv: w.iv, ct: w.ct, authorName: "Wake-up", createdAt: now });
     let hostId: string | null = r.hostId ?? null;
     if (r.teamId) {
-      const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
-      hostId = server?._id ?? null;
+      hostId = (await teamComputer(ctx, r.teamId))?._id ?? null;
     }
     if (r.enabled) {
       const pending = r.pendingMessageId ? await ctx.db.get(r.pendingMessageId) : null;
