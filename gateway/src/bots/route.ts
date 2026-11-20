@@ -67,6 +67,8 @@ export function botAppRoutes(
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
     wakes?: () => Wakes | undefined;
+    /** Search across Ambient's chat and the bots' threads (the Bots list's search field). */
+    history?: () => HistorySearch | undefined;
     directory: Directory;
     auth: RequestHandler;
     json: RequestHandler;
@@ -707,6 +709,20 @@ export function botAppRoutes(
     }
     try {
       res.json(await folder.writeAmbMemory(a.uid, body.data.content, await userBy(a.uid), body.data.why ?? null));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // The Bots list's search: words across the chat with Ambient and the threads (and handoffs) of
+  // every bot the person sees, newest first (bots/history.ts, as search_history for AI apps).
+  r.get("/v1/app/bots/search", d.auth, async (req, res) => {
+    const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 200) : "";
+    const history = d.history?.();
+    if (!q) return res.json({ hits: [] });
+    if (!history) return res.status(404).json({ error: "no_search", message: "This server can't search bots yet." });
+    try {
+      res.json({ hits: await history.forPerson(await actor(res), { q, limit: 50, messagesOnly: true }) });
     } catch (err) {
       fail(res, err);
     }
