@@ -48,8 +48,6 @@ export async function startStack(
     /** Ambient's Microsoft app against a fake Microsoft; `microsoftFetch` also serves the team server's Graph calls. */
     microsoftConnect?: { connector: MicrosoftConnector; propagationDelayMs?: number };
     microsoftFetch?: typeof fetch;
-    /** Who has bots (BRAIN_BOTS); tests add account ids to it once they're signed in. */
-    bots?: { users: string[]; teams: string[] };
     /** Ambient's chat against a fake Anthropic (no heartbeat timer in tests). */
     ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number };
     /** How long after a change bots are mirrored into git (tests: short; `idle()` waits). */
@@ -126,7 +124,6 @@ export async function startStack(
     allowFileRepos: true,
     signups: opts.signups,
     requireSignInNonce: opts.requireSignInNonce,
-    bots: opts.bots,
     githubApp: opts.githubApp,
   };
 

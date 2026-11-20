@@ -5,7 +5,6 @@
 // model only how to say it: nothing is missed because a model misjudged it, and nothing is sent
 // because one felt like it. Nothing twice, at most 6 a day, none at night.
 import { api, type Control } from "../control.ts";
-import type { BotsAccess } from "../config.ts";
 import type { Notifier } from "../push.ts";
 import type { AmbientChat } from "./ambient.ts";
 
@@ -58,7 +57,8 @@ export class Heartbeat {
     private d: {
       control: Control;
       ambient: AmbientChat;
-      bots?: BotsAccess;
+      /** Everyone with bots or a chat with Ambient (Convex `bots.people`). */
+      people?: () => Promise<string[]>;
       notifier?: Notifier;
 
       now?: () => number;
@@ -71,7 +71,7 @@ export class Heartbeat {
 
   /** Looks every 5 minutes who's due (a person's beat is every 30 minutes). */
   start(): void {
-    if (this.timer || !this.d.bots) return;
+    if (this.timer || !this.d.people) return;
     this.timer = setInterval(() => void this.tick(), 5 * 60_000);
     this.timer.unref();
   }
@@ -82,10 +82,10 @@ export class Heartbeat {
   }
 
   async tick(): Promise<void> {
-    if (this.busy || !this.d.bots) return;
+    if (this.busy || !this.d.people) return;
     this.busy = true;
     try {
-      const people = (await this.d.control.q(api.bots.heartbeatPeople, { users: this.d.bots.users.filter((u) => u !== "*"), teams: this.d.bots.teams.filter((t) => t !== "*") })) as string[];
+      const people = await this.d.people();
       for (const uid of people) {
         await this.beat(uid).catch((err: Error) => console.warn(`[heartbeat] ${err.message}`));
         await this.nightly(uid).catch((err: Error) => console.warn(`[heartbeat] nightly: ${err.message}`));

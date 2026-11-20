@@ -36,10 +36,9 @@ const call = (method: string, path: string, body?: unknown, who = lena) => appCa
 const settle = () => s.folders.mirror!.idle();
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, mirrorDelayMs: 20 });
+  s = await startStack({ mirrorDelayMs: 20 });
   lena = await signIn(s, "apple-lena-mirror", "Lena Vogel");
   ben = await signIn(s, "apple-ben-mirror", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid, ben.user.uid);
   await call("PUT", "/v1/app/routines/secrets/GH_TOKEN", { value: "ghp_secret_value" });
   // A bot of one's own runs on one of their computers.
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
@@ -177,7 +176,6 @@ describe("a team's bots", () => {
     await s.t.run(async (ctx) => {
       for (const m of await ctx.db.query("members").collect()) await ctx.db.patch(m._id, { role: "admin" });
     });
-    s.config.bots!.teams.push("acme");
     const made = await call("POST", "/v1/app/routines", { name: "Release notes", prompt: "Write the release notes.", schedule: daily, team: "acme", bot: {} });
     expect(made.status, JSON.stringify(made.json)).toBe(200);
     id = (made.json.routine as { id: string }).id;

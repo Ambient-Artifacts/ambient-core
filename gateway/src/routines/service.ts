@@ -15,7 +15,6 @@ import { join } from "node:path";
 import { z } from "zod";
 import { BotInput, ModelChoice, RoutineSchedule, botLook, botSettings, modelRuntime, botState, describeSchedule, nextRun, onCalendar, storedModel, unseenNews, type BotColor, type BotSettings, type BotShape, type BotState, type BotWear } from "@brain/spec";
 import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix } from "../bots/messages.ts";
-import type { BotsAccess } from "../config.ts";
 import { api, type Control } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Team } from "../directory.ts";
@@ -65,7 +64,6 @@ const MESSAGES: Record<string, [string, number]> = {
   invalid_code: ["That setup code isn't valid. Create a new one in the Ambient app.", 400],
   expired_code: ["That setup code has expired. Create a new one in the Ambient app.", 400],
   no_such_run: ["There's no such run.", 404],
-  bots_not_enabled: ["Bots aren't switched on for this account or team yet.", 403],
   bad_token: ["That isn't a Claude plan token (sk-ant-oat…, from claude setup-token) or an Anthropic API key (sk-ant-api…).", 400],
   no_plan: ["There's no Claude plan stored for this computer yet. Add one in the Ambient app (the computer, then Claude).", 409],
   no_key: ["There's no API key stored for this computer yet. Add one in the Ambient app (the computer, then Claude).", 409],
@@ -424,8 +422,6 @@ export class RoutineService {
       now?: () => number;
       /** Pushes to the owner's apps when a run fails (finishRun decides when it's news). */
       notifier?: Notifier;
-      /** Who has bots (BRAIN_BOTS); absent: nobody. */
-      bots?: BotsAccess;
       /** A user's teams (for whether their own computer runs Ambient). */
       teamsOf?: (uid: string) => Promise<Team[]>;
       /** A team by slug (for whether a team's server runs Ambient). */
@@ -439,50 +435,7 @@ export class RoutineService {
     },
   ) {}
 
-  // ---- bots: who has them ----
-
-  /** Bots for a personal owner (`uid`), or a team (by slug). */
-  private botsOn(owner: { uid: string } | { slug: string }): boolean {
-    const b = this.d.bots;
-    if (!b) return false;
-    return "uid" in owner ? b.users.includes("*") || b.users.includes(owner.uid) : b.teams.includes("*") || b.teams.includes(owner.slug);
-  }
-
-  /**
-   * Personal bots: the account is listed, or it's in a team that has bots (the team's people try
-   * bots on their own loops too, without listing every account id).
-   */
-  private personalBots(actor: Actor): boolean {
-    return this.botsOn({ uid: actor.uid }) || this.readable(actor).some((t) => this.botsOn({ slug: t.slug }));
-  }
-
-  /** Whether the app shows bots to this user: their own, or one of their teams has them. */
-  botsEnabled(actor: Actor): boolean {
-    return (actor.personal && this.personalBots(actor)) || this.readable(actor).some((t) => this.botsOn({ slug: t.slug }));
-  }
-
-  /** Bots for the owner of `r` (its team, or whoever made a personal one). */
-  botsFor(actor: Actor, r: { teamId: string | null; createdBy: string }): boolean {
-    if (r.teamId) {
-      const team = this.teamOf(actor, r.teamId);
-      return !!team && this.botsOn({ slug: team.slug });
-    }
-    return r.createdBy === actor.uid ? this.personalBots(actor) : this.botsOn({ uid: r.createdBy });
-  }
-
-  /** Whether a user has bots (and so Ambient), from their account alone. */
-  async botsForUser(uid: string): Promise<boolean> {
-    if (this.botsOn({ uid })) return true;
-    const teams = (await this.d.teamsOf?.(uid).catch(() => [])) ?? [];
-    return teams.some((t) => t.status === "active" && this.botsOn({ slug: t.slug }));
-  }
-
-  /** The teams (by id) that have bots: only those in BRAIN_BOTS by slug. */
-  private async botTeamIds(): Promise<Set<string>> {
-    const slugs = (this.d.bots?.teams ?? []).filter((s) => s !== "*");
-    const teams = await Promise.all(slugs.map((s) => this.d.teamBySlug?.(s).catch(() => undefined)));
-    return new Set(teams.filter((t): t is Team => !!t && t.status === "active").map((t) => t.id));
-  }
+  // Every routine is a bot, for everyone (docs/bots.md, "Loops are bots"): there's no switch.
 
   /** Whether a computer runs Ambient: a person's own and a team's, always (upkeep, the team's brain, bots). */
   async ambientOn(host: Host): Promise<boolean> {
@@ -494,12 +447,11 @@ export class RoutineService {
   }
 
   /**
-   * Where Ambient can run for a user, in order: their own computers, then the servers of their teams
-   * that have bots (Ambient's own machine for the team, one session per person there).
+   * Where Ambient can run for a user, in order: their own computers, then their teams' servers
+   * (Ambient's own machine for the team, one session per person there).
    */
   async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null }[]> {
-    const botTeams = await this.botTeamIds();
-    const teams = ((await this.d.teamsOf?.(uid).catch(() => [])) ?? []).filter((t) => t.status === "active" && (this.d.bots?.teams.includes("*") || botTeams.has(t.id)));
+    const teams = ((await this.d.teamsOf?.(uid).catch(() => [])) ?? []).filter((t) => t.status === "active");
     const out = (await this.d.control.q(api.routines.list, { uid: uid as never, teamIds: teams.map((t) => t.id) as never })) as unknown as { hosts: HostRow[] };
     const ready = out.hosts.filter((h) => h.ready);
     return [...ready.filter((h) => !h.teamId), ...ready.filter((h) => h.teamId)].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null }));
@@ -711,13 +663,11 @@ export class RoutineService {
       hostId = await this.resolveComputer(actor, input.computer);
     }
     const owner: Owner = team ? { kind: "team", teamId: team.id } : { kind: "user", uid: actor.uid };
-    const ownerHasBots = team ? this.botsOn({ slug: team.slug }) : this.personalBots(actor);
-    if (input.bot && !ownerHasBots) throw refused("bots_not_enabled");
-    // With bots there are no plain loops (docs/bots.md, "Loops are bots"): one made without bot
-    // settings is a bot with a new bot's defaults.
-    if (!input.bot && ownerHasBots) input = { ...input, bot: {} };
+    // Every routine is a bot (docs/bots.md, "Loops are bots"): one made without bot settings gets
+    // a new bot's defaults.
+    if (!input.bot) input = { ...input, bot: {} };
     // A bot of one's own without a computer would only ever sit there asleep: refused up front.
-    if (input.bot && !team && !hostId) throw refused("bot_needs_computer");
+    if (!team && !hostId) throw refused("bot_needs_computer");
     const sealed = await this.d.keys.seal(owner, "routine:prompt", input.prompt);
     const out = await this.d.control.m(api.routines.create, {
       uid: actor.uid as never,
@@ -754,9 +704,8 @@ export class RoutineService {
     if (r.teamId && patch.computer) throw refused("team_routine_computer");
     const sealed = patch.prompt !== undefined ? await this.d.keys.seal(this.ownerOf(r), "routine:prompt", patch.prompt) : undefined;
     const hostId = !r.teamId && patch.computer !== undefined ? await this.resolveComputer(actor, patch.computer) : undefined;
-    if (patch.bot && !this.botsFor(actor, r)) throw refused("bots_not_enabled");
-    // With bots every loop is a bot: none goes back to being a plain loop.
-    if (patch.bot === null && r.bot && this.botsFor(actor, r)) throw refused("bots_only");
+    // Every routine is a bot: none goes back to being a plain loop.
+    if (patch.bot === null) throw refused("bots_only");
     // A personal bot keeps a computer: taking it away, or making a loop without one a bot, is refused.
     if (!r.teamId && (r.bot || patch.bot) && patch.bot !== null) {
       const keeps = hostId !== undefined ? hostId : r.hostId;
@@ -807,18 +756,15 @@ export class RoutineService {
   botOwner(actor: Actor, team?: string | null): Owner {
     if (team) {
       const t = this.managedTeam(actor, team);
-      if (!this.botsOn({ slug: t.slug })) throw refused("bots_not_enabled");
       return { kind: "team", teamId: t.id };
     }
     this.assertPersonalWrite(actor);
-    if (!this.personalBots(actor)) throw refused("bots_not_enabled");
     return { kind: "user", uid: actor.uid };
   }
 
   async folderOf(actor: Actor, id: string, write: boolean): Promise<{ owner: Owner; routineId: string; name: string; agents: string; teamId: string | null }> {
     const { r } = await this.row(actor, id);
     if (!r.bot) throw new RoutineError("no_such_bot", "There's no such bot.", 404);
-    if (!this.botsFor(actor, r)) throw refused("bots_not_enabled");
     if (write) {
       this.writeAccess(actor, r);
       if (!r.teamId && r.createdBy !== actor.uid) throw refused("no_such_routine");

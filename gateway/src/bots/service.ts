@@ -5,7 +5,7 @@
 //                         ──▶ answer() while it waits; later, the answer starts a run that resumes
 //
 // Who may do what is the loops' rule: whoever sees a bot reads its thread, whoever may change it
-// writes to it. Only accounts and teams in BRAIN_BOTS have bots at all.
+// writes to it (a team bot's thread: everyone in the team). Every routine is a bot, for everyone.
 import { botLook } from "@brain/spec";
 import { api } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
@@ -97,7 +97,6 @@ export class BotService {
       throw err;
     });
     if (!r.bot) throw refused("no_such_bot", "There's no such bot.", 404);
-    if (!this.d.routines.botsFor(actor, r)) throw refused("bots_not_enabled", "Bots aren't switched on for this account or team yet.", 403);
     return r;
   }
 

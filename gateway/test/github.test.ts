@@ -55,10 +55,9 @@ const runOnce = async (id: string) => {
 };
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: {}, githubBatchMs: 60_000 });
+  s = await startStack({ ambient: {}, githubBatchMs: 60_000 });
   lena = await signIn(s, "apple-lena-gh", "Lena Vogel");
   ben = await signIn(s, "apple-ben-gh", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
   const computer = ((await call("GET", "/v1/app/routines")).json.computers as { id: string }[])[0]!.id;
@@ -74,7 +73,8 @@ describe("the webhook", () => {
     expect(first.secret).toMatch(/^[0-9a-f]{64}$/);
     expect(first.events).toContain("Pull request review comments");
     expect((await call("GET", "/v1/app/github-hook")).json.url).toBe(first.url);
-    expect((await call("GET", "/v1/app/github-hook", undefined, ben)).status).toBe(403);
+    // Ben's own webhook, not Lena's.
+    expect((await call("GET", "/v1/app/github-hook", undefined, ben)).json.url).not.toBe(first.url);
     expect((await call("GET", "/v1/app/github-hook?team=nope")).status).toBe(403);
     hook = (await call("POST", "/v1/app/github-hook/rotate")).json as typeof hook;
     expect(hook.url).not.toBe(first.url);

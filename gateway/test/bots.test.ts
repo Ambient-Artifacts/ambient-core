@@ -54,10 +54,9 @@ const one = async (id: string) => (await routine(id)).find((r) => r.id === id)!;
 const thread = async (id: string) => (await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/thread`)).json as { messages: Msg[]; openQuestion: Msg | null };
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic } });
+  s = await startStack({ ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic } });
   lena = await signIn(s, "apple-lena", "Lena Vogel");
   ben = await signIn(s, "apple-ben", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "Build server" })).json.code);
   const setup = await hostCall("", "POST", "/v1/host/setup", { code, info });
   host = String(setup.json.token);
@@ -67,18 +66,14 @@ beforeAll(async () => {
 });
 afterAll(() => s.close());
 
-describe("the gate", () => {
-  it("shows bots only to accounts and teams in BRAIN_BOTS", async () => {
-    expect((await appCall(s, lena.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true, loopsAreBots: true });
-    expect((await appCall(s, ben.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: false, loopsAreBots: false });
-    const refused = await appCall(s, ben.access_token, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: daily, bot: {} });
-    expect(refused.status).toBe(403);
-    expect(refused.json.error).toBe("bots_not_enabled");
-    expect((await appCall(s, ben.access_token, "GET", "/v1/app/ambient/chat")).status).toBe(403);
+describe("bots are everyone's", () => {
+  it("with no switch: everyone gets bots and Ambient", async () => {
+    for (const who of [lena, ben]) expect((await appCall(s, who.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true, loopsAreBots: true });
+    expect((await appCall(s, ben.access_token, "GET", "/v1/app/ambient/chat")).status).toBe(200);
   });
 
-  it("makes every new loop a bot with bots on, and leaves loops as they are without", async () => {
-    // With bots there are no plain loops: one made without bot settings is a new bot (docs/bots.md, "Loops are bots").
+  it("makes every new loop a bot", async () => {
+    // One made without bot settings is a new bot (docs/bots.md, "Loops are bots").
     const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Plain", prompt: "y", schedule: daily });
     expect((made.json.routine as R).bot).toMatchObject({ isolation: "container", secrets: [], report: "news" });
     const start = await hostCall(host, "POST", `/v1/host/routines/${(made.json.routine as R).id}/runs`);
@@ -86,32 +81,17 @@ describe("the gate", () => {
     expect(start.json.env).toEqual({});
     await hostCall(host, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "ok" });
     await appCall(s, lena.access_token, "DELETE", `/v1/app/routines/${(made.json.routine as R).id}`);
-    // Without bots, a loop stays a loop.
-    const loop = await appCall(s, ben.access_token, "POST", "/v1/app/routines", { name: "Plain", prompt: "y", schedule: daily });
-    expect(loop.status, JSON.stringify(loop.json)).toBe(200);
-    expect((loop.json.routine as R).bot).toBeNull();
-    await appCall(s, ben.access_token, "DELETE", `/v1/app/routines/${(loop.json.routine as R).id}`);
   });
-});
 
-describe("the gate by team", () => {
-  it("gives a team's people bots of their own too", async () => {
+  it("a bot of your own runs on one of your computers, and keeps it", async () => {
     const owner = await signIn(s, "apple-tina", "Tina Roth");
-    const made = await appCall(s, owner.access_token, "POST", "/v1/app/teams", { name: "Bots Lab" });
-    const slug = (made.json.team as { slug: string }).slug;
-    expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: false, loopsAreBots: false });
-    s.config.bots!.teams.push(slug);
-    expect((await appCall(s, owner.access_token, "GET", "/v1/app/features")).json).toEqual({ bots: true, loopsAreBots: true });
-    // A bot of their own needs one of their computers first.
     const none = await appCall(s, owner.access_token, "POST", "/v1/app/routines", { name: "Mine", prompt: "y", schedule: daily, bot: {} });
     expect(none.json.error).toBe("bot_needs_computer");
     const code = String((await appCall(s, owner.access_token, "POST", "/v1/app/computers", { name: "Tina's Mac" })).json.code);
     const tinaMac = ((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.computer as { id: string }).id;
     const own = await appCall(s, owner.access_token, "POST", "/v1/app/routines", { name: "Mine", prompt: "y", schedule: daily, computer: tinaMac, bot: {} });
     expect(own.status, JSON.stringify(own.json)).toBe(200);
-    // …and keeps it: taking the computer away is refused.
     expect((await appCall(s, owner.access_token, "PATCH", `/v1/app/routines/${(own.json.routine as R).id}`, { computer: null })).json.error).toBe("bot_needs_computer");
-    expect((own.json.routine as R).bot).not.toBeNull();
   });
 });
 
@@ -300,10 +280,6 @@ describe("bots over MCP", () => {
     expect((await one(r.id)).bot?.state).toBe("asleep");
     await client.close();
 
-    const benPat = String((await appCall(s, ben.access_token, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
-    const benClient = await mcpClient(`${s.origin}/mcp`, benPat);
-    expect((await benClient.listTools()).tools.map((t) => t.name)).not.toContain("bot_thread");
-    await benClient.close();
   });
 });
 

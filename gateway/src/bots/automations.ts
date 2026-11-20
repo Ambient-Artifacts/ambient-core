@@ -15,7 +15,6 @@ import { randomBytes } from "node:crypto";
 import { RoutineSchedule, describeSchedule, nextRun } from "@brain/spec";
 import { z } from "zod";
 import { api, type Control } from "../control.ts";
-import type { BotsAccess } from "../config.ts";
 import type { Notifier } from "../push.ts";
 import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { RoutineError, type Actor, type RoutineService } from "../routines/service.ts";
@@ -245,7 +244,8 @@ export class Automations {
       files: BotFiles;
       decisions: DecisionService;
       notifier?: Notifier;
-      bots?: BotsAccess;
+      /** Everyone with bots or a chat with Ambient (Convex `bots.people`). */
+      people?: () => Promise<string[]>;
       actorFor: (uid: string) => Promise<Actor>;
       now?: () => number;
       /** Tests: how long Amb may take. */
@@ -486,7 +486,7 @@ export class Automations {
   // ---- the ticker: time automations and waiting decisions ----
 
   start(): void {
-    if (this.timer || !this.d.bots) return;
+    if (this.timer || !this.d.people) return;
     this.timer = setInterval(() => void this.tick(), 60_000);
     this.timer.unref();
   }
@@ -497,10 +497,10 @@ export class Automations {
   }
 
   async tick(): Promise<void> {
-    if (this.busy || !this.d.bots) return;
+    if (this.busy || !this.d.people) return;
     this.busy = true;
     try {
-      const people = (await this.d.control.q(api.bots.heartbeatPeople, { users: this.d.bots.users.filter((u) => u !== "*"), teams: this.d.bots.teams.filter((t) => t !== "*") })) as string[];
+      const people = await this.d.people();
       for (const uid of people) await this.tickFor(uid).catch((err: Error) => console.warn(`[automations] ${err.message}`));
     } finally {
       this.busy = false;

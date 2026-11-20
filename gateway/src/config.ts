@@ -72,11 +72,6 @@ export interface GatewayConfig {
   requireSignInNonce?: boolean;
   /** Teams' bots in Microsoft Teams (msteams/), from BRAIN_MSTEAMS_BOTS. None: /teams/messages answers 401. */
   msteamsBots?: MsTeamsBotConfig[];
-  /**
-   * Who has bots and the chat with Ambient (docs/bots.md), from BRAIN_BOTS: accounts by id and
-   * teams by slug. Absent: nobody; loops stay as they are.
-   */
-  bots?: BotsAccess;
   /** The model Ambient's chat answers with (BRAIN_AMBIENT_MODEL). */
   ambientModel?: string;
   /**
@@ -84,32 +79,6 @@ export interface GatewayConfig {
    * _WEBHOOK_SECRET. Absent: Connect GitHub answers `app: null`, owners' own webhooks still work.
    */
   githubApp?: GitHubAppConfig;
-}
-
-export interface BotsAccess {
-  users: string[];
-  teams: string[];
-}
-
-/** BRAIN_BOTS: "user:<account id>,team:<slug>,…"; "all" for everyone (a self-hosted server). */
-export function parseBotsAccess(raw: string | undefined): BotsAccess | undefined {
-  const items = (raw ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (!items.length) return undefined;
-  const out: BotsAccess = { users: [], teams: [] };
-  for (const item of items) {
-    if (item === "all") {
-      out.users.push("*");
-      out.teams.push("*");
-      continue;
-    }
-    const m = /^(user|team):([A-Za-z0-9_-]+)$/.exec(item);
-    if (!m) throw new Error(`BRAIN_BOTS: "${item}" isn't user:<account id>, team:<slug> or all`);
-    (m[1] === "user" ? out.users : out.teams).push(m[2]!);
-  }
-  return out;
 }
 
 export async function generateSigningKey(): Promise<JWK> {
@@ -173,7 +142,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     signups: parseSignups(env.BRAIN_SIGNUPS),
     requireSignInNonce: env.BRAIN_SIGNIN_NONCE === "required",
     msteamsBots: parseMsTeamsBots(env.BRAIN_MSTEAMS_BOTS),
-    bots: parseBotsAccess(env.BRAIN_BOTS),
     ambientModel: env.BRAIN_AMBIENT_MODEL || undefined,
     githubApp: loadGitHubApp(env),
     apns:

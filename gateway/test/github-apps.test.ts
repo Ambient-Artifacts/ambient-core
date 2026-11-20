@@ -91,9 +91,8 @@ beforeAll(async () => {
   });
   await new Promise<void>((r) => gh.listen(0, "127.0.0.1", r));
   apiBase = `http://127.0.0.1:${(gh.address() as AddressInfo).port}`;
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: {}, githubBatchMs: 10, githubApp: { appId: shared.id, slug: shared.slug, privateKey: shared.privateKey, webhookSecret: shared.secret, apiBase } });
+  s = await startStack({ ambient: {}, githubBatchMs: 10, githubApp: { appId: shared.id, slug: shared.slug, privateKey: shared.privateKey, webhookSecret: shared.secret, apiBase } });
   lena = await signIn(s, "apple-lena-ghapps", "Lena Vogel");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
 });

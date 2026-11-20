@@ -42,9 +42,8 @@ async function computerRuns(answer: { code: number; output: string }) {
 }
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] } });
+  s = await startStack({});
   lena = await signIn(s, "apple-lena", "Lena Vogel");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "VPS" })).json.code);
   const setup = await hostCall("", "POST", "/v1/host/setup", { code, info });
   host = String(setup.json.token);

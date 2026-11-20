@@ -46,9 +46,8 @@ const startRun = async () => {
 const finish = (runId: string) => hostCall(host, "POST", `/v1/host/runs/${runId}`, { status: "succeeded", summary: "Planned the week." });
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] } });
+  s = await startStack({});
   lena = await signIn(s, "apple-lena-wakes", "Lena Vogel");
-  s.config.bots!.users.push(lena.user.uid);
   await appCall(s, lena.access_token, "POST", "/v1/app/teams/join", { code: INVITE });
   const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "Build server" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);

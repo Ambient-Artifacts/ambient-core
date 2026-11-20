@@ -8,7 +8,7 @@ import { appCall, INVITE, mcpClient, signIn, startStack, type Stack } from "./he
 let s: Stack;
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] } });
+  s = await startStack({});
 });
 afterAll(() => s.close());
 
@@ -37,7 +37,6 @@ describe("every tool has a title and says whether it reads or what it may destro
     const ben = await signIn(s, "apple-ben-tools", "Ben Weiss");
     const joined = await appCall(s, lena.access_token, "POST", "/v1/app/teams/join", { code: INVITE });
     const slug = (joined.json.team as { slug: string }).slug;
-    s.config.bots!.users.push(lena.user.uid);
 
     const personal = String((await appCall(s, lena.access_token, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
     const withBots = await tools(`${s.origin}/mcp`, personal);

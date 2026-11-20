@@ -24,9 +24,8 @@ const hostCall = async (token: string, method: string, path: string, body?: unkn
 };
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] } });
+  s = await startStack({});
   lena = await signIn(s, "apple-lena-botbrain", "Lena Vogel");
-  s.config.bots!.users.push(lena.user.uid);
   await appCall(s, lena.access_token, "POST", "/v1/app/teams/join", { code: INVITE });
   const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "Build server" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);

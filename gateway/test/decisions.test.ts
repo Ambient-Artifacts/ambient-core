@@ -57,9 +57,8 @@ async function botAsks(name: string, question: string, choices: string[], delega
 }
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic, triageMs: 5000 } });
+  s = await startStack({ ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic, triageMs: 5000 } });
   lena = await signIn(s, "apple-lena", "Lena Vogel");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "Build server" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
 });

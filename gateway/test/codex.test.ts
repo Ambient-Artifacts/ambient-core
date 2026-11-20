@@ -29,10 +29,9 @@ type Computer = { id: string; codex: string | null; openaiAccount: { use: string
 const computer = async () => ((await call("GET", "/v1/app/routines")).json.computers as Computer[]).find((c) => c.id === computerId)!;
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: {} });
+  s = await startStack({ ambient: {} });
   lena = await signIn(s, "apple-lena", "Lena Vogel");
   ben = await signIn(s, "apple-ben", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
   const setup = await hostCall("", "POST", "/v1/host/setup", { code, info });
   host = String(setup.json.token);

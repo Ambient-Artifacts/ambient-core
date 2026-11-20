@@ -64,10 +64,9 @@ const kinds = async (id: string) => (await learningOf(id)).signals.map((x) => x.
 const owner = (): Owner => ({ kind: "user", uid: lena.user.uid });
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic }, githubBatchMs: 60_000 });
+  s = await startStack({ ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic }, githubBatchMs: 60_000 });
   lena = await signIn(s, "apple-lena-tpl", "Lena Vogel");
   ben = await signIn(s, "apple-ben-tpl", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
   hook = (await call("GET", "/v1/app/github-hook")).json as typeof hook;
@@ -85,7 +84,8 @@ describe("the catalog", () => {
     expect(t[0]!.questions.map((q) => q.id)).toEqual(["repos", "strictness", "focus"]);
     expect(t[0]!.questions[1]!.options!.map((o) => o.id)).toEqual(["blockers_only", "everything"]);
     expect(t.every((x) => x.secrets.some((sec) => sec.name === "GH_TOKEN"))).toBe(true);
-    expect((await call("GET", "/v1/app/bot-templates", undefined, ben)).status).toBe(403);
+    // Everyone has bots: the catalog is everyone's.
+    expect((await call("GET", "/v1/app/bot-templates", undefined, ben)).status).toBe(200);
   });
 });
 

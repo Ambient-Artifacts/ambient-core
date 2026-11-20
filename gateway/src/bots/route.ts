@@ -77,7 +77,7 @@ export function botAppRoutes(
     return { uid, teams: await d.directory.teamsOf(uid), personal: true, canWritePersonal: true, canWriteTeams: true };
   };
   const id = (req: Request) => String(req.params.id);
-  const notEnabled = (res: Response) => res.status(403).json({ error: "bots_not_enabled", message: "Bots aren't switched on for this account yet." });
+  const notEnabled = (res: Response) => res.status(404).json({ error: "not_set_up", message: "This isn't set up on this server." });
 
   // A computer's default model, and what Ambient may do there (docs/bots.md).
   // A bare `null` body clears it (express.json is strict about top-level values by default).
@@ -136,7 +136,7 @@ export function botAppRoutes(
 
   r.get("/v1/app/decisions", d.auth, async (_req, res) => {
     const a = await actor(res);
-    if (!d.decisions || !d.routines.botsEnabled(a)) return res.json({ decisions: [] });
+    if (!d.decisions) return res.json({ decisions: [] });
     res.json({ decisions: await d.decisions.list(a.uid) });
   });
 
@@ -176,10 +176,9 @@ export function botAppRoutes(
     }
   });
 
+  // Bots are everyone's, and every loop is one (docs/bots.md, "Loops are bots"): kept for apps that ask.
   r.get("/v1/app/features", d.auth, async (_req, res) => {
-    const bots = d.routines.botsEnabled(await actor(res));
-    // With bots every loop is a bot (docs/bots.md, "Loops are bots"): the app has no plain loops then.
-    res.json({ bots, loopsAreBots: bots });
+    res.json({ bots: true, loopsAreBots: true });
   });
 
   // A bot's wake-ups (docs/bots.md, "Wake-ups"): whoever sees it sees them, whoever may change it books and cancels.
@@ -260,14 +259,12 @@ export function botAppRoutes(
 
   r.get("/v1/app/ambient/chat", d.auth, async (_req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     res.json(await d.ambient.list(a.uid));
   });
 
   // Files come along base64 (10 MB of files is about 14 MB of JSON).
   r.post("/v1/app/ambient/chat", d.auth, express.json({ limit: "16mb" }), async (req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     const body = z.object({ text: z.string().max(8_000).default(""), attachments: z.array(ChatAttachment).max(4).default([]) }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Write something (up to 8,000 characters), with up to 4 files." });
@@ -285,7 +282,6 @@ export function botAppRoutes(
   // A file sent in the person's chat with Ambient (only theirs).
   r.get("/v1/app/ambient/chat/files/:file", d.auth, async (req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     try {
       sendFile(res, await d.ambient.file(a.uid, String(req.params.file)));
     } catch (err) {
@@ -296,7 +292,6 @@ export function botAppRoutes(
   // "New chat" (the history stays findable), or ?forget=1: the whole history goes for good.
   r.delete("/v1/app/ambient/chat", d.auth, async (req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     if (req.query.forget === "1" || req.query.forget === "true") await d.ambient.forget(a.uid);
     else await d.ambient.clear(a.uid, (await d.directory.user(a.uid))?.name);
     res.status(204).end();
@@ -466,14 +461,14 @@ export function botAppRoutes(
   r.get("/v1/app/ambient/settings", d.auth, async (_req, res) => {
     const a = await actor(res);
     const st = d.ambSettings?.();
-    if (!d.routines.botsEnabled(a) || !st) return notEnabled(res);
+    if (!st) return notEnabled(res);
     res.json(await st.get(a.uid));
   });
 
   r.put("/v1/app/ambient/settings", d.auth, d.json, async (req, res) => {
     const a = await actor(res);
     const st = d.ambSettings?.();
-    if (!d.routines.botsEnabled(a) || !st) return notEnabled(res);
+    if (!st) return notEnabled(res);
     const body = z.object({ notify: z.enum(NOTIFY).optional() }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: `Send notify: ${NOTIFY.join(" or ")}.` });
@@ -486,13 +481,12 @@ export function botAppRoutes(
 
   r.get("/v1/app/bot-templates", d.auth, async (_req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     res.json({ templates: templateViews() });
   });
 
   r.post("/v1/app/bots/from-template", d.auth, d.json, async (req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a) || !d.folder) return notEnabled(res);
+    if (!d.folder) return notEnabled(res);
     const body = FromTemplate.safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Pick a template and answer its questions.", issues: body.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
@@ -511,7 +505,7 @@ export function botAppRoutes(
   const automations = async (res: Response): Promise<{ a: Actor; auto: Automations } | undefined> => {
     const a = await actor(res);
     const auto = d.automations?.();
-    if (!d.routines.botsEnabled(a) || !auto) {
+    if (!auto) {
       notEnabled(res);
       return undefined;
     }
@@ -687,7 +681,6 @@ export function botAppRoutes(
 
   r.get("/v1/app/ambient/memory", d.auth, async (req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     const version = versionOf(req.query.version);
     try {
       res.json(version ? await folder.ambMemoryVersion(a.uid, version) : await folder.ambMemory(a.uid));
@@ -698,7 +691,6 @@ export function botAppRoutes(
 
   r.put("/v1/app/ambient/memory", d.auth, d.json, async (req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     const body = Write.safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Send the memory's content (and optionally why)." });
@@ -713,13 +705,11 @@ export function botAppRoutes(
 
   r.get("/v1/app/ambient/memory/history", d.auth, async (_req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     res.json({ versions: await folder.ambHistory(a.uid) });
   });
 
   r.post("/v1/app/ambient/memory/revert", d.auth, d.json, async (req, res) => {
     const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) return notEnabled(res);
     const body = z.object({ version: z.number().int().min(1) }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Say which version." });
@@ -735,15 +725,8 @@ export function botAppRoutes(
 
   // ---- Amb's own folder, like a bot's (docs/bots.md, "One folder for every bot, Amb included") ----
 
-  /** The person, when bots are on for them (Amb's folder is theirs alone). */
-  const amb = async (res: Response): Promise<Actor | undefined> => {
-    const a = await actor(res);
-    if (!d.routines.botsEnabled(a)) {
-      notEnabled(res);
-      return undefined;
-    }
-    return a;
-  };
+  /** The person (Amb's folder is theirs alone). */
+  const amb = async (res: Response): Promise<Actor | undefined> => actor(res);
 
   r.get("/v1/app/ambient/files", d.auth, async (_req, res) => {
     const a = await amb(res);

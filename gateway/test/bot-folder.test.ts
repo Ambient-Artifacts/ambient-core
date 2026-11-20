@@ -30,10 +30,9 @@ const enc = encodeURIComponent;
 type Start = { run: { id: string }; routine: { prompt: string }; resume: { sessionId: string | null; message: string } | null; runToken: string; workspace?: { system: string; skills: { path: string; content: string }[]; memory: string } };
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: {} });
+  s = await startStack({ ambient: {} });
   lena = await signIn(s, "apple-lena", "Lena Vogel");
   ben = await signIn(s, "apple-ben", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid);
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
   const setup = await hostCall("", "POST", "/v1/host/setup", { code, info });
   host = String(setup.json.token);

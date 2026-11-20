@@ -159,7 +159,6 @@ export function createApp(deps: AppDeps) {
     origin: config.origin,
     runner: runner && { version: runner.version, sha256: runner.sha256, signature: runner.signature },
     notifier,
-    bots: config.bots,
     teamsOf: (uid) => directory.teamsOf(uid),
     teamBySlug: (slug) => directory.teamBySlug(slug),
     teamBundle: async () => {
@@ -293,13 +292,24 @@ export function createApp(deps: AppDeps) {
     folder,
   });
   // Bots report to Ambient, Ambient reports to the person (docs/bots.md, "Decisions").
+  // Every routine is a bot (docs/bots.md, "Loops are bots"): loops from a server that had bots
+  // off become bots that run as before, once, at start (as `admin bots adopt-loops`).
+  void (control.m(api.bots.adoptPlainLoops, { now: Date.now() }) as Promise<{ adopted: number }>)
+    .then((out) => {
+      if (out.adopted) console.log(`[bots] ${out.adopted} loop(s) from before bots are bots now`);
+    })
+    .catch((err: Error) => console.warn(`[bots] loops weren't adopted: ${err.message}`));
   const actorFor = async (uid: string) => ({ uid, teams: await directory.teamsOf(uid), personal: true, canWritePersonal: true, canWriteTeams: true });
   const decisions: DecisionService = new DecisionService({ control, keys: routines.keys, routines, bots, ambient, channels: [new AppChannel(notifier)], actorFor, triageMs: deps.ambient?.triageMs });
   ambient.decisionView = (uid, row) => decisions.view(uid, row);
   onQuestion = (q) => void decisions.onBotQuestion(q);
-  const heartbeat = new Heartbeat({ control, ambient, bots: config.bots, notifier });
+  // Who Ambient's background work is for: everyone with bots or a chat with Ambient. Bots are
+  // everyone's; with BRAIN_BOTS=all this was nobody (the "*" was dropped before asking Convex), so
+  // the heartbeat, Amb's nightly memory and automations didn't run (2026-11-20).
+  const withBots = async () => ((await control.q(api.bots.people, {})) as { users: string[] }).users.map(String);
+  const heartbeat = new Heartbeat({ control, ambient, people: withBots, notifier });
   // What Amb does on its own: templates on a schedule or an event (docs/bots.md, "Automations").
-  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, notifier, bots: config.bots, actorFor, turnMs: deps.ambient?.turnMs });
+  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, notifier, people: withBots, actorFor, turnMs: deps.ambient?.turnMs });
   folders.automations = automations;
   // Watching the bots is part of Amb (its settings), not an automation.
   const ambSettings = new AmbSettings({ control, keys: routineKeys, legacyOff: (uid) => automations.legacyWatchOff(uid) });
@@ -317,11 +327,8 @@ export function createApp(deps: AppDeps) {
     reviewAfterMs: deps.learning?.reviewAfterMs,
     turnMs: deps.ambient?.turnMs,
     owners: async () => {
-      const b = config.bots;
-      if (!b) return [];
-      const people = (await control.q(api.bots.heartbeatPeople, { users: b.users.filter((u) => u !== "*"), teams: b.teams.filter((t) => t !== "*") })) as string[];
-      const teams = await Promise.all(b.teams.filter((t) => t !== "*").map((slug) => directory.teamBySlug(slug)));
-      return [...people.map((uid) => ({ kind: "user" as const, uid: String(uid) })), ...teams.filter((t) => t).map((t) => ({ kind: "team" as const, teamId: t!.id }))];
+      const out = (await control.q(api.bots.people, {})) as { users: string[]; teams: string[] };
+      return [...out.users.map((uid) => ({ kind: "user" as const, uid: String(uid) })), ...out.teams.map((teamId) => ({ kind: "team" as const, teamId: String(teamId) }))];
     },
   });
   folders.learning = learning;

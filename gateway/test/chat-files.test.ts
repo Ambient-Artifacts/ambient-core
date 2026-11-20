@@ -26,10 +26,9 @@ const hostCall = async (token: string, method: string, path: string, body?: unkn
 };
 
 beforeAll(async () => {
-  s = await startStack({ bots: { users: [], teams: [] }, ambient: { apiKey: undefined } });
+  s = await startStack({ ambient: { apiKey: undefined } });
   lena = await signIn(s, "apple-lena-files", "Lena Vogel");
   ben = await signIn(s, "apple-ben-files", "Ben Weiss");
-  s.config.bots!.users.push(lena.user.uid, ben.user.uid);
   const code = String((await appCall(s, lena.access_token, "POST", "/v1/app/computers", { name: "VPS" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
 });
