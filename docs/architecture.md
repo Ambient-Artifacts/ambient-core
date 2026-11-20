@@ -71,6 +71,13 @@ Scopes are `personal:read`, `personal:write`, `team:read`, `team:write` and `ses
 - So Convex, its backups and anyone with only database access see ciphertext. The gateway decrypts in memory to serve MCP and sync.
 - Team wikis are plain git on the team's own server, readable by the team's tools by design. In Ambient Cloud, each team server is a separate VM that only the gateway can reach.
 
+## One team per person
+
+A person is in one team at most (besides their personal space): the apps switch between
+Personal and that team, and Settings has one team's page. Creating a team or joining one while
+in another answers `409 one_team` with what to do (leave it first, on its page); joining one's own
+team again is fine. `admin team create` refuses it too. Checked in Convex (`teams.teamOfUser`).
+
 ## A team on its own computer
 
 Ambient's own servers don't host new teams: a team runs on a computer of its own, a Linux server its owner or an admin connects with the same one-line command as a personal computer (`POST /v1/app/computers` with `team`). Creating a team never waits for a server: it starts with none (`server: "none"` in the apps), its people can join, and its brain switches on once the computer is there.

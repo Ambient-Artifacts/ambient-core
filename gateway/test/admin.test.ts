@@ -63,8 +63,11 @@ describe("admin CLI", () => {
     const made = await admin("team", "create", "Analytical Engines", "--owner", "ada@example.com");
     expect(made).toContain('Created team "Analytical Engines" (slug analytical-engines) on pool-1');
     expect(made).toContain(`${s.origin}/t/analytical-engines/mcp`);
+    // A person is in one team.
+    await expect(admin("team", "create", "Second", "--owner", "ada@example.com")).rejects.toThrow(/in Analytical Engines already/);
     // The pool is empty now.
-    await expect(admin("team", "create", "Second", "--owner", "ada@example.com")).rejects.toThrow(/No free team server/);
+    await admin("user", "add", "grace@example.com", "--name", "Grace Hopper");
+    await expect(admin("team", "create", "Second", "--owner", "grace@example.com")).rejects.toThrow(/No free team server/);
 
     await admin("user", "add", "charles@example.com", "--name", "Charles Babbage");
     await expect(admin("token", "charles@example.com", "--team", "analytical-engines")).rejects.toThrow(/isn't in a team/);
