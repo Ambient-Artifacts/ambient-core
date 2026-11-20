@@ -7,7 +7,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { markdownToSlack, slackToPlain, splitText } from "../src/bots/slack-apps.ts";
-import { appCall, appHeaders, signIn, startStack, type AppSession, type Stack } from "./helpers.ts";
+import { appCall, appHeaders, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
 
 const info = { hostname: "srv-slack", os: "Linux 6.8", runner: "0.14.0", claude: "2.1.326 (Claude Code)" };
 const SIGNING = "signing-secret-1";
@@ -215,6 +215,23 @@ describe("a bot's own Slack app", () => {
     expect(start.env.SLACK_BOT_TOKEN).toBeUndefined();
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "ok" });
     expect((await sendEvent({ type: "event_callback", event_id: "Ev7", event: { type: "app_mention", user: "U_LENA", text: "hi", channel: "C9", ts: "1" } })).status).toBe(404);
+  });
+});
+
+describe("over MCP (no app needed)", () => {
+  it("connects Slack and puts a bot in Slack from the user's AI", async () => {
+    const pat = String((await call("POST", "/v1/app/pats", { label: "Claude" })).json.token);
+    const mcp = await mcpClient(`${s.origin}/mcp`, pat);
+    expect(text(await mcp.callTool({ name: "connect_slack", arguments: {} }))).toContain("Slack is connected (workspace T1)");
+    expect(text(await mcp.callTool({ name: "connect_slack", arguments: { refresh_token: "xoxe-1-again" } }))).toContain("Slack is connected");
+    const computer = ((await call("GET", "/v1/app/routines")).json.computers as { id: string }[])[0]!.id;
+    const churny = ((await call("POST", "/v1/app/routines", { name: "Churny", prompt: "Why did they leave?", schedule: { every: "needed", time: "09:00", timezone: "Europe/Vienna" }, computer, bot: {} })).json.routine as { id: string }).id;
+    const link = text(await mcp.callTool({ name: "slack_for_bot", arguments: { bot: churny } }));
+    expect(link).toMatch(/^\[Add Churny to Slack\]\(https:\/\/slack\.com\/oauth\/v2\/authorize\?client_id=111\.222/);
+    expect(manifest).toMatchObject({ display_information: { name: "Churny" } });
+    expect(text(await mcp.callTool({ name: "slack_for_bot", arguments: { bot: churny, remove: true } }))).toBe("Churny's Slack app is deleted.");
+    expect(text(await mcp.callTool({ name: "connect_slack", arguments: { disconnect: true } }))).toContain("disconnected");
+    expect(text(await mcp.callTool({ name: "slack_for_bot", arguments: { bot: churny } }))).toContain("Connect your Slack workspace first");
   });
 });
 

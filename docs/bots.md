@@ -1057,6 +1057,9 @@ the app; the person taps Allow once (`gateway/src/bots/slack-apps.ts`).
 - **Posting on its own.** A bot with an installed app gets its token as `SLACK_BOT_TOKEN` in every
   run (unless it has a secret of that name), so it can post as itself: a nightly digest in a
   channel it was invited to.
+- **From the person's AI (MCP).** `connect_slack` (the refresh token, once; without it: whether it's
+  connected and how to get one; `disconnect`) and `slack_for_bot` (the Allow link as a Markdown
+  link; `remove`). The same as the app's buttons, so it works before the app has them.
 - **Taking it out.** `DELETE /v1/app/routines/:id/slack` deletes the app in Slack
   (`apps.manifest.delete`) and forgets it here.
 - **Where it's kept.** The workspace's tokens, each app's client secret, signing secret and bot
