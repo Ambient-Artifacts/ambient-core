@@ -33,12 +33,11 @@ const hostCall = async (token: string, method: string, path: string, body?: unkn
 const pushesTo = (who: AppSession) => sent.filter((p) => p.token === tokens[who.user.uid]).map((p) => p.message);
 
 beforeAll(async () => {
-  s = await startStack({ push, bots: { users: [], teams: [] } });
+  s = await startStack({ push });
   lena = await signIn(s, "apple-lena-groupchat", "Lena Vogel");
   ben = await signIn(s, "apple-ben-groupchat", "Ben Weiss");
   nora = await signIn(s, "apple-nora-groupchat", "Nora Ost");
   const slug = ((await call(lena, "POST", "/v1/app/teams", { name: "Lab" })).json.team as { slug: string }).slug;
-  s.config.bots!.teams.push(slug);
   for (const who of [ben, nora]) {
     const code = String((await call(lena, "POST", `/v1/app/teams/${slug}/invites`, { role: "member" })).json.code);
     expect((await call(who, "POST", "/v1/app/teams/join", { code })).status).toBe(200);
