@@ -107,8 +107,24 @@ to the bot).
 `POST /v1/app/routines/:id/thread` with `{ "text": "…" }`: when the bot has an open question,
 this is the answer and the bot carries on with it; otherwise it's a message, and the bot starts a
 run with it (continuing its last session when it has one). Answers
-`{ "message": ThreadMessage, "routine": Routine }`. Only people who may change the bot write to
-it (its owner; a team's owners and admins); everyone who sees it reads.
+`{ "message": ThreadMessage, "routine": Routine }`. A personal bot's owner writes to it.
+
+#### A team bot's thread is a group chat
+
+Everyone in the team writes to a team bot's thread, and everyone sees what the others wrote, with
+their names (`mine` tells one's own). The routine says so: `canMessage` (write in the thread) next
+to `canEdit` (its settings, run, delete: still the team's owners and admins).
+
+- **Pushes:**
+  - a teammate's message goes to everyone else in the team ("Helper · Lab", "Ben Weiss: …");
+  - the bot's answer (a run's result in the thread) goes to whoever wrote to it since it last said
+    something;
+  - its question goes to the whole team, but it's its maker's to answer: the decision, and
+    Ambient answering from the brain (`not_yours` for anyone else's Ambient), stay with whoever
+    made the bot. Another member's reply is a message the bot reads, and the question stays open.
+  - A failed run still goes to whoever started it.
+- **Read is each person's own** (Convex `botReads`): one person opening the thread doesn't take
+  the "done" news away from the others. A personal bot keeps `routines.seenAt`.
 
 ### Ambient (the master bot)
 
