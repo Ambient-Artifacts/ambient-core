@@ -915,8 +915,9 @@ function registerGitHubTools(
   routines: RoutineService,
   github: import("../bots/github.ts").GitHubEvents,
   guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>,
-  app?: import("../bots/github-app.ts").GitHubApp,
+  apps?: import("../bots/github-apps.ts").GitHubApps,
 ) {
+  const app = apps?.shared;
   const teamArg: Record<string, z.ZodTypeAny> = principal.teams.length ? { team: z.string().max(80).optional().describe("A team's slug, for the team's webhook; leave out for the user's own.") } : {};
 
   server.registerTool(
@@ -932,11 +933,11 @@ function registerGitHubTools(
       guard(async () => {
         const a = { team: typeof args.team === "string" ? args.team : undefined };
         // With Ambient's GitHub App there's nothing to set up by hand: Connect GitHub instead.
-        if (app) {
+        if (apps && (await apps.any())) {
           routines.botOwner(actor, a.team ?? null);
           return result(
-            "No webhook to set up by hand here: Ambient has a GitHub App. Use connect_github and give the user the link (or they tap Connect GitHub in the app); GitHub's events then reach the bots on the repos they pick, and bots get their GitHub access from it too.",
-            { app: app.slug },
+            "No webhook to set up by hand here: Ambient has GitHub Apps. Use connect_github (with the bot's id) and give the user the link (or they tap Connect GitHub in the bot's GitHub settings); GitHub's events then reach the bots on the repos they pick, and bots get their GitHub access from it too.",
+            { app: app?.slug ?? null },
           );
         }
         const h = await github.hook(routines.botOwner(actor, a.team ?? null));
@@ -948,24 +949,52 @@ function registerGitHubTools(
       }),
   );
 
-  if (app) {
+  if (apps) {
     server.registerTool(
       "connect_github",
       {
         title: "Connect GitHub",
         description:
-          "The link to install Ambient's GitHub App on the user's (or a team's) GitHub repos: GitHub's events then wake the bots working on them, and bots get a GitHub token for just their repos. Give it to the user as a Markdown link, [Connect GitHub](<url>); it works for 30 minutes, once. Which repos are connected: the result lists them.",
-        inputSchema: teamArg,
+          "The link to install the GitHub App a bot works through on the user's (or a team's) repos: GitHub's events then wake it, and its runs get a GitHub token for just its repos. With a bot's id, its own App or its role's (Ambient Builder, Reviewer, Wiki Keeper: each its own GitHub user); without, the shared one. Give it to the user as a Markdown link, [Connect GitHub](<url>); it works for 30 minutes, once. Which repos are connected: the result lists them.",
+        inputSchema: { ...teamArg, bot: z.string().max(64).optional().describe("The bot it's for (its id): connects the App that bot works through.") },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
       async (args: Record<string, unknown>) =>
         guard(async () => {
+          if (!(await apps.any())) return error("GitHub isn't set up on this server; use github_webhook.");
           const team = typeof args.team === "string" ? args.team : null;
-          const owner = routines.botOwner(actor, team);
-          const url = app.connectUrl(owner, actor.uid);
-          const list = await app.installations(owner);
-          const now = list.length ? ` Connected now: ${list.map((i) => (i.repos === "all" ? `all of ${i.account}` : i.repos.join(", "))).join("; ")}.` : " Nothing is connected yet.";
-          return result(`[Connect GitHub](${url})${now}`, { url, installations: list });
+          let owner = routines.botOwner(actor, team);
+          let target = apps.shared;
+          if (typeof args.bot === "string" && args.bot) {
+            const f = await routines.folderOf(actor, args.bot, true);
+            owner = f.owner;
+            target = await apps.intendedFor(await github.watchOf(f.owner, f.routineId));
+          }
+          if (!target) return error("Pass the bot's id: this server has no shared App.");
+          const url = target.connectUrl(owner, actor.uid);
+          const list = await apps.installations(owner);
+          const now = list.length ? ` Connected now: ${list.map((i) => `${i.slug}: ${i.repos === "all" ? `all of ${i.account}` : i.repos.join(", ")}`).join("; ")}.` : " Nothing is connected yet.";
+          return result(`[Connect GitHub](${url}) (${target.slug})${now}`, { url, app: target.slug, installations: list });
+        }),
+    );
+
+    server.registerTool(
+      "github_app_for_bot",
+      {
+        title: "Give a bot its own GitHub account",
+        description:
+          "The link that gives a bot its own GitHub App, so on GitHub it shows as itself (\"<bot> (<account>)\") instead of the shared Ambient Bots: GitHub opens with the App filled in, the user taps Create and then Install. Made under the GitHub account its repos are in (the owner of its first repo, or `account`). Only when the user asked for it; give it as a Markdown link. Template bots (Builder, Reviewer, Wiki keeper) have their role's App already: connect_github.",
+        inputSchema: {
+          bot: z.string().max(64).describe("The bot (its id)."),
+          account: z.string().max(39).optional().describe("The GitHub organization or user its repos are in; by default its first repo's owner."),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ bot, account }) =>
+        guard(async () => {
+          const f = await routines.folderOf(actor, bot, true);
+          const url = await apps.ownAppLink(f.owner, { id: f.routineId, name: f.name }, actor.uid, account);
+          return result(`[Give ${f.name} its own GitHub account](${url}): tap Create on GitHub, then Install on its repos. It works for an hour.`, { url });
         }),
     );
   }

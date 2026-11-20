@@ -18,7 +18,7 @@ import type { Wakes } from "./wakes.ts";
 import type { HistorySearch } from "./history.ts";
 import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
 import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
-import type { GitHubApp } from "./github-app.ts";
+import { page as githubPage, type GitHubApps } from "./github-apps.ts";
 import { LEARN, lessonsOf, type BotLearning } from "./learning.ts";
 import { NOTIFY, type AmbSettings } from "./amb-settings.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "./bot-templates.ts";
@@ -63,7 +63,7 @@ export function botAppRoutes(
     folder?: BotFolder;
     automations?: () => Automations | undefined;
     github?: () => GitHubEvents | undefined;
-    githubApp?: () => GitHubApp | undefined;
+    githubApp?: () => GitHubApps | undefined;
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
     wakes?: () => Wakes | undefined;
@@ -327,11 +327,27 @@ export function botAppRoutes(
   });
 
   // Connect GitHub: Ambient's GitHub App (docs/bots.md, "Connect GitHub").
+  // `routine`: the bot whose GitHub step asks, so the App it works through is the one offered
+  // (its own, its role's, or the shared one; docs/bots.md, "GitHub Apps").
+  const routineOf = (req: Request) => (typeof req.query.routine === "string" && req.query.routine ? req.query.routine : null);
+
   r.get("/v1/app/github", d.auth, async (req, res) => {
     try {
-      const owner = d.routines.botOwner(await actor(res), teamOf(req));
+      const a = await actor(res);
+      const owner = d.routines.botOwner(a, teamOf(req));
       const gha = d.githubApp?.();
-      res.json({ app: gha ? { slug: gha.slug, configured: true } : null, installations: gha ? await gha.installations(owner) : [] });
+      if (!gha || !(await gha.any())) return res.json({ app: null, installations: [] });
+      const rid = routineOf(req);
+      const gh = d.github?.();
+      let forBot: { app: string; slug: string; role: string; connected: boolean } | null = null;
+      if (rid && gh) {
+        const f = await d.routines.folderOf(a, rid, false);
+        const bot = { id: rid, ...(await gh.watchOf(f.owner, rid)) };
+        const meant = await gha.intendedFor(bot);
+        if (meant) forBot = { app: meant.key, slug: meant.slug, role: meant.role, connected: (await gha.appFor(f.owner, bot))?.key === meant.key };
+      }
+      const shared = gha.shared;
+      res.json({ app: { slug: (forBot?.slug ?? shared?.slug ?? (await gha.list())[0]?.slug) as string, configured: true }, apps: await gha.list(), forBot, installations: await gha.installations(owner) });
     } catch (err) {
       fail(res, err);
     }
@@ -339,10 +355,36 @@ export function botAppRoutes(
 
   r.post("/v1/app/github/connect", d.auth, async (req, res) => {
     const gha = d.githubApp?.();
-    if (!gha) return res.status(404).json({ error: "not_set_up", message: "Connect GitHub isn't set up on this server; use the webhook instead." });
+    if (!gha || !(await gha.any())) return res.status(404).json({ error: "not_set_up", message: "Connect GitHub isn't set up on this server; use the webhook instead." });
     try {
       const a = await actor(res);
-      res.json({ url: gha.connectUrl(d.routines.botOwner(a, teamOf(req)), a.uid) });
+      const rid = routineOf(req);
+      const gh = d.github?.();
+      if (rid && gh) {
+        const f = await d.routines.folderOf(a, rid, true);
+        const meant = await gha.intendedFor(await gh.watchOf(f.owner, rid));
+        if (!meant) return res.status(404).json({ error: "not_set_up", message: "Connect GitHub isn't set up on this server; use the webhook instead." });
+        return res.json({ url: meant.connectUrl(f.owner, a.uid), app: meant.slug });
+      }
+      const shared = gha.shared;
+      if (!shared) return res.status(404).json({ error: "not_set_up", message: "Connect GitHub from a bot's GitHub settings." });
+      res.json({ url: shared.connectUrl(d.routines.botOwner(a, teamOf(req)), a.uid), app: shared.slug });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // A bot's own GitHub App (its own GitHub user): GitHub's manifest flow, then its install.
+  r.post("/v1/app/routines/:id/github/app", d.auth, d.json, async (req, res) => {
+    const gha = d.githubApp?.();
+    const gh = d.github?.();
+    if (!gha || !gh) return res.status(404).json({ error: "not_set_up", message: "GitHub isn't set up on this server." });
+    const body = z.object({ account: z.string().trim().max(39).optional() }).safeParse(req.body ?? {});
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Say which GitHub account its repos are in." });
+    try {
+      const a = await actor(res);
+      const f = await d.routines.folderOf(a, id(req), true);
+      res.json({ url: await gha.ownAppLink(f.owner, { id: f.routineId, name: f.name }, a.uid, body.data.account) });
     } catch (err) {
       fail(res, err);
     }
@@ -1015,24 +1057,54 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
  * GitHub's deliveries to an owner's webhook (docs/bots.md, "GitHub events and the PR gate"). The
  * body is kept raw: the signature is over the exact bytes GitHub sent.
  */
-export function githubHookRouter(github: () => GitHubEvents | undefined, app: () => GitHubApp | undefined = () => undefined): Router {
+export function githubHookRouter(github: () => GitHubEvents | undefined, app: () => GitHubApps | undefined = () => undefined): Router {
   const r = express.Router();
   const perHook = limiter(600);
   const perApp = limiter(3_000);
   const headerOf = (req: Request) => (n: string) => (typeof req.headers[n] === "string" ? (req.headers[n] as string) : undefined);
 
   // Ambient's GitHub App: every installation's deliveries (docs/bots.md, "Connect GitHub").
-  r.post("/v1/hooks/github-app", express.raw({ type: "*/*", limit: "2mb" }), async (req, res) => {
+  // The shared App's deliveries at /v1/hooks/github-app; every other App's at its own hook id.
+  const appHook = (hookOf: (req: Request) => string | null) => async (req: Request, res: Response) => {
     const gha = app();
     if (!gha) return res.status(404).json({ error: "not_found" });
-    if (!perApp("app")) return res.status(429).json({ error: "slow_down" });
+    const hook = hookOf(req);
+    if (!perApp(hook ?? "app")) return res.status(429).json({ error: "slow_down" });
     const header = headerOf(req);
     const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-    const out = await gha.receive({ event: header("x-github-event"), signature: header("x-hub-signature-256"), delivery: header("x-github-delivery") }, body).catch((err: Error) => {
+    const out = await gha.receive(hook, { event: header("x-github-event"), signature: header("x-hub-signature-256"), delivery: header("x-github-delivery") }, body).catch((err: Error) => {
       console.warn(`[github-app] a delivery wasn't handled: ${err.message}`);
       return { status: 202, result: "not handled" };
     });
     res.status(out.status).json({ result: out.result });
+  };
+  r.post("/v1/hooks/github-app", express.raw({ type: "*/*", limit: "2mb" }), appHook(() => null));
+  r.post("/v1/hooks/github-app/:hookId", express.raw({ type: "*/*", limit: "2mb" }), appHook((req) => String(req.params.hookId)));
+
+  // Making an App (GitHub's manifest flow): the page that posts the manifest, and GitHub's return.
+  r.get("/v1/github/new-app", (req, res) => {
+    const gha = app();
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+    if (!gha) return res.status(404).send(githubPage("Not set up", "<p>GitHub isn't set up on this Ambient server.</p>"));
+    try {
+      res.send(gha.newAppPage(typeof req.query.state === "string" ? req.query.state : ""));
+    } catch (err) {
+      res.status(err instanceof GitHubError ? err.status : 500).send(githubPage("Can't start", `<p>${err instanceof GitHubError ? err.message : "Start again in Ambient."}</p>`));
+    }
+  });
+
+  r.get("/v1/github/app-created", async (req, res) => {
+    const gha = app();
+    res.setHeader("cache-control", "no-store");
+    if (!gha) return res.status(404).type("html").send(githubPage("Not set up", "<p>GitHub isn't set up on this Ambient server.</p>"));
+    try {
+      const out = await gha.created(typeof req.query.code === "string" ? req.query.code : "", typeof req.query.state === "string" ? req.query.state : "");
+      if (out.redirect) return res.redirect(303, out.redirect);
+      res.type("html").send(out.html ?? githubPage("Done", ""));
+    } catch (err) {
+      res.status(err instanceof GitHubError ? err.status : 500).type("html").send(githubPage("Not made", `<p>${err instanceof GitHubError ? err.message : "That didn't work. Start again in Ambient."}</p>`));
+    }
   });
 
   // GitHub sends the browser back here after an install (or a change of its repos).
@@ -1046,7 +1118,7 @@ export function githubHookRouter(github: () => GitHubEvents | undefined, app: ()
     const state = typeof req.query.state === "string" ? req.query.state : "";
     const id = Number(typeof req.query.installation_id === "string" ? req.query.installation_id : NaN);
     try {
-      const inst = await gha.installed(id, state);
+      const { inst } = await gha.installed(id, state);
       const what = inst.repos === "all" ? `all of ${inst.account}'s repos` : `${inst.repos.length} repo${inst.repos.length === 1 ? "" : "s"} of ${inst.account}`;
       res.send(page("Connected", `Ambient's bots can work on ${what} now. You can go back to Ambient.`, true));
     } catch (err) {

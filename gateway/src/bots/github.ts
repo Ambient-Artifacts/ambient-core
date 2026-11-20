@@ -143,6 +143,15 @@ export class GitHubEvents {
   private paused = new Map<string, number>();
   private deliveries = new Map<string, number>();
   private flushing = new Set<Promise<unknown>>();
+  /**
+   * The GitHub App a bot's events come through (docs/bots.md, "GitHub Apps"): its key, or null for
+   * the owner's own webhook. A delivery reaches only the bots whose App it came through, so a repo
+   * with several Apps installed doesn't wake a bot once per App.
+   */
+  appOf?: (owner: Owner, bot: { id: string; repos: string[]; app?: string }) => Promise<string | null>;
+
+  /** CI failures already told (a repo's commit), so several Apps don't tell it twice. */
+  private ciTold = new Map<string, number>();
 
   constructor(
     private d: {
@@ -214,10 +223,17 @@ export class GitHubEvents {
     return (await this.watchOf(owner, routineId)).repos;
   }
 
-  /** The repos a bot watches and how (its own PRs by default). */
-  async watchOf(owner: Owner, routineId: string): Promise<{ repos: string[]; on: WatchMode[] }> {
-    const w = await this.read<{ repos: string[]; on?: WatchMode[] }>(owner, WATCH, routineId);
-    return { repos: w?.repos ?? [], on: w?.on?.length ? w.on : ["own_prs"] };
+  /** The repos a bot watches and how (its own PRs by default), and the GitHub App it works through. */
+  async watchOf(owner: Owner, routineId: string): Promise<{ repos: string[]; on: WatchMode[]; app?: string }> {
+    const w = await this.read<{ repos: string[]; on?: WatchMode[]; app?: string }>(owner, WATCH, routineId);
+    return { repos: w?.repos ?? [], on: w?.on?.length ? w.on : ["own_prs"], ...(w?.app ? { app: w.app } : {}) };
+  }
+
+  /** Which GitHub App the bot works through: a template role's, its own (a slug), or null for the shared one. */
+  async setApp(owner: Owner, routineId: string, app: string | null): Promise<void> {
+    const w = await this.read<{ repos: string[]; on?: WatchMode[]; app?: string }>(owner, WATCH, routineId);
+    const { app: _old, ...rest } = w ?? { repos: [] };
+    await this.write(owner, WATCH, routineId, { ...rest, ...(app ? { app } : {}) }, !(rest.repos?.length || app));
   }
 
   /** `on` left out: as it was (its own PRs for a bot that watched nothing yet). */
@@ -228,7 +244,8 @@ export class GitHubEvents {
     if (clean.length > REPOS_MAX) throw new GitHubError("bad_repo", `A bot watches up to ${REPOS_MAX} repos.`);
     const modes = on ? [...new Set(on.filter((m) => (WATCH_MODES as readonly string[]).includes(m)))] : (await this.watchOf(owner, routineId)).on;
     if (!modes.length) throw new GitHubError("bad_mode", `Say how it works on them: ${WATCH_MODES.join(", ")}.`);
-    await this.write(owner, WATCH, routineId, { repos: clean, on: modes }, clean.length === 0);
+    const app = (await this.watchOf(owner, routineId)).app;
+    await this.write(owner, WATCH, routineId, { repos: clean, on: modes, ...(app ? { app } : {}) }, clean.length === 0 && !app);
     return clean;
   }
 
@@ -294,7 +311,7 @@ export class GitHubEvents {
    * A delivery that's known to be the owner's (their webhook's, signed; or the GitHub App's, for an
    * installation linked to them): to the bots watching that repo.
    */
-  async deliver(owner: Owner, headers: { event?: string; delivery?: string }, body: Buffer): Promise<{ status: number; result: string }> {
+  async deliver(owner: Owner, headers: { event?: string; delivery?: string }, body: Buffer, via: string | null = null): Promise<{ status: number; result: string }> {
     // The same delivery twice (a replay, GitHub's redelivery) is taken once.
     const now = this.now();
     for (const [k, at] of this.deliveries) if (now - at > 24 * 3600_000) this.deliveries.delete(k);
@@ -310,18 +327,33 @@ export class GitHubEvents {
     }
     if (headers.event === "ping") return { status: 202, result: "pong" };
     try {
-      return { status: 202, result: await this.route(owner, headers.event ?? "", p) };
+      return { status: 202, result: await this.route(owner, headers.event ?? "", p, via) };
     } catch (err) {
       console.warn(`[github] an event wasn't handled: ${(err as Error).message}`);
       return { status: 202, result: "not handled" };
     }
   }
 
-  private async route(owner: Owner, event: string, p: Payload): Promise<string> {
+  private async route(owner: Owner, event: string, p: Payload, via: string | null): Promise<string> {
     const repo = p.repository?.full_name ?? "";
     if (!REPO.test(repo)) return "no repo";
-    const watching = (await this.bots(owner)).filter((b) => b.repos.some((r) => r.toLowerCase() === repo.toLowerCase()));
+    let watching = (await this.bots(owner)).filter((b) => b.repos.some((r) => r.toLowerCase() === repo.toLowerCase()));
     if (!watching.length) return "no bot watches this repo";
+    // CI first: it's about the repo, not a bot, so it doesn't depend on which App brought it.
+    if (event === "check_suite" && p.action === "completed" && p.check_suite && FAILED.has(p.check_suite.conclusion ?? "") && p.check_suite.head_branch && p.check_suite.head_branch === p.repository?.default_branch) {
+      const key = `${repo}@${p.check_suite.head_sha ?? ""}`.toLowerCase();
+      const now = this.now();
+      for (const [k, at] of this.ciTold) if (now - at > 3600_000) this.ciTold.delete(k);
+      if (this.ciTold.has(key)) return "ci failure told already";
+      this.ciTold.set(key, now);
+    }
+    // Only the bots whose App this came through (or, from the owner's webhook, those without one).
+    if (this.appOf) {
+      const keep: Watcher[] = [];
+      for (const b of watching) if ((await this.appOf(owner, b)) === via) keep.push(b);
+      watching = keep;
+      if (!watching.length && !(event === "check_suite" && p.action === "completed")) return "its bots hear it through another App";
+    }
 
     // CI on the default branch (automations); not a bot's PR.
     if (event === "check_suite" && p.action === "completed" && p.check_suite && FAILED.has(p.check_suite.conclusion ?? "") && p.check_suite.head_branch && p.check_suite.head_branch === p.repository?.default_branch) {
@@ -631,6 +663,7 @@ interface Watcher {
   slug: string;
   repos: string[];
   on: WatchMode[];
+  app?: string;
 }
 
 export class GitHubError extends Error {

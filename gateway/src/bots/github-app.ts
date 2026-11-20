@@ -15,9 +15,15 @@ import { api, type Control } from "../control.ts";
 import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { GitHubError, signedBy, type GitHubEvents } from "./github.ts";
 
+/** What an App is for: the server's shared one, a template role's, or one bot's own. */
+export type AppRole = "shared" | "builder" | "reviewer" | "wiki_keeper" | "bot";
+
 export interface GitHubAppConfig {
   appId: string;
   slug: string;
+  /** How Ambient knows it: "shared" (the configured one), a role, or a bot's own App's slug. */
+  key?: string;
+  role?: AppRole;
   /** The App's private key (PEM). */
   privateKey: string;
   webhookSecret: string;
@@ -32,8 +38,40 @@ export interface Installation {
   connectedAt: number;
 }
 
-/** The repos and the access a bot's token gets (the App's permissions, never more). */
-const TOKEN_PERMISSIONS = { contents: "write", pull_requests: "write", issues: "write", checks: "read", statuses: "read", metadata: "read" } as const;
+/**
+ * What each kind of App may do on GitHub (its manifest), and what a run's token asks for (never
+ * more). The Reviewer's App can write code so it can merge once that's allowed (docs/bots.md,
+ * "GitHub Apps"); its runs' tokens read code only.
+ */
+export const APP_PERMISSIONS: Record<AppRole, Record<string, "read" | "write">> = {
+  shared: { contents: "write", pull_requests: "write", issues: "write", checks: "read", statuses: "read", metadata: "read" },
+  bot: { contents: "write", pull_requests: "write", issues: "write", checks: "read", statuses: "read", metadata: "read" },
+  builder: { contents: "write", pull_requests: "write", issues: "read", checks: "read", statuses: "read", metadata: "read" },
+  reviewer: { contents: "write", pull_requests: "write", issues: "read", checks: "read", statuses: "read", metadata: "read" },
+  wiki_keeper: { contents: "write", pull_requests: "write", checks: "read", statuses: "read", metadata: "read" },
+};
+export const TOKEN_PERMISSIONS: Record<AppRole, Record<string, "read" | "write">> = {
+  ...APP_PERMISSIONS,
+  reviewer: { ...APP_PERMISSIONS.reviewer, contents: "read" },
+};
+/** The events each kind of App hears (what its bots act on). */
+export const APP_EVENTS: Record<AppRole, string[]> = {
+  shared: ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "push", "issues"],
+  bot: ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "push", "issues"],
+  builder: ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "issues"],
+  reviewer: ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite"],
+  wiki_keeper: ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment", "check_run", "check_suite", "push"],
+};
+
+/** The App a state was made for (its body names it; checked by that App afterwards). */
+export function stateApp(state: string): string {
+  try {
+    const s = JSON.parse(Buffer.from(state.split(".")[0] ?? "", "base64url").toString("utf8")) as { a?: string };
+    return typeof s.a === "string" && s.a ? s.a : "shared";
+  } catch {
+    return "shared";
+  }
+}
 const STATE_TTL_MS = 30 * 60_000;
 const INSTALLS = "github-installation";
 const INDEX = "github-app-install";
@@ -73,6 +111,19 @@ export class GitHubApp {
     return this.d.config.slug;
   }
 
+  get key(): string {
+    return this.d.config.key ?? "shared";
+  }
+
+  get role(): AppRole {
+    return this.d.config.role ?? "shared";
+  }
+
+  /** Where its installations are kept per owner ("all" for the shared App, as before there were others). */
+  private get installsKey(): string {
+    return this.key === "shared" ? "all" : `app:${this.key}`;
+  }
+
   // ---- GitHub's API ----
 
   private async gh<T>(path: string, init: { method?: string; token?: string; body?: unknown } = {}): Promise<T> {
@@ -98,7 +149,7 @@ export class GitHubApp {
   private async installationToken(id: number, repos?: string[]): Promise<{ token: string; expiresAt: string }> {
     const out = await this.gh<{ token: string; expires_at: string }>(`/app/installations/${id}/access_tokens`, {
       method: "POST",
-      body: { ...(repos?.length ? { repositories: repos } : {}), permissions: TOKEN_PERMISSIONS },
+      body: { ...(repos?.length ? { repositories: repos } : {}), permissions: TOKEN_PERMISSIONS[this.role] },
     });
     return { token: out.token, expiresAt: out.expires_at };
   }
@@ -159,11 +210,11 @@ export class GitHubApp {
   }
 
   async installations(owner: Owner): Promise<Installation[]> {
-    return (await this.read<{ list: Installation[] }>(owner, INSTALLS, "all"))?.list ?? [];
+    return (await this.read<{ list: Installation[] }>(owner, INSTALLS, this.installsKey))?.list ?? [];
   }
 
   private async saveInstallations(owner: Owner, list: Installation[]): Promise<void> {
-    await this.write(owner, INSTALLS, "all", { list });
+    await this.write(owner, INSTALLS, this.installsKey, { list });
   }
 
   // ---- connecting ----
@@ -174,7 +225,7 @@ export class GitHubApp {
 
   /** The install link: GitHub sends the browser back with this state, signed and for 30 minutes. */
   connectUrl(owner: Owner, uid: string): string {
-    const body = b64url(JSON.stringify({ k: owner.kind, i: owner.kind === "user" ? owner.uid : owner.teamId, u: uid, n: randomBytes(12).toString("base64url"), e: this.now() + STATE_TTL_MS }));
+    const body = b64url(JSON.stringify({ a: this.key, k: owner.kind, i: owner.kind === "user" ? owner.uid : owner.teamId, u: uid, n: randomBytes(12).toString("base64url"), e: this.now() + STATE_TTL_MS }));
     const sig = b64url(createHmac("sha256", this.stateKey()).update(body).digest());
     return `https://github.com/apps/${encodeURIComponent(this.d.config.slug)}/installations/new?state=${encodeURIComponent(`${body}.${sig}`)}`;
   }
@@ -265,7 +316,7 @@ export class GitHubApp {
       return { status: 202, result: "repos updated" };
     }
     if (!owner) return { status: 202, result: "not linked" };
-    return this.d.github.deliver(owner, { event, delivery: headers.delivery ? `app:${headers.delivery}` : undefined }, body);
+    return this.d.github.deliver(owner, { event, delivery: headers.delivery ? `app:${headers.delivery}` : undefined }, body, this.key);
   }
 
   private async refresh(owner: Owner, id: number): Promise<void> {

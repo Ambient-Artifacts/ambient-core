@@ -4,6 +4,7 @@
 // the answers fill it in. The bot it makes learns on its own from the start (learning.ts).
 import type { Owner } from "../routines/keys.ts";
 import { z } from "zod";
+import { TEMPLATE_ROLE } from "./github-apps.ts";
 import { BotInput, type BotColor, type BotFace, type BotWear, type RoutineSchedule } from "@brain/spec";
 import { RoutineError, type Actor, type Routine, type RoutineService } from "../routines/service.ts";
 import type { Author, BotFolder } from "./folder.ts";
@@ -290,7 +291,7 @@ export function templateViews() {
  * works on GitHub. `enabled`: an app-made bot may start right away; one an AI app made waits.
  */
 export async function createFromTemplate(
-  d: { routines: RoutineService; folder: BotFolder; github?: GitHubEvents; learning?: BotLearning; githubApp?: { covers(owner: Owner, repos: string[]): Promise<boolean> } },
+  d: { routines: RoutineService; folder: BotFolder; github?: GitHubEvents; learning?: BotLearning; githubApp?: { covers(owner: Owner, bot: { id: string; repos: string[]; app?: string }): Promise<boolean> } },
   actor: Actor,
   input: FromTemplate,
   o: { source: string; enabled: boolean; by: Author },
@@ -336,10 +337,14 @@ export async function createFromTemplate(
   if (built.goal) await d.folder.write(f.owner, f.routineId, "GOAL.md", built.goal, o.by, `from the ${t.name} template`);
   if (t.soul.trim()) await d.folder.write(f.owner, f.routineId, "SOUL.md", t.soul, o.by, `from the ${t.name} template`);
   if (d.github && repoList.length) await d.github.setWatch(f.owner, f.routineId, repoList, t.github);
+  // A template with a role works through its role's App (its own GitHub user, its role's access),
+  // once there is one and it's installed; until then the shared App (docs/bots.md, "GitHub Apps").
+  const role = TEMPLATE_ROLE[t.id];
+  if (d.github && role) await d.github.setApp(f.owner, f.routineId, role);
   if (d.learning) await d.learning.setLearn(f.owner, f.routineId, "auto");
   const have = new Set((await d.routines.secrets(actor, team).catch(() => [])).map((s) => s.name));
   // Connected through the GitHub App: events come without a webhook, and each run gets a token.
-  const viaApp = Boolean(d.githubApp && repoList.length && (await d.githubApp.covers(f.owner, repoList)));
+  const viaApp = Boolean(d.githubApp && repoList.length && (await d.githubApp.covers(f.owner, { id: f.routineId, repos: repoList, ...(role ? { app: role } : {}) })));
   const secrets = t.secrets.map((s) => s.name).filter((n) => !have.has(n) && !(viaApp && n === "GH_TOKEN"));
   return { routine: await d.routines.get(actor, routine.id), needs: { secrets, webhook: Boolean(d.github && repoList.length) && !viaApp } };
 }

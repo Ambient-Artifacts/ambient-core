@@ -518,6 +518,35 @@ export default defineSchema({
   }).index("by_routine", ["routineId", "createdAt"]),
 
   /**
+   * GitHub Apps besides the one in the gateway's config (docs/bots.md, "GitHub Apps"): the
+   * template roles' apps (Ambient Builder, Reviewer, Wiki keeper), and a bot's own. Made through
+   * GitHub's manifest flow; the private key and the webhook secret are sealed with the gateway's
+   * master key (the gateway alone opens them).
+   */
+  githubApps: defineTable({
+    /** "builder", "reviewer" or "wiki_keeper" for a role's app; its slug for a bot's own. */
+    key: v.string(),
+    role: v.union(v.literal("builder"), v.literal("reviewer"), v.literal("wiki_keeper"), v.literal("bot")),
+    slug: v.string(),
+    appId: v.string(),
+    name: v.string(),
+    /** The GitHub account (organization or user) it belongs to. */
+    account: v.string(),
+    /** Its webhook's path part: /v1/hooks/github-app/<hookId>. */
+    hookId: v.string(),
+    /** A bot's own app: whose bot. */
+    routineId: v.optional(v.id("routines")),
+    keyIv: v.string(),
+    keyCt: v.string(),
+    secretIv: v.string(),
+    secretCt: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_key", ["key"])
+    .index("by_hook", ["hookId"])
+    .index("by_routine", ["routineId"]),
+
+  /**
    * A wake-up a bot booked for itself (docs/bots.md, "Wake-ups"): at `at` its thread gets the
    * note (role user, author "Wake-up") and a run starts with it. The note is sealed with the
    * owner's data key, like the thread.
