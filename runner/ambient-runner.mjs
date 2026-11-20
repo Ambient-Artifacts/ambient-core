@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.14.0";
+const VERSION = "0.15.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -1381,7 +1381,9 @@ const ADAPTERS = {
     start(cfg, routine, runInfo, bot, resume, mcpConfig, system, opts = {}) {
       // `system`: the bot's instructions for this run from the gateway (runner 0.8.0 on); older
       // gateways send none, and the runner's own text stays.
-      const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
+      // --include-partial-messages: the text as it's written (stream_event deltas), for the live
+      // text in the app (docs/bots.md, "Live text").
+      const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--include-partial-messages", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
       if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__send_file,mcp__ambient-bot__search_history,mcp__ambient-bot__wake_me,mcp__ambient-bot__cancel_wake_up,mcp__ambient");
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
@@ -1410,6 +1412,16 @@ const ADAPTERS = {
         ];
       }
       if (event.type === "system" && event.subtype === "init") return [{ type: "ready" }];
+      // The text as it's written: a new block starts, words arrive, a tool starts. A subagent's
+      // (parent_tool_use_id) isn't the bot's answer.
+      if (event.type === "stream_event") {
+        const ev = event.event ?? {};
+        if (event.parent_tool_use_id) return [];
+        if (ev.type === "content_block_start" && ev.content_block?.type === "text") return [{ type: "live_block" }];
+        if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) return [{ type: "live_delta", text: ev.delta.text }];
+        if (ev.type === "content_block_start" && ev.content_block?.type === "tool_use") return [{ type: "live_tool", name: String(ev.content_block.name ?? "") }];
+        return [];
+      }
       if (event.type !== "assistant") return [];
       const out = [];
       for (const c of event.message?.content ?? []) {
@@ -2227,6 +2239,37 @@ async function run(id) {
   const progressTimer = setInterval(reportProgress, 5_000);
   progressTimer.unref();
 
+  // Live text (docs/bots.md, "Live text"): the block being written and the tool in use, sent a few
+  // times a second while they change; the gateway shows them to whoever reads the bot's thread. A
+  // gateway without it (404) or a plain loop: nothing is sent.
+  let liveText = "";
+  let liveTool = null;
+  let liveSeq = 0;
+  let liveDirty = false;
+  let liveOn = Boolean(bot);
+  let liveBusy = false;
+  // Refused for sending too much (429): wait, so the computer's other calls aren't held up.
+  let liveHoldUntil = 0;
+  const sendLive = async () => {
+    if (!liveOn || !liveDirty || liveBusy || Date.now() < liveHoldUntil) return;
+    liveDirty = false;
+    liveBusy = true;
+    try {
+      await call(cfg, "POST", `/v1/host/runs/${runInfo.id}/live`, { seq: ++liveSeq, text: liveText.slice(-8_000), tool: liveTool }, { retries: 0 });
+    } catch (err) {
+      // Not this run's any more, or a gateway without live text: stop. Too many: wait a little.
+      if (err.status === 404 || err.status === 401) liveOn = false;
+      else if (err.status === 429) {
+        liveHoldUntil = Date.now() + 5_000;
+        liveDirty = true;
+      }
+    } finally {
+      liveBusy = false;
+    }
+  };
+  const liveTimer = setInterval(() => void sendLive(), 250);
+  liveTimer.unref();
+
   const ctx = {};
   createInterface({ input: child.stdout }).on("line", (line) => {
     for (const e of adapter.events(line, ctx)) {
@@ -2241,11 +2284,31 @@ async function run(id) {
         if (streaming) void turnEnded(e);
         continue;
       }
+      if (e.type === "live_block") {
+        liveText = "";
+        liveTool = null;
+        liveDirty = true;
+        continue;
+      }
+      if (e.type === "live_delta") {
+        liveText += e.text;
+        liveTool = null;
+        liveDirty = true;
+        continue;
+      }
+      if (e.type === "live_tool") {
+        liveTool = e.name;
+        liveDirty = true;
+        continue;
+      }
       if (e.type === "text") mark("text");
       journalLine(e);
       if (e.type === "tool") {
         progressLines.push(`· ${e.name}${e.detail ? `: ${e.detail.slice(0, 120)}` : ""}`);
         progressDirty = true;
+        // The tool with what it's doing, once Claude Code has written its input.
+        liveTool = `${e.name}${e.detail ? `: ${e.detail.slice(0, 120)}` : ""}`;
+        liveDirty = true;
       } else if (e.type === "text") {
         if (e.text.length > bestText.length) bestText = e.text;
         // The latest text replaces the previous one (it's the current status, not a log).
@@ -2276,6 +2339,7 @@ async function run(id) {
     child.on("close", (c) => resolve(c ?? 1));
   });
   clearInterval(progressTimer);
+  clearInterval(liveTimer);
   closing = true;
   clearInterval(inboxTimer);
   // Answers to messages taken in that didn't reach the thread yet (all but the last: that's the result).

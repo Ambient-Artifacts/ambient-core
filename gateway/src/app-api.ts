@@ -27,6 +27,7 @@ import type { Folders } from "./bots/files.ts";
 import type { RoutineService } from "./routines/service.ts";
 import type { SessionService } from "./sessions/service.ts";
 import type { EventHub, Revisions } from "./revisions.ts";
+import type { LiveText } from "./bots/live.ts";
 import { TeamServerError, type TeamLink } from "./teams.ts";
 import { SettingsService, type Reply } from "./team-admin.ts";
 import type { CodeHasher } from "./auth/codes.ts";
@@ -84,6 +85,8 @@ export interface AppApiDeps {
   appConfig: { minimumVersion?: string; updateUrl?: string };
   revisions: Revisions;
   events: EventHub;
+  /** Bots' answers as they're written (event: bot_live), for the threads the user may read. */
+  live?: LiveText;
   /** How long an event stream stays open before the app reconnects (with a fresh token). */
   streamMaxMs?: number;
 }
@@ -219,7 +222,12 @@ export function appApiRouter(d: AppApiDeps): Router {
       if (!res.writableEnded) res.write(chunk);
     };
     send("retry: 5000\n\n");
-    const stop = d.events.subscribe(uid, (revisions) => send(`event: revisions\ndata: ${JSON.stringify(revisions)}\n\n`));
+    const stopRevisions = d.events.subscribe(uid, (revisions) => send(`event: revisions\ndata: ${JSON.stringify(revisions)}\n\n`));
+    const stopLive = d.live?.subscribe(uid, (e) => send(`event: bot_live\ndata: ${JSON.stringify(e)}\n\n`));
+    const stop = () => {
+      stopRevisions();
+      stopLive?.();
+    };
     const ping = setInterval(() => send(": ping\n\n"), 25_000);
     let done = false;
     const finish = () => {

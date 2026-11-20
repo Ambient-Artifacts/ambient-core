@@ -35,6 +35,23 @@ export async function teamPeople(ctx: { db: QueryCtx["db"] }, teamId: Doc<"routi
   return (await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(200)).map((m) => String(m.userId));
 }
 
+/**
+ * Who sees a run's live text (gateway/src/bots/live.ts): the bot's owner, or everyone in its
+ * team. Only for the computer that runs it.
+ */
+export const liveAudience = query({
+  args: { ...secretArg, hostId: v.id("routineHosts"), runId: v.string() },
+  handler: async (ctx, { secret, hostId, runId }) => {
+    assertService(secret);
+    const id = ctx.db.normalizeId("routineRuns", runId);
+    const run = id ? await ctx.db.get(id) : null;
+    if (!run || run.hostId !== hostId || run.finishedAt) return null;
+    const r = await ctx.db.get(run.routineId);
+    if (!r?.bot) return null;
+    return { routineId: r._id, uids: r.teamId ? await teamPeople(ctx, r.teamId) : [String(r.userId)] };
+  },
+});
+
 /** Someone read a team bot's thread now (their own; the others' stay as they are). */
 export async function markRead(ctx: MutationCtx, routineId: Id<"routines">, userId: Id<"users">, now: number) {
   const r = await ctx.db.query("botReads").withIndex("by_routine_user", (q) => q.eq("routineId", routineId).eq("userId", userId)).unique();

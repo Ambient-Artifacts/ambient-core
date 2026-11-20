@@ -6,6 +6,7 @@ import type { Directory } from "../directory.ts";
 import { ClaudeToken, HostInfo, RoutineError, RoutineInput, RoutinePatch, RunProgress, RunResult, SecretName, SecretValue, type Actor, type Host, type RoutineService } from "./service.ts";
 import { addressKey, limiter } from "../limiter.ts";
 import type { TeamBundle } from "../team-bundle.ts";
+import type { LiveText } from "../bots/live.ts";
 
 function fail(res: Response, err: unknown) {
   if (err instanceof RoutineError) {
@@ -210,7 +211,9 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
 }
 
 /** The computers' API, and the runner script itself (public: it holds no secrets). */
-export function hostRouter(d: { routines: RoutineService; directory: Directory; runnerSource?: string; installSource?: string; teamBundle?: () => Promise<TeamBundle> }): Router {
+const LiveUpdate = z.object({ seq: z.number().int().min(0), text: z.string().max(40_000), tool: z.string().max(1_000).nullable().optional() });
+
+export function hostRouter(d: { routines: RoutineService; directory: Directory; runnerSource?: string; installSource?: string; teamBundle?: () => Promise<TeamBundle>; live?: LiveText }): Router {
   const r = express.Router();
   const json = express.json({ limit: "256kb" });
   // limiter() prunes only old entries: clearing the map when it filled up let anyone reset every
@@ -266,6 +269,35 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
     next();
   };
   const hostOf = (res: Response) => res.locals.host as Host;
+
+  // Live text has a limit of its own (bots/live.ts): a few updates a second while a bot writes
+  // would use up the computer's 120 a minute within half a minute, and its result and everything
+  // else would get 429s (Reviewi on #80). And the computer is looked up once per 30 seconds, not
+  // on every update.
+  const perLive = limiter(600);
+  const liveHosts = new Map<string, { host: Host; at: number }>();
+  const hostLive = async (req: Request, res: Response, next: NextFunction) => {
+    const key = req.headers.authorization ?? "";
+    const now = Date.now();
+    let h = liveHosts.get(key);
+    if (!h || now - h.at > 30_000) {
+      const found = await d.routines.authenticate(key);
+      if (!found || (found.uid && !(await d.directory.user(found.uid)))) {
+        liveHosts.delete(key);
+        res.status(401).json({ error: "invalid_token" });
+        return;
+      }
+      if (liveHosts.size > 1_000) liveHosts.clear();
+      h = { host: found, at: now };
+      liveHosts.set(key, h);
+    }
+    if (!perLive(h.host.id)) {
+      res.status(429).json({ error: "slow_down" });
+      return;
+    }
+    res.locals.host = h.host;
+    next();
+  };
 
   r.post("/v1/host/setup", json, async (req, res) => {
     if (!perSetupAddress(addressKey(req.ip))) {
@@ -333,7 +365,24 @@ export function hostRouter(d: { routines: RoutineService; directory: Directory; 
     if (!body.success) return badRequest(res, body.error);
     try {
       await d.routines.finishRun(hostOf(res), String(req.params.runId), body.data);
+      // Its message is in the thread now: the readers drop the live text (bots/live.ts).
+      d.live?.end(String(req.params.runId));
       res.status(204).end();
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  // The text a bot's run is writing, a few times a second (docs/bots.md, "Live text"). In memory
+  // only; 404 for a run that isn't this computer's or is over, and the runner stops sending.
+  r.post("/v1/host/runs/:runId/live", hostLive, json, async (req, res) => {
+    const body = LiveUpdate.safeParse(req.body);
+    if (!body.success) return badRequest(res, body.error);
+    if (!d.live) return res.status(404).json({ error: "no_live_text" });
+    try {
+      const ok = await d.live.update(hostOf(res).id, String(req.params.runId), body.data);
+      if (ok) res.status(204).end();
+      else res.status(404).json({ error: "no_such_run" });
     } catch (err) {
       fail(res, err);
     }

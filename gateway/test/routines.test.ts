@@ -486,7 +486,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toContain("Draft next Monday's post.");
     const args = readFileSync(join(dir, "work", "args.txt"), "utf8");
     // No sign-in of its own here: the user's Claude Code login, with only project and local settings.
-    expect(args).toContain("-p --input-format stream-json --output-format stream-json --verbose --permission-mode auto --setting-sources project,local");
+    expect(args).toContain("-p --input-format stream-json --output-format stream-json --include-partial-messages --verbose --permission-mode auto --setting-sources project,local");
     expect(args).toContain("--append-system-prompt");
     expect(readFileSync(join(dir, "work", "env.txt"), "utf8")).not.toContain("CLAUDE_CONFIG_DIR=");
     expect(args).toContain(`You're "Blog draft", one of your owner's bots in Ambient`);

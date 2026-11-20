@@ -126,6 +126,18 @@ to `canEdit` (its settings, run, delete: still the team's owners and admins).
 - **Read is each person's own** (Convex `botReads`): one person opening the thread doesn't take
   the "done" news away from the others. A personal bot keeps `routines.seenAt`.
 
+#### Live text
+
+A bot's answer shows as it's written, like Claude's own apps. The runner (0.15.0 on) starts Claude
+Code with `--include-partial-messages` and sends the block it's writing and the tool it's using,
+at most five times a second, to `POST /v1/host/runs/:runId/live` `{ seq, text, tool }`. The
+gateway keeps it in memory only (`gateway/src/bots/live.ts`) and sends it as `event: bot_live`
+`{ routineId, runId, text, tool, seq }` on `/v1/app/events` to everyone who may read the thread
+(its owner, or the team's people), and as `live` in `GET …/thread` for a thread that opens
+mid-answer. When the message is in the thread (the run's result, or a reply while it goes on)
+they get `{ …, done: true }`. A subagent's words aren't sent; another computer's, or a run that's
+over, answers 404 and the runner stops sending. Codex runs don't send it yet.
+
 ### Ambient (the master bot)
 
 `GET /v1/app/ambient/chat`:
