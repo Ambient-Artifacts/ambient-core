@@ -1,7 +1,7 @@
 // A team bot's thread is a group chat (docs/bots.md, "A team bot's thread is a group chat"):
 // everyone in the team writes to it and sees what the others wrote; the others get a push for each
-// message; the bot's answer reaches whoever wrote to it; its questions reach the whole team, and
-// whoever answers first answers them; read is each person's own. Its settings stay with the team's
+// message; the bot's answer reaches whoever wrote to it; its questions reach the whole team, but
+// only its maker answers them (and their decision); read is each person's own. Its settings stay with the team's
 // owners and admins.
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -97,7 +97,7 @@ describe("a team bot's thread", () => {
     expect(pushesTo(nora).length).toBe(before.nora);
   });
 
-  it("asks the whole team, and whoever answers first answers it", async () => {
+  it("asks the whole team, but only its maker answers: a member's reply is a message, the decision stays open", async () => {
     const start = await hostCall(teamHost, "POST", `/v1/host/routines/${bot}/runs`);
     const token = String(start.json.runToken);
     expect((await hostCall(token, "POST", "/v1/bot/ask", { question: "Merge PR #12?", choices: ["Merge", "Wait"] })).status).toBe(200);
@@ -105,9 +105,27 @@ describe("a team bot's thread", () => {
       expect(pushesTo(ben).some((m) => m.body.includes("Merge PR #12?"))).toBe(true);
       expect(pushesTo(nora).some((m) => m.body.includes("Merge PR #12?"))).toBe(true);
     });
+    // The maker's decision for it.
+    const question = await s.t.run(async (ctx) => (await ctx.db.query("routines").collect()).find((r) => String(r._id) === bot)!.openQuestionId!);
+    const decisionId = await vi.waitFor(async () => {
+      const d = await s.t.run(async (ctx) => ctx.db.query("decisions").withIndex("by_question", (q) => q.eq("questionId", question)).first());
+      expect(d && String(d.userId)).toBe(lena.user.uid);
+      return d!._id;
+    });
+    const status = () => s.t.run(async (ctx) => (await ctx.db.get(decisionId))!.status);
+
     expect((await call(nora, "POST", `/v1/app/routines/${bot}/thread`, { text: "Merge" })).status).toBe(200);
-    const last = ((await call(lena, "GET", `/v1/app/routines/${bot}/thread`)).json.messages as Msg[]).at(-1)!;
-    expect(last).toMatchObject({ author: "Nora Ost", kind: "answer", text: "Merge" });
-    await hostCall(teamHost, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Merged." });
+    expect(((await call(lena, "GET", `/v1/app/routines/${bot}/thread`)).json.messages as Msg[]).at(-1)).toMatchObject({ author: "Nora Ost", kind: "message", text: "Merge" });
+    expect(await status()).toBe("open");
+    // Nor can Nora's Ambient answer it, or Nora take Lena's decision.
+    const teamIds = await s.t.run(async (ctx) => [(await ctx.db.query("routines").collect()).find((r) => String(r._id) === bot)!.teamId!]);
+    expect(await s.control.m(s.api.bots.post, { uid: nora.user.uid as never, teamIds: teamIds as never, id: bot, iv: "x", ct: "x", now: Date.now(), asAmbient: true })).toEqual({ ok: false, error: "not_yours" });
+    expect((await call(nora, "POST", `/v1/app/decisions/${decisionId}`, { option: "Merge" })).status).not.toBe(200);
+    expect(await status()).toBe("open");
+
+    expect((await call(lena, "POST", `/v1/app/routines/${bot}/thread`, { text: "Wait" })).status).toBe(200);
+    expect(((await call(ben, "GET", `/v1/app/routines/${bot}/thread`)).json.messages as Msg[]).at(-1)).toMatchObject({ author: "Lena Vogel", kind: "answer", text: "Wait" });
+    expect(await status()).toBe("answered");
+    await hostCall(teamHost, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Waiting." });
   });
 });

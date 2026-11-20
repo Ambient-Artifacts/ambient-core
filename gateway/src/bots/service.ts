@@ -167,6 +167,7 @@ export class BotService {
       const messages: Record<string, [string, number]> = {
         no_such_bot: ["There's no such bot.", 404],
         admins_only: ["Only whoever may change this bot can write to it.", 403],
+        not_yours: ["Only the bot's maker, or their Ambient, answers its questions.", 403],
         no_computer: ["This bot has no computer to run on. Pick one first.", 400],
         no_team_server: ["The team's server isn't set up for loops yet.", 400],
       };

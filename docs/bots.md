@@ -119,8 +119,9 @@ to `canEdit` (its settings, run, delete: still the team's owners and admins).
   - a teammate's message goes to everyone else in the team ("Helper · Lab", "Ben Weiss: …");
   - the bot's answer (a run's result in the thread) goes to whoever wrote to it since it last said
     something;
-  - its question goes to the whole team, and whoever answers first in the thread answers it. The
-    decision, and Ambient answering from the brain, stay with whoever made the bot.
+  - its question goes to the whole team, but it's its maker's to answer: the decision, and
+    Ambient answering from the brain (`not_yours` for anyone else's Ambient), stay with whoever
+    made the bot. Another member's reply is a message the bot reads, and the question stays open.
   - A failed run still goes to whoever started it.
 - **Read is each person's own** (Convex `botReads`): one person opening the thread doesn't take
   the "done" news away from the others. A personal bot keeps `routines.seenAt`.

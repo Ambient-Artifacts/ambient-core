@@ -117,8 +117,15 @@ export const post = mutation({
       if (!server?.tokenHash) return { ok: false as const, error: "no_team_server" };
     }
     const user = await ctx.db.get(uid);
-    const question = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
-    const kind = question && !question.answeredAt ? ("answer" as const) : ("message" as const);
+    const open = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
+    const question = open && !open.answeredAt ? open : null;
+    const decision = question ? await ctx.db.query("decisions").withIndex("by_question", (q) => q.eq("questionId", question._id)).first() : null;
+    // Its questions, its decisions and Ambient answering are its maker's (the decision's person):
+    // in a team's group chat everyone sees the question, but another member's reply is a message
+    // the bot reads, and the question stays open for its maker.
+    const decider = String(decision?.userId ?? r.userId);
+    if (asAmbient && String(uid) !== decider) return { ok: false as const, error: "not_yours" };
+    const kind = question && String(uid) === decider ? ("answer" as const) : ("message" as const);
     const messageId = await ctx.db.insert("botMessages", {
       routineId: r._id,
       teamId: r.teamId,
@@ -135,7 +142,7 @@ export const post = mutation({
     // Writing to it means its thread was read (by the writer, in a team's group chat).
     if (r.teamId) await markRead(ctx, r._id, uid, now);
     await ctx.db.patch(r._id, {
-      openQuestionId: undefined,
+      ...(kind === "answer" ? { openQuestionId: undefined } : {}),
       ...(r.teamId ? {} : { seenAt: now }),
       pendingMessageId: messageId,
       runRequestedAt: now,
@@ -143,8 +150,8 @@ export const post = mutation({
       updatedAt: now,
     });
     // The decision this question was, answered here (in the thread, or by Ambient).
-    if (question && kind === "answer") {
-      const d = await ctx.db.query("decisions").withIndex("by_question", (q) => q.eq("questionId", question._id)).first();
+    if (kind === "answer") {
+      const d = decision;
       if (d && d.status === "open") await ctx.db.patch(d._id, { status: "answered", answerIv: iv, answerCt: ct, answeredBy: asAmbient ? "Ambient" : user?.name, via: asAmbient ? "ambient" : "thread", answeredAt: now });
     }
     const m = (await ctx.db.get(messageId))!;
