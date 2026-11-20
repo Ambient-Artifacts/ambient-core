@@ -419,7 +419,9 @@ export class RoutineService {
   /** A bot's own Slack app's token, for its run as SLACK_BOT_TOKEN (bots/slack-apps.ts). */
   slackToken?: (owner: Owner, routineId: string) => Promise<string | null>;
   /** A bot said something at the end of a run (its result): Slack answers the thread that asked. */
-  onBotSaid?: (owner: Owner, routineId: string, text: string, final: boolean) => void;
+  onBotSaid?: (owner: Owner, routineId: string, text: string, final: boolean, runId: string) => void;
+  /** A bot's run starts (its id and its token's hash): the Slack messages waiting are its to answer. */
+  onBotRunStarted?: (owner: Owner, routineId: string, runId: string, tokenHash: string) => Promise<void>;
 
   constructor(
     private d: {
@@ -1146,6 +1148,10 @@ export class RoutineService {
         env.GITHUB_TOKEN = token;
       }
     }
+    // The Slack messages waiting for the bot are this run's to answer (and no other run's).
+    if (r.bot && this.onBotRunStarted) {
+      await this.onBotRunStarted(owner, r.id, String(out.runId), sha256Hex(runToken)).catch((err: Error) => console.warn(`[slack] a run's threads weren't noted: ${err.message}`));
+    }
     // A bot with its own Slack app posts as itself (a digest, an answer in a channel).
     if (r.bot && !env.SLACK_BOT_TOKEN && this.slackToken) {
       const token = await this.slackToken(owner, r.id).catch((err: Error) => {
@@ -1239,7 +1245,7 @@ export class RoutineService {
       await this.d.folder.afterRun(owner, { routineId: String(w.routineId), name: w.name, runId, startedAt: w.startedAt }, { memory: result.memory, handoff: result.handoff, summary: clipped, failed: result.status === "failed" });
     }
     // A run a Slack message started: its result goes back to that Slack thread.
-    if (who.bot && this.onBotSaid) this.onBotSaid(owner, String((who as unknown as { routineId: string }).routineId), clipped ?? "", true);
+    if (who.bot && this.onBotSaid) this.onBotSaid(owner, String((who as unknown as { routineId: string }).routineId), clipped ?? "", true, runId);
     if (who.bot && result.status === "failed") {
       const w = who as unknown as { routineId: string; name: string };
       this.onBotEvent?.({ kind: "bot_failed", uid: String(who.uid), routineId: String(w.routineId), bot: w.name, text: clipped ?? "", runId });

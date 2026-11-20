@@ -62,6 +62,7 @@ beforeAll(async () => {
           manifest = JSON.parse(args.manifest!) as Record<string, unknown>;
           return json({ ok: true, app_id: "A1", credentials: { client_id: "111.222", client_secret: "client-secret", verification_token: "v", signing_secret: SIGNING }, oauth_authorize_url: "https://slack.com/oauth/v2/authorize?client_id=111.222" });
         case "oauth.v2.access":
+          if (args.code === "no-user") return json({ ok: true, access_token: "xoxb-x", bot_user_id: "U_BOT", team: { id: "T1", name: "Miora" } });
           if (args.code !== "good-code" || args.client_secret !== "client-secret") return json({ ok: false, error: "invalid_code" });
           return json({ ok: true, access_token: "xoxb-chatty", bot_user_id: "U_BOT", team: { id: "T1", name: "Miora" }, authed_user: { id: "U_LENA" } });
         case "users.info":
@@ -148,6 +149,9 @@ describe("a bot's own Slack app", () => {
     const state = new URL(url).searchParams.get("state")!;
     const bad = await fetch(`${s.origin}/v1/slack/installed?code=bad&state=${encodeURIComponent(state)}`);
     expect(bad.status).toBe(502);
+    // Slack doesn't say who allowed it: not installed (it wouldn't know whom to listen to).
+    expect((await fetch(`${s.origin}/v1/slack/installed?code=no-user&state=${encodeURIComponent(state)}`)).status).toBe(502);
+    expect((await call("GET", `/v1/app/routines/${bot}/slack`)).json).toMatchObject({ app: { installed: false } });
     const res = await fetch(`${s.origin}/v1/slack/installed?code=good-code&state=${encodeURIComponent(state)}`);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Chatty is in Slack");
@@ -181,6 +185,23 @@ describe("a bot's own Slack app", () => {
     await hostCall(host, "POST", `/v1/host/runs/${next.run.id}`, { status: "succeeded", summary: "Nightly audit done." });
     await s.folders.slack!.idle();
     expect(posts()).toHaveLength(before);
+  });
+
+  it("answers only from the run that took the Slack message: a run already going stays out of Slack", async () => {
+    // A scheduled run is going when the mention comes in.
+    const going = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await sendEvent({ type: "event_callback", event_id: "Ev10", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> status?", channel: "C7", ts: "1700000000.0010" } });
+    await s.folders.slack!.idle();
+    const before = posts().length;
+    await hostCall(host, "POST", `/v1/host/runs/${going.run.id}`, { status: "succeeded", summary: "Private review of PR #12: …" });
+    await s.folders.slack!.idle();
+    expect(posts()).toHaveLength(before);
+    // The next run takes it, and answers it there.
+    const next = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await hostCall(host, "POST", `/v1/host/runs/${next.run.id}`, { status: "succeeded", summary: "All quiet." });
+    await s.folders.slack!.idle();
+    expect(posts()).toHaveLength(before + 1);
+    expect(posts().at(-1)!.args).toMatchObject({ channel: "C7", thread_ts: "1700000000.0010", text: "All quiet." });
   });
 
   it("refuses a forged or stale event, and tells someone else once that it isn't theirs to steer", async () => {

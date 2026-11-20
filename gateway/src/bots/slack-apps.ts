@@ -31,6 +31,8 @@ const STATE_TTL_MS = 60 * 60_000;
 const RENEW_BEFORE_MS = 15 * 60_000;
 /** An answer goes back to Slack only for a message this recent (a later scheduled run doesn't). */
 const REPLY_FOR_MS = 6 * 60 * 60_000;
+/** At most this many Slack threads wait for a bot's answer. */
+const TARGETS_MAX = 10;
 /** Slack's limit for an app's name. */
 const NAME_MAX = 35;
 /** A Slack message's text is cut at 40,000; long answers go out in parts well below that. */
@@ -62,10 +64,19 @@ interface AppRecord {
   installer?: string;
 }
 
-interface Reply {
+/** A Slack message waiting for its answer: the thread, and the run that took it (once one has). */
+interface Target {
   channel: string;
   ts: string;
   at: number;
+  runId?: string;
+}
+
+/** Where a bot's answers go: the Slack threads asked, each tied to the run that answers it. */
+interface Replies {
+  targets: Target[];
+  /** The bot's current run (its id and its token's hash), so its replies find their threads. */
+  run?: { id: string; hash: string };
 }
 
 /** What a hook or an install's state names: the bot and its owner. */
@@ -98,6 +109,7 @@ export class SlackApps {
   private names = new Map<string, string>();
   private warned = new Set<string>();
   private pending = new Set<Promise<unknown>>();
+  private locks = new Map<string, Promise<void>>();
 
   constructor(
     private d: {
@@ -314,8 +326,8 @@ export class SlackApps {
       { client_id: app.clientId, client_secret: app.clientSecret, code, redirect_uri: `${this.base()}/v1/slack/installed` },
       { form: true },
     );
-    if (!out.ok || !out.access_token || !out.bot_user_id) throw new SlackError("slack_failed", `Slack didn't install it (${out.error ?? "no reason"}). Tap Add to Slack again in Ambient.`, 502);
-    const done: AppRecord = { ...app, botToken: out.access_token, botUserId: out.bot_user_id, teamId: out.team?.id, teamName: out.team?.name, installer: out.authed_user?.id };
+    if (!out.ok || !out.access_token || !out.bot_user_id || !out.authed_user?.id) throw new SlackError("slack_failed", `Slack didn't install it (${out.error ?? "no reason"}). Tap Add to Slack again in Ambient.`, 502);
+    const done: AppRecord = { ...app, botToken: out.access_token, botUserId: out.bot_user_id, teamId: out.team?.id, teamName: out.team?.name, installer: out.authed_user.id };
     await this.put(owner, APP, s.r, done);
     return { name: app.name, botUserId: out.bot_user_id, teamName: out.team?.name ?? null };
   }
@@ -401,11 +413,11 @@ export class SlackApps {
     if (e.user === app.botUserId) return;
     const thread = e.thread_ts ?? e.ts;
     // It takes instructions from whoever installed it (its runs hold its owner's secrets).
-    if (app.installer && e.user !== app.installer) {
+    if (!app.installer || e.user !== app.installer) {
       const warnKey = `${routineId}:${e.channel}:${thread}`;
       if (!this.warned.has(warnKey)) {
         this.warned.add(warnKey);
-        await this.post(app.botToken, e.channel, thread, `I only take instructions from <@${app.installer}> for now.`, true);
+        await this.post(app.botToken, e.channel, thread, app.installer ? `I only take instructions from <@${app.installer}> for now.` : "I don't know who installed me, so I'm not taking instructions. Add me to Slack again from Ambient.", true);
       }
       return;
     }
@@ -414,7 +426,12 @@ export class SlackApps {
     const who = await this.nameOf(app.botToken, e.user);
     const where = dm ? "in a direct message" : "in a channel";
     const body = `${who} wrote to you on Slack (${where}): ${slackToPlain(text)}\n\n(Your answer goes back to that Slack thread on its own.)`;
-    await this.put(owner, REPLY, routineId, { channel: e.channel, ts: thread, at: this.now() } satisfies Reply);
+    await this.replies(owner, routineId, (r) => {
+      const now = this.now();
+      // Old ones nobody answered go; the newest stay.
+      const kept = r.targets.filter((t) => now - t.at <= REPLY_FOR_MS && !(t.channel === e.channel && t.ts === thread && !t.runId));
+      return { ...r, targets: [...kept, { channel: e.channel!, ts: thread, at: now }].slice(-TARGETS_MAX) };
+    });
     void this.call("reactions.add", app.botToken, { channel: e.channel, timestamp: e.ts, name: "eyes" }).catch(() => undefined);
     const sealed = await sealMessage(this.d.keys, owner, { text: body });
     const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Slack", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
@@ -439,20 +456,64 @@ export class SlackApps {
     }
   }
 
+  /** Read, change and write a bot's reply targets, one change at a time per bot. */
+  private async replies(owner: Owner, routineId: string, change: (r: Replies) => Replies | null): Promise<Replies> {
+    const key = `${JSON.stringify(ownerArgs(owner))}:${routineId}`;
+    const before = this.locks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((r) => (release = r));
+    const chained = before.then(() => mine);
+    this.locks.set(key, chained);
+    await before;
+    try {
+      const raw = await this.get<Replies>(owner, REPLY, routineId);
+      const cur: Replies = { targets: Array.isArray(raw?.targets) ? raw.targets : [], ...(raw?.run ? { run: raw.run } : {}) };
+      const next = change(cur);
+      if (next) await this.put(owner, REPLY, routineId, next);
+      return next ?? cur;
+    } finally {
+      release();
+      if (this.locks.get(key) === chained) this.locks.delete(key);
+    }
+  }
+
   /**
-   * The bot said something in its thread (a run's reply, its question, or its result). It goes
-   * back to the Slack thread of the message that started it, if that's recent; a run's end
-   * (`final`) closes that thread, so a later scheduled run doesn't post there.
+   * A bot's run starts: it sees every message already in its thread, so the Slack messages
+   * waiting for an answer are now its to answer. Only when the bot has a Slack app.
    */
-  said(owner: Owner, routineId: string, text: string, final: boolean): void {
+  async runStarted(owner: Owner, routineId: string, runId: string, tokenHash: string): Promise<void> {
+    if (!(await this.get<AppRecord>(owner, APP, routineId))?.botToken) return;
+    await this.replies(owner, routineId, (r) => ({ run: { id: runId, hash: tokenHash }, targets: r.targets.map((t) => (t.runId ? t : { ...t, runId })) }));
+  }
+
+  /** A running bot took Slack messages from its thread mid-run (its inbox): they're its to answer. */
+  async runTook(owner: Owner, routineId: string, tokenHash: string): Promise<void> {
+    await this.replies(owner, routineId, (r) => {
+      if (r.run?.hash !== tokenHash) return null;
+      const now = this.now();
+      return { ...r, targets: r.targets.map((t) => (t.runId || t.at > now ? t : { ...t, runId: r.run!.id })) };
+    });
+  }
+
+  /**
+   * A run said something (its reply, its question, or its result): it goes to the Slack threads
+   * that run took, and nowhere else, so another run's output never lands in a Slack thread. The
+   * run is named by its id (its result) or its token's hash (while it runs). Its end (`final`)
+   * closes its threads.
+   */
+  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }): void {
     this.track(
       (async () => {
-        const target = await this.get<Reply>(owner, REPLY, routineId);
-        if (!target?.channel || this.now() - target.at > REPLY_FOR_MS) return;
+        const r = await this.get<Replies>(owner, REPLY, routineId);
+        if (!r?.targets?.length) return;
+        const runId = run.id ?? (run.hash && r.run?.hash === run.hash ? r.run.id : undefined);
+        if (!runId) return;
+        const mine = r.targets.filter((t) => t.runId === runId);
+        if (!mine.length) return;
         const app = await this.get<AppRecord>(owner, APP, routineId);
         if (!app?.botToken) return;
-        if (text.trim()) await this.post(app.botToken, target.channel, target.ts, text);
-        if (final) await this.put(owner, REPLY, routineId, {}, true);
+        if (text.trim()) for (const t of mine) await this.post(app.botToken, t.channel, t.ts, text);
+        if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}) }));
       })(),
     );
   }

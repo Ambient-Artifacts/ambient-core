@@ -1044,16 +1044,19 @@ the app; the person taps Allow once (`gateway/src/bots/slack-apps.ts`).
   (`url_verification`, while the app is being made) only needs the hook to be Ambient's. An event
   Slack sends again is taken once.
 - **Who it listens to.** Whoever installed it (the Slack user who tapped Allow): its runs hold its
-  owner's secrets. Anyone else who mentions it is told once per thread that it takes instructions
+  owner's secrets. An install where Slack doesn't say who allowed it is refused, and an app without
+  a known installer takes instructions from no one. Anyone else who mentions it is told once per thread that it takes instructions
   from that person. Its own messages, other bots', edits and joins are left out.
 - **A message.** An @mention or a DM goes into the bot's thread from "Slack" ("Lena wrote to you
   on Slack (in a channel): …", Slack's links as text), gets a 👀 on Slack, and starts a run
   like its owner's message. A paused bot says so in the Slack thread.
-- **The answer.** What the run says while it works (its reply, its question with the choices) and
-  its result at the end go back to the Slack thread of the message that started it, as Slack's
-  markup (bold, links, headings; code as is), in parts of at most 3,500 characters. The run's end
-  closes that thread, so a later scheduled run's result stays out of Slack; so does one more than
-  6 hours after the message.
+- **The answer.** Each Slack message waits for the run that takes it: the run that starts after
+  it (a run sees everything already in its thread), or the run going at the time if it takes the
+  message in mid-run (its inbox). Only that run's replies, its question with the choices, and its
+  result go back to that Slack thread, as Slack's markup (bold, links, headings; code as is), in
+  parts of at most 3,500 characters; its end closes the thread. Another run's output (a scheduled
+  run that was already going, a GitHub wake-up) never reaches Slack. Up to 10 threads wait at
+  once; one nobody answered within 6 hours goes.
 - **Posting on its own.** A bot with an installed app gets its token as `SLACK_BOT_TOKEN` in every
   run (unless it has a secret of that name), so it can post as itself: a nightly digest in a
   channel it was invited to.
