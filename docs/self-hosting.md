@@ -361,7 +361,7 @@ volumes:
   team-2-data:
 ```
 
-Then `docker compose up -d` and `docker compose exec gateway admin server add team-2 http://team-2:8090`. The next `admin team create` claims it. A team server can also run on another machine. It only has to be reachable from the gateway: register an `https://` address (put Caddy or another proxy with TLS in front of it), and let only the gateway's address through its firewall, since notes, transcripts and the team repo's token cross that link. Start it with `node --import tsx team/src/server.ts` and the variables in [configuration.md](configuration.md#team-server), and register its URL the same way.
+Then `docker compose up -d` and `docker compose exec gateway admin server add team-2 http://team-2:8090`. The next `admin team create` claims it. Each team needs its own owner: a person is in one team ([architecture](architecture.md), "One team per person"), so add that person first with `admin user add`. A team server can also run on another machine. It only has to be reachable from the gateway: register an `https://` address (put Caddy or another proxy with TLS in front of it), and let only the gateway's address through its firewall, since notes, transcripts and the team repo's token cross that link. Start it with `node --import tsx team/src/server.ts` and the variables in [configuration.md](configuration.md#team-server), and register its URL the same way.
 
 ## Security notes
 
