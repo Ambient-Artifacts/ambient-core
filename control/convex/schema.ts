@@ -547,6 +547,16 @@ export default defineSchema({
     .index("by_routine", ["routineId"]),
 
   /**
+   * When each person last read a team bot's thread (a group chat: one person reading doesn't make
+   * it read for the others). A personal bot keeps `routines.seenAt`.
+   */
+  botReads: defineTable({
+    routineId: v.id("routines"),
+    userId: v.id("users"),
+    at: v.number(),
+  }).index("by_routine_user", ["routineId", "userId"]),
+
+  /**
    * A wake-up a bot booked for itself (docs/bots.md, "Wake-ups"): at `at` its thread gets the
    * note (role user, author "Wake-up") and a run starts with it. The note is sealed with the
    * owner's data key, like the thread.

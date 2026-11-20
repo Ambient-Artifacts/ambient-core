@@ -20,6 +20,7 @@ import { api, type Control } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Team } from "../directory.ts";
 import type { Notifier, PushMessage } from "../push.ts";
+import { botThreadPush } from "../channels/channel.ts";
 import type { Owner, RoutineKeys } from "./keys.ts";
 import type { CodeHasher } from "../auth/codes.ts";
 import type { Author, BotFolder } from "../bots/folder.ts";
@@ -293,6 +294,8 @@ export interface Routine {
   team: TeamRef | null;
   /** The user may change, run and delete it. */
   canEdit: boolean;
+  /** The user may write in its thread: a team bot's is a group chat, open to everyone in the team. */
+  canMessage: boolean;
   computer: { id: string; name: string } | null;
   folder: string | null;
   enabled: boolean;
@@ -609,6 +612,8 @@ export class RoutineService {
     const team = this.teamOf(actor, r.teamId);
     const host = r.teamId ? hosts.find((h) => h.teamId === r.teamId) : r.hostId ? hosts.find((h) => h.id === r.hostId) : undefined;
     const canEdit = team ? this.manageable(actor).some((t) => t.id === team.id) : actor.canWritePersonal;
+    // A team bot's thread is a group chat: everyone in the team writes to it (its settings: canEdit).
+    const canMessage = team ? actor.canWriteTeams : actor.canWritePersonal;
     return {
       id: r.id,
       name: r.name,
@@ -618,6 +623,7 @@ export class RoutineService {
       nextRunAt: r.enabled && host?.ready ? soonest(nextRun(r.schedule, this.now()), r.bot ? (r.nextWakeAt ?? null) : null) : null,
       team: team ? { slug: team.slug, name: team.name } : null,
       canEdit,
+      canMessage,
       computer: host ? { id: host.id, name: host.name } : null,
       folder: r.folder,
       enabled: r.enabled,
@@ -1275,6 +1281,11 @@ export class RoutineService {
     }
     // Not awaited: the computer's report doesn't wait for Apple.
     if (out.notice) void this.d.notifier?.notify(String(out.notice.uid), routineFailedPush({ ...out.notice, routineId: String(out.notice.routineId), runId: String(out.notice.runId) }));
+    // A team bot's answer in its group chat: whoever wrote to it since it last spoke hears it.
+    const replied = (out as { replied?: { to: string[]; routineId: string; name: string; team: string | null } | null }).replied;
+    if (replied && clipped) {
+      for (const uid of replied.to) void this.d.notifier?.notify(uid, botThreadPush({ botId: String(replied.routineId), name: replied.name, team: replied.team, text: clipped }));
+    }
   }
 
   /** Mid-run progress: the runner sends the summary, cost and turns while the run is still going. */
