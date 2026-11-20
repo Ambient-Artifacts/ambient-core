@@ -138,8 +138,18 @@ export const list = query({
       routines.push(...(await teamRoutines(ctx, teamId)));
       hosts.push(...(await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(5)));
     }
+    // A team bot's thread is a group chat: read is each person's own (`botReads`).
+    const shapes = [];
+    for (const r of routines.sort((a, b) => a.createdAt - b.createdAt)) {
+      const shape = routineShape(r);
+      if (r.teamId && r.bot) {
+        const read = await ctx.db.query("botReads").withIndex("by_routine_user", (q) => q.eq("routineId", r._id).eq("userId", uid)).unique();
+        shape.seenAt = read?.at ?? null;
+      }
+      shapes.push(shape);
+    }
     return {
-      routines: routines.sort((a, b) => a.createdAt - b.createdAt).map(routineShape),
+      routines: shapes,
       hosts: hosts.sort((a, b) => a.createdAt - b.createdAt).map(hostShape),
     };
   },
@@ -240,6 +250,7 @@ export const remove = mutation({
     const messages = await ctx.db.query("botMessages").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(1000);
     for (const m of messages) await ctx.db.delete(m._id);
     for (const w of await ctx.db.query("botWakes").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(500)) await ctx.db.delete(w._id);
+    for (const read of await ctx.db.query("botReads").withIndex("by_routine_user", (q) => q.eq("routineId", r._id)).take(500)) await ctx.db.delete(read._id);
     // Its own GitHub App's record (the App itself stays on GitHub until someone deletes it there).
     for (const g of await ctx.db.query("githubApps").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(10)) await ctx.db.delete(g._id);
     // The files sent in its thread go with it.
@@ -593,9 +604,9 @@ export const finishRun = mutation({
     if (r?.lastRun && r.lastRun.startedAt === run.startedAt) {
       await ctx.db.patch(r._id, { lastRun: { status: fields.status, startedAt: run.startedAt, finishedAt: now } });
     }
-    if (r?.bot) await botRunMessage(ctx, r, run, fields.status, fields.sessionId, message, now);
+    const replied = r?.bot ? await botRunMessage(ctx, r, run, fields.status, fields.sessionId, message, now) : null;
     const notice = fields.status === "failed" && r ? await failureNotice(ctx, run, r, now) : null;
-    return { ok: true as const, notice };
+    return { ok: true as const, notice, replied };
   },
 });
 
@@ -650,8 +661,26 @@ async function botRunMessage(
     const at = asked && question ? Math.min(now, question.createdAt - 1) : now;
     await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "bot", kind: failed ? "failure" : "result", iv: message.iv, ct: message.ct, runId: run._id, createdAt: at });
     if (!failed) patch.lastResultHash = message.hash;
+    if (Object.keys(patch).length) await ctx.db.patch(r._id, patch);
+    // A team bot's answer, in its group chat: whoever wrote to it since it last said something hears it.
+    if (r.teamId && !failed) {
+      const since = await ctx.db
+        .query("botMessages")
+        .withIndex("by_routine", (q) => q.eq("routineId", r._id).lt("createdAt", at))
+        .order("desc")
+        .take(50);
+      const waiting = new Set<string>();
+      for (const m of since) {
+        if (m.role === "bot") break;
+        if (m.role === "user" && m.authorId) waiting.add(String(m.authorId));
+      }
+      const team = await ctx.db.get(r.teamId);
+      return waiting.size ? { to: [...waiting], routineId: r._id, name: r.name, team: team?.name ?? null, face: r.bot?.face ?? "classic", color: r.bot?.color ?? null, wear: r.bot?.wear ?? null } : null;
+    }
+    return null;
   }
   if (Object.keys(patch).length) await ctx.db.patch(r._id, patch);
+  return null;
 }
 
 /** A routine that keeps failing is pushed about again after this long. */

@@ -38,7 +38,13 @@ export class AppChannel implements Channel {
   constructor(private notifier?: Notifier) {}
 
   async deliver(m: Outgoing): Promise<void> {
-    if (!this.notifier || m.kind !== "question") return;
+    if (!this.notifier) return;
+    // Said in a team bot's group chat (a teammate's message, the bot's answer): a push, as any group chat.
+    if (m.kind === "text" && m.speaker.kind === "bot") {
+      await this.notifier.notify(m.to, botThreadPush({ botId: m.speaker.botId, name: m.speaker.name, team: m.speaker.team, text: m.text }));
+      return;
+    }
+    if (m.kind !== "question") return;
     if (m.speaker.kind === "bot") await this.notifier.notify(m.to, botQuestionPush({ botId: m.speaker.botId, name: m.speaker.name, team: m.speaker.team, question: m.text }));
     // Ambient's own question (a change it proposes): opens its chat, where the card is.
     else await this.notifier.notify(m.to, ambientQuestionPush(m.text));
@@ -49,6 +55,17 @@ export class AppChannel implements Channel {
 export function ambientQuestionPush(question: string): PushMessage {
   const body = question.replace(/\s+/g, " ").trim();
   return { title: "Ambient needs you", body: body.length > 180 ? `${body.slice(0, 179)}…` : body, url: "ambient://ambient", thread: "ambient", collapseId: "ambient-question" };
+}
+
+/** A message in a team bot's group chat ("Lena: …", or the bot's answer): tapping it opens the thread. */
+export function botThreadPush(n: { botId: string; name: string; team: string | null; text: string }): PushMessage {
+  const body = n.text.replace(/\s+/g, " ").trim();
+  return {
+    title: n.team ? `${n.name} · ${n.team}` : n.name,
+    body: body.length > 180 ? `${body.slice(0, 179)}…` : body,
+    url: `ambient://routine/${n.botId}?thread=1`,
+    thread: `bot-${n.botId}`,
+  };
 }
 
 /** The push when a bot asks: tapping it opens the bot's thread. */

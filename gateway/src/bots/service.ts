@@ -160,11 +160,13 @@ export class BotService {
     const files = incoming.length ? await this.d.attachments!.save(owner, { routineId: id }, incoming) : [];
     // The run reads the thread's text: it learns of the files there, and fetches them with its token.
     const sealed = await sealMessage(this.d.routines.keys, owner, { text: body || "(See the attached files.)", files });
-    const out = await this.d.routines.control.m(api.bots.post, { ...this.writeAccess(actor), id, iv: sealed.iv, ct: sealed.ct, now: this.now(), ...(opts.asAmbient ? { asAmbient: true } : {}) });
+    // A team bot's thread is a group chat: everyone in the team writes (not only its admins).
+    const out = await this.d.routines.control.m(api.bots.post, { ...(r.teamId ? this.access(actor) : this.writeAccess(actor)), id, iv: sealed.iv, ct: sealed.ct, now: this.now(), ...(opts.asAmbient ? { asAmbient: true } : {}) });
     if (!out.ok) {
       const messages: Record<string, [string, number]> = {
         no_such_bot: ["There's no such bot.", 404],
         admins_only: ["Only whoever may change this bot can write to it.", 403],
+        not_yours: ["Only the bot's maker, or their Ambient, answers its questions.", 403],
         no_computer: ["This bot has no computer to run on. Pick one first.", 400],
         no_team_server: ["The team's server isn't set up for loops yet.", 400],
       };
@@ -173,6 +175,20 @@ export class BotService {
     }
     const routine = await this.d.routines.get(actor, id);
     if (routine.computer) this.d.startNow?.(routine.computer.id, id);
+    // Everyone else in the group chat hears it, as in any group chat.
+    const group = (out as { group?: { team: string; others: string[]; bot: { name: string; face: string; color: string | null; wear: string[] | null } } | null }).group;
+    if (group?.others.length) {
+      const m = out.message as unknown as MessageRow;
+      const said = body || (files.length ? `sent ${files.length === 1 ? "a file" : `${files.length} files`}` : "");
+      const speaker = { kind: "bot" as const, botId: id, name: group.bot.name, ...botLook(group.bot.name, { face: group.bot.face, color: group.bot.color ?? undefined, wear: group.bot.wear ?? undefined }), team: group.team };
+      for (const to of group.others) {
+        for (const channel of this.d.channels) {
+          void channel
+            .deliver({ speaker, to, kind: "text", text: `${m.authorName ?? "Someone"}: ${said}` })
+            .catch((err: Error) => console.warn(`[bots] ${channel.kind} couldn't deliver a message: ${err.message}`));
+        }
+      }
+    }
     // The owner wrote to the bot (not an answer to its question, not Amb): maybe a correction.
     if (!opts.asAmbient && (out.message as unknown as MessageRow).kind === "message") {
       this.onEvent?.({ kind: "bot_corrected", uid: actor.uid, routineId: id, bot: r.name, text: body, messageId: String((out.message as unknown as MessageRow).id) });
@@ -244,6 +260,15 @@ export class BotService {
       for (const channel of this.d.channels) {
         void channel
           .deliver({ speaker: { kind: "bot", botId: String(out.routineId), name: who.name, ...botLook(who.name, { face: who.face, color: who.color ?? undefined, wear: who.wear ?? undefined }), team: out.team }, to: String(out.notify), kind: "question", text, ...(picks.length ? { choices: picks } : {}) })
+          .catch((err: Error) => console.warn(`[bots] ${channel.kind} couldn't deliver a question: ${err.message}`));
+      }
+    }
+    // A team bot asks its whole group chat: the others get the question too, and whoever answers
+    // first in the thread answers it (the decision, and Ambient answering, stay its maker's).
+    for (const to of (out as { others?: string[] }).others ?? []) {
+      for (const channel of this.d.channels) {
+        void channel
+          .deliver({ speaker: { kind: "bot", botId: String(out.routineId), name: who.name, ...botLook(who.name, { face: who.face, color: who.color ?? undefined, wear: who.wear ?? undefined }), team: out.team }, to, kind: "question", text, ...(picks.length ? { choices: picks } : {}) })
           .catch((err: Error) => console.warn(`[bots] ${channel.kind} couldn't deliver a question: ${err.message}`));
       }
     }

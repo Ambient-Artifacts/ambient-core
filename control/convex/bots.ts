@@ -2,10 +2,10 @@
 // with Ambient. Text is sealed by the gateway (the owner's data key, or the person's own for the
 // chat); these functions only decide who may read and write what, and keep the bot's state.
 import { v } from "convex/values";
-import type { Doc } from "./_generated/dataModel.js";
-import { mutation, query, type QueryCtx } from "./_generated/server.js";
+import type { Doc, Id } from "./_generated/dataModel.js";
+import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
-import { manages, routineFor } from "./routines.js";
+import { routineFor } from "./routines.js";
 
 const access = { uid: v.id("users"), teamIds: v.array(v.id("teams")) };
 /** How much of the chat the app shows at once. Nothing is cut off: the history is kept in full. */
@@ -29,6 +29,19 @@ function messageShape(m: Doc<"botMessages">) {
 }
 
 
+/** Everyone in a team (a team bot's group chat). */
+export async function teamPeople(ctx: { db: QueryCtx["db"] }, teamId: Doc<"routines">["teamId"]): Promise<string[]> {
+  if (!teamId) return [];
+  return (await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(200)).map((m) => String(m.userId));
+}
+
+/** Someone read a team bot's thread now (their own; the others' stay as they are). */
+export async function markRead(ctx: MutationCtx, routineId: Id<"routines">, userId: Id<"users">, now: number) {
+  const r = await ctx.db.query("botReads").withIndex("by_routine_user", (q) => q.eq("routineId", routineId).eq("userId", userId)).unique();
+  if (!r) await ctx.db.insert("botReads", { routineId, userId, at: now });
+  else if (r.at < now) await ctx.db.patch(r._id, { at: now });
+}
+
 /** A bot's thread, newest last, with its open question. Readable by whoever sees the bot. */
 export const thread = query({
   args: { ...secretArg, ...access, id: v.string(), limit: v.number() },
@@ -47,7 +60,8 @@ export const thread = query({
 
 /**
  * Someone read a bot's thread: what its last run said isn't news any more, so the bot goes from
- * "done" to asleep until its next run (docs/bots.md, "Faces").
+ * "done" to asleep until its next run (docs/bots.md, "Faces"). A team bot's thread is a group
+ * chat: read for that person only.
  */
 export const seen = mutation({
   args: { ...secretArg, ...access, id: v.string(), now: v.number() },
@@ -55,7 +69,8 @@ export const seen = mutation({
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r?.bot) return { ok: false as const };
-    if ((r.seenAt ?? 0) < now) await ctx.db.patch(r._id, { seenAt: now });
+    if (r.teamId) await markRead(ctx, r._id, uid, now);
+    else if ((r.seenAt ?? 0) < now) await ctx.db.patch(r._id, { seenAt: now });
     return { ok: true as const };
   },
 });
@@ -93,15 +108,24 @@ export const post = mutation({
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r?.bot) return { ok: false as const, error: "no_such_bot" };
-    if (r.teamId ? !(await manages(ctx, uid, r.teamId)) : r.userId !== uid) return { ok: false as const, error: "admins_only" };
+    // A team bot's thread is a group chat: everyone in the team writes (and answers its questions).
+    // Its settings stay with the team's owners and admins.
+    if (!r.teamId && r.userId !== uid) return { ok: false as const, error: "admins_only" };
     if (!r.teamId && !r.hostId) return { ok: false as const, error: "no_computer" };
     if (r.teamId) {
       const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
       if (!server?.tokenHash) return { ok: false as const, error: "no_team_server" };
     }
     const user = await ctx.db.get(uid);
-    const question = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
-    const kind = question && !question.answeredAt ? ("answer" as const) : ("message" as const);
+    const open = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
+    const question = open && !open.answeredAt ? open : null;
+    const decision = question ? await ctx.db.query("decisions").withIndex("by_question", (q) => q.eq("questionId", question._id)).first() : null;
+    // Its questions, its decisions and Ambient answering are its maker's (the decision's person):
+    // in a team's group chat everyone sees the question, but another member's reply is a message
+    // the bot reads, and the question stays open for its maker.
+    const decider = String(decision?.userId ?? r.userId);
+    if (asAmbient && String(uid) !== decider) return { ok: false as const, error: "not_yours" };
+    const kind = question && String(uid) === decider ? ("answer" as const) : ("message" as const);
     const messageId = await ctx.db.insert("botMessages", {
       routineId: r._id,
       teamId: r.teamId,
@@ -115,22 +139,26 @@ export const post = mutation({
       createdAt: now,
     });
     if (question && kind === "answer") await ctx.db.patch(question._id, { answeredAt: now, answerId: messageId });
+    // Writing to it means its thread was read (by the writer, in a team's group chat).
+    if (r.teamId) await markRead(ctx, r._id, uid, now);
     await ctx.db.patch(r._id, {
-      openQuestionId: undefined,
-      // Writing to it means its thread was read.
-      seenAt: now,
+      ...(kind === "answer" ? { openQuestionId: undefined } : {}),
+      ...(r.teamId ? {} : { seenAt: now }),
       pendingMessageId: messageId,
       runRequestedAt: now,
       runRequestedBy: user?.name,
       updatedAt: now,
     });
     // The decision this question was, answered here (in the thread, or by Ambient).
-    if (question && kind === "answer") {
-      const d = await ctx.db.query("decisions").withIndex("by_question", (q) => q.eq("questionId", question._id)).first();
+    if (kind === "answer") {
+      const d = decision;
       if (d && d.status === "open") await ctx.db.patch(d._id, { status: "answered", answerIv: iv, answerCt: ct, answeredBy: asAmbient ? "Ambient" : user?.name, via: asAmbient ? "ambient" : "thread", answeredAt: now });
     }
     const m = (await ctx.db.get(messageId))!;
-    return { ok: true as const, message: messageShape(m) };
+    // A team's group chat: everyone else hears about it.
+    const team = r.teamId ? await ctx.db.get(r.teamId) : null;
+    const others = (await teamPeople(ctx, r.teamId)).filter((p) => p !== String(uid));
+    return { ok: true as const, message: messageShape(m), group: team ? { team: team.name, others, bot: { name: r.name, face: r.bot.face, color: r.bot.color ?? null, wear: r.bot.wear ?? null } } : null };
   },
 });
 
@@ -207,7 +235,9 @@ export const ask = mutation({
     const questionId = await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "bot", kind: "question", iv, ct, runId: run._id, createdAt: now });
     await ctx.db.patch(r._id, { openQuestionId: questionId });
     const team = r.teamId ? await ctx.db.get(r.teamId) : null;
-    return { ok: true as const, questionId, routineId: r._id, name: r.name, notify: r.userId, team: team?.name ?? null };
+    // A team bot asks its whole group chat; the decision (and Ambient answering) stays its maker's.
+    const others = (await teamPeople(ctx, r.teamId)).filter((p) => p !== String(r.userId));
+    return { ok: true as const, questionId, routineId: r._id, name: r.name, notify: r.userId, team: team?.name ?? null, others };
   },
 });
 
