@@ -126,6 +126,14 @@ to `canEdit` (its settings, run, delete: still the team's owners and admins).
 - **Read is each person's own** (Convex `botReads`): one person opening the thread doesn't take
   the "done" news away from the others. A personal bot keeps `routines.seenAt`.
 
+#### Searching the bots
+
+`GET /v1/app/bots/search?q=…` (the Bots list's search field) finds words across the person's chat
+with Ambient and the threads of every bot they see, newest first, up to 50: `{ hits: [{ at, who,
+where, text, botId, messageId }] }`, `botId` null for the chat with Ambient. It's the same search as
+`search_history` (bots/history.ts: the gateway opens the sealed messages page by page, no index),
+messages only (no handoffs). Every word must appear; accents and case don't matter.
+
 #### Unread
 
 The Bots list marks what's new, as Messages does. A bot is `unread` (in `bot`) when its newest

@@ -17,6 +17,10 @@ export interface HistoryHit {
   /** "chat", or which bot's thread or handoffs. */
   where: string;
   text: string;
+  /** The bot whose thread or handoff it is; null for the chat with Ambient (the app opens it). */
+  botId?: string | null;
+  /** The message it is, in the chat or the thread (a handoff has none). */
+  messageId?: string;
 }
 
 export interface HistoryQuery {
@@ -25,6 +29,8 @@ export interface HistoryQuery {
   to?: string;
   /** Only this bot's thread and handoffs. */
   bot?: string;
+  /** Messages only, no handoffs (the app's search: a handoff is the bot's note to itself). */
+  messagesOnly?: boolean;
   limit?: number;
 }
 
@@ -125,14 +131,14 @@ export class HistorySearch {
     return out;
   }
 
-  private async thread(owner: Owner, routineId: string, name: string, terms: string[], after: number, before: number, want: number): Promise<HistoryHit[]> {
+  private async thread(owner: Owner, routineId: string, name: string, terms: string[], after: number, before: number, want: number, messagesOnly = false): Promise<HistoryHit[]> {
     const where = `${name}'s thread`;
     const hits = await this.scan(
       async (b) => ((await this.d.control.q(api.bots.threadHistory, { id: routineId, after, before: b }).catch(() => null)) as { messages: Row[] } | null)?.messages ?? null,
       async (r) => {
         const body = await openMessage(this.d.keys, owner, r.iv, r.ct).catch(() => null);
         if (!body?.text) return null;
-        return { at: r.createdAt, who: r.role === "bot" ? name : (r.authorName ?? (r.role === "ambient" ? "Ambient" : "owner")), where, text: body.text };
+        return { at: r.createdAt, who: r.role === "bot" ? name : (r.authorName ?? (r.role === "ambient" ? "Ambient" : "owner")), where, text: body.text, botId: routineId, messageId: String(r.id) };
       },
       terms,
       after,
@@ -140,9 +146,10 @@ export class HistorySearch {
       THREAD_PAGES,
       want,
     );
+    if (messagesOnly) return hits;
     const handoffs = (await this.d.folder.handoffs(owner, routineId, 30).catch(() => []))
       .filter((h) => h.createdAt > after && h.createdAt < before && matches(h.text, terms))
-      .map((h) => ({ at: h.createdAt, who: name, where: `${name}'s handoff (${h.status})`, text: snippet(h.text, terms) }));
+      .map((h) => ({ at: h.createdAt, who: name, where: `${name}'s handoff (${h.status})`, text: snippet(h.text, terms), botId: routineId }));
     return [...hits, ...handoffs];
   }
 
@@ -160,7 +167,7 @@ export class HistorySearch {
           async (b) => (await this.d.control.q(api.bots.chatHistory, { uid: actor.uid as never, after, before: b })) as unknown as Row[],
           async (r) => {
             const body = await openMessage(this.d.keys, owner, r.iv, r.ct, CHAT_PURPOSE).catch(() => null);
-            return body?.text ? { at: r.createdAt, who: r.role === "user" ? name : "Ambient", where: "chat", text: body.text } : null;
+            return body?.text ? { at: r.createdAt, who: r.role === "user" ? name : "Ambient", where: "chat", text: body.text, botId: null, messageId: String(r.id) } : null;
           },
           terms,
           after,
@@ -176,7 +183,7 @@ export class HistorySearch {
         if (o.bot) throw err;
         return null;
       });
-      if (f) all.push(...(await this.thread(f.owner, f.routineId, f.name, terms, after, before, want)));
+      if (f) all.push(...(await this.thread(f.owner, f.routineId, f.name, terms, after, before, want, o.messagesOnly)));
     }
     return all.sort((a, b) => b.at - a.at).slice(0, want);
   }
