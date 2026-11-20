@@ -56,6 +56,8 @@ export async function startStack(
     githubBatchMs?: number;
     /** Ambient's GitHub App, against a stand-in GitHub API (`apiBase`). */
     githubApp?: import("../src/bots/github-app.ts").GitHubAppConfig;
+    /** Bots' Slack apps against a stand-in Slack Web API. */
+    slackApi?: string;
     /** How long after a signal Amb looks at a bot (learning.ts). */
     learningAfterMs?: number;
     /** The team brain for teams on their own computer (team-bundle.ts), instead of building it. */
@@ -177,6 +179,7 @@ export async function startStack(
     ambient: { ...opts.ambient, noHeartbeat: true },
     mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
     githubBatchMs: opts.githubBatchMs ?? 60_000,
+    ...(opts.slackApi ? { slack: { apiBase: opts.slackApi } } : {}),
     learning: { reviewAfterMs: opts.learningAfterMs ?? 60_000 },
     teamBundle: opts.teamBundle,
   });

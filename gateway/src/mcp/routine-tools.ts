@@ -10,6 +10,7 @@ import type { AdminService, CommandResult } from "../bots/admin.ts";
 import type { Decision, DecisionService } from "../bots/decisions.ts";
 import type { Folders } from "../bots/files.ts";
 import { FolderError, type Author } from "../bots/folder.ts";
+import { SlackError } from "../bots/slack-apps.ts";
 import { GitHubError } from "../bots/github.ts";
 import { historyLines } from "../bots/history.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "../bots/bot-templates.ts";
@@ -186,7 +187,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError) return error(err.message);
+      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError || err instanceof SlackError) return error(err.message);
       throw err;
     }
   };
@@ -525,6 +526,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
 
   if (hasBots && folders) registerFolderTools(server, principal, actor, folders, source, guard);
   if (hasBots && folders?.github) registerGitHubTools(server, principal, actor, routines, folders.github, guard, folders.githubApp);
+  if (hasBots && folders?.slack) registerSlackTools(server, principal, actor, routines, folders.slack, guard);
   if (hasBots && folders) registerLearningTools(server, principal, actor, routines, folders, source, guard);
 
   if (!hasBots || !bots) return;
@@ -1027,6 +1029,72 @@ function registerGitHubTools(
             : `"${f.name}" watches no repos now.`,
           { repos: set, branchPrefix: run?.prefix ?? null },
         );
+      }),
+  );
+}
+
+// ---- Slack: a bot's own Slack app (docs/bots.md, "Slack") ----
+
+function registerSlackTools(
+  server: McpServer,
+  principal: Principal,
+  actor: Actor,
+  routines: RoutineService,
+  slack: import("../bots/slack-apps.ts").SlackApps,
+  guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>,
+) {
+  const teamArg: Record<string, z.ZodTypeAny> = principal.teams.length ? { team: z.string().max(80).optional().describe("A team's slug, for the team's bots; leave out for the user's own.") } : {};
+  const HOW = "In Slack: api.slack.com/apps → \"Your App Configuration Tokens\" (below the list of apps) → Generate Token, pick the workspace, then copy the refresh token (it starts with xoxe-).";
+
+  server.registerTool(
+    "connect_slack",
+    {
+      title: "Connect Slack for bots",
+      description: `Connect the user's Slack workspace once, so bots can get their own Slack apps (slack_for_bot). Needs the refresh token of a Slack app configuration token, only one the user gave you to store: ${HOW} Ambient keeps it renewed. Without refresh_token: whether it's connected and how to get one. disconnect: true forgets it.`,
+      inputSchema: {
+        refresh_token: z.string().max(500).optional().describe("The configuration token's refresh token (xoxe-…)."),
+        ...teamArg,
+        disconnect: z.boolean().optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async (args: Record<string, unknown>) =>
+      guard(async () => {
+        const team = typeof args.team === "string" ? args.team : null;
+        const owner = routines.botOwner(actor, team);
+        if (args.disconnect === true) {
+          await slack.disconnect(owner);
+          return result("Slack is disconnected. Bots already in Slack stay there; new ones need it connected again.");
+        }
+        const token = typeof args.refresh_token === "string" ? args.refresh_token.trim() : "";
+        if (!token) {
+          const ws = await slack.workspace(owner);
+          return result(ws.connected ? `Slack is connected${ws.teamId ? ` (workspace ${ws.teamId})` : ""}. Put a bot in Slack with slack_for_bot.` : `Slack isn't connected yet. ${HOW} Then pass it here as refresh_token.`, ws);
+        }
+        const out = await slack.connect(owner, token);
+        return result(`Slack is connected${out.teamId ? ` (workspace ${out.teamId})` : ""}. Put a bot in Slack with slack_for_bot.`, { connected: true, ...out });
+      }),
+  );
+
+  server.registerTool(
+    "slack_for_bot",
+    {
+      title: "Put a bot in Slack",
+      description:
+        "Give a bot its own Slack app, so in Slack it's its own @handle: mentioned in a channel or messaged directly, it answers in the thread, and its runs get SLACK_BOT_TOKEN to post as itself. Ambient creates the app; give the user the returned link as a Markdown link, [Add <bot> to Slack](<url>): they tap Allow once (it works for an hour). Then they invite it to a channel (/invite @<bot>). It takes instructions only from whoever tapped Allow. Needs Slack connected first (connect_slack). remove: true deletes its Slack app. Only when the user asked.",
+      inputSchema: { bot: z.string().max(64).describe("The bot (its id)."), remove: z.boolean().optional() },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ bot, remove }) =>
+      guard(async () => {
+        const f = await routines.folderOf(actor, bot, true);
+        if (remove) {
+          const gone = await slack.remove(f.owner, f.routineId);
+          return result(gone ? `${f.name}'s Slack app is deleted.` : `${f.name} has no Slack app.`);
+        }
+        const out = await slack.add(f.owner, { id: f.routineId, name: f.name }, actor.uid);
+        if (out.installed) return result(`${f.name} is in Slack already. Mention @${f.name} in a channel it's invited to, or message it directly.`, out);
+        return result(`[Add ${f.name} to Slack](${out.url}): tap Allow. Then invite it to a channel with /invite @${f.name}.`, out);
       }),
   );
 }
