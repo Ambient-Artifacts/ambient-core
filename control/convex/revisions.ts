@@ -84,14 +84,17 @@ export const forUser = query({
     if (!user || user.deletingAt) return null;
     const lines: string[] = [];
     const seen = new Set<Id<"routines">>();
-    const addRoutines = (rs: Doc<"routines">[]) => {
+    const addRoutines = async (rs: Doc<"routines">[]) => {
       for (const r of rs) {
         if (seen.has(r._id)) continue;
         seen.add(r._id);
-        lines.push(routineLine(r));
+        // When this person last read its thread (a team bot's read is each person's): reading it on
+        // one device takes the unread dot away on the others.
+        const read = r.teamId ? (await ctx.db.query("botReads").withIndex("by_routine_user", (q) => q.eq("routineId", r._id).eq("userId", uid)).unique())?.at : r.seenAt;
+        lines.push(`${routineLine(r)}:${read ?? 0}`);
       }
     };
-    addRoutines(await ctx.db.query("routines").withIndex("by_user", (q) => q.eq("userId", uid)).collect());
+    await addRoutines(await ctx.db.query("routines").withIndex("by_user", (q) => q.eq("userId", uid)).collect());
     for (const h of await ctx.db.query("routineHosts").withIndex("by_user", (q) => q.eq("userId", uid)).collect()) lines.push(hostLine(h));
 
     const teams: { slug: string; wiki: number }[] = [];
@@ -100,9 +103,14 @@ export const forUser = query({
       if (!team || team.status === "canceled") continue;
       const rev = await ctx.db.query("revisions").withIndex("by_key", (q) => q.eq("key", `team:${team._id}`)).unique();
       teams.push({ slug: team.slug, wiki: rev?.rev ?? 0 });
-      addRoutines(await ctx.db.query("routines").withIndex("by_team", (q) => q.eq("teamId", team._id)).collect());
+      await addRoutines(await ctx.db.query("routines").withIndex("by_team", (q) => q.eq("teamId", team._id)).collect());
       for (const h of await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", team._id)).collect()) lines.push(hostLine(h));
     }
+    // Ambient's newest message and when the chat was last opened: the Bots list's Ambient row
+    // (its unread dot and its line) follows them like a bot's.
+    const amb = await ctx.db.query("ambientChat").withIndex("by_user", (q) => q.eq("userId", uid)).order("desc").first();
+    const ambState = await ctx.db.query("ambientState").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
+    lines.push(`ambient:${amb?.createdAt ?? 0}:${ambState?.chatSeenAt ?? 0}`);
     lines.sort();
     teams.sort((a, b) => a.slug.localeCompare(b.slug));
     return { personal: user.personalSeq, routines: fingerprint(lines.join("|")), teams };

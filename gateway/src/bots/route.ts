@@ -223,7 +223,8 @@ export function botAppRoutes(
     const asked = Number(typeof req.query.limit === "string" ? req.query.limit : NaN);
     const limit = Number.isInteger(asked) ? Math.min(Math.max(asked, 1), 100) : 50;
     try {
-      res.json(await d.bots.thread(await actor(res), id(req), limit, { markSeen: true }));
+      // Opening the thread reads it; `?seen=0` for a fetch ahead that nobody looks at yet.
+      res.json(await d.bots.thread(await actor(res), id(req), limit, { markSeen: req.query.seen !== "0" }));
     } catch (err) {
       fail(res, err);
     }
@@ -257,9 +258,17 @@ export function botAppRoutes(
     }
   });
 
-  r.get("/v1/app/ambient/chat", d.auth, async (_req, res) => {
+  // Opening the chat reads it; `?seen=0` for a fetch ahead that nobody looks at yet.
+  r.get("/v1/app/ambient/chat", d.auth, async (req, res) => {
     const a = await actor(res);
-    res.json(await d.ambient.list(a.uid));
+    const chat = await d.ambient.list(a.uid);
+    if (req.query.seen !== "0") await d.ambient.seen(a.uid);
+    res.json(chat);
+  });
+
+  // The Bots list's Ambient row: unread, and its newest line.
+  r.get("/v1/app/ambient/summary", d.auth, async (_req, res) => {
+    res.json(await d.ambient.summary((await actor(res)).uid));
   });
 
   // Files come along base64 (10 MB of files is about 14 MB of JSON).
