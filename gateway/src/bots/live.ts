@@ -21,6 +21,12 @@ export interface LiveEvent {
   done?: boolean;
 }
 
+/** A chat that has something new: the app fetches it. Amb's own is "ambient". Carries no text. */
+export interface ChatEvent {
+  chat: string;
+  at: number;
+}
+
 interface LiveRun {
   routineId: string;
   uids: string[];
@@ -37,6 +43,7 @@ export class LiveText {
   private runs = new Map<string, LiveRun>();
   private resolving = new Map<string, Promise<LiveRun | null>>();
   private listeners = new Map<string, Set<(e: LiveEvent) => void>>();
+  private chatListeners = new Map<string, Set<(e: ChatEvent) => void>>();
 
   constructor(private d: { control: Control; now?: () => number }) {}
 
@@ -56,6 +63,30 @@ export class LiveText {
       set.delete(listener);
       if (set.size === 0) this.listeners.delete(uid);
     };
+  }
+
+  /** A person's stream: told when one of their chats has something new (docs/bots.md, "Channels"). */
+  subscribeChats(uid: string, listener: (e: ChatEvent) => void): () => void {
+    let set = this.chatListeners.get(uid);
+    if (!set) {
+      set = new Set();
+      this.chatListeners.set(uid, set);
+    }
+    set.add(listener);
+    return () => {
+      set.delete(listener);
+      if (set.size === 0) this.chatListeners.delete(uid);
+    };
+  }
+
+  /**
+   * Something landed in a person's chat (written in the app, on iMessage, or by Amb itself): their
+   * open apps hear of it at once and fetch it, instead of asking every few seconds. Only that it
+   * changed: the message stays sealed, and is read through the chat's own route.
+   */
+  chatChanged(uid: string, chat: string): void {
+    const e: ChatEvent = { chat, at: this.now() };
+    for (const l of this.chatListeners.get(uid) ?? []) l(e);
   }
 
   private emit(run: LiveRun, e: LiveEvent): void {

@@ -208,6 +208,8 @@ export class AmbientChat {
       mcpFor?: (uid: string) => Promise<{ name: string; path: string; title: string }[]>;
       /** Files sent with messages, kept so the chat shows them again (attachments.ts). */
       attachments?: Attachments;
+      /** The person's chat changed (a message landed, or it was cleared): their open apps are told. */
+      onChanged?: (uid: string) => void;
       fetchImpl?: typeof fetch;
       now?: () => number;
     },
@@ -266,6 +268,8 @@ export class AmbientChat {
   private async add(uid: string, role: "user" | "ambient", text: string, decisionId?: string, files: FileRef[] = [], via = "app"): Promise<ChatMessage> {
     const sealed = await sealMessage(this.d.keys, { kind: "user", uid }, { text, files, via }, CHAT_PURPOSE);
     const out = await this.d.control.m(api.bots.addChat, { uid: uid as never, role, iv: sealed.iv, ct: sealed.ct, ...(decisionId ? { decisionId } : {}), now: this.now() });
+    // Every message goes through here, whichever door it came by: open apps fetch it at once.
+    this.d.onChanged?.(uid);
     return { id: String(out.id), role, text, files, createdAt: out.createdAt, decision: null, via };
   }
 
@@ -498,6 +502,7 @@ export class AmbientChat {
     this.unseen.delete(uid);
     const had = (await this.list(uid, 10).catch(() => ({ messages: [] as ChatMessage[] }))).messages.some((m) => m.role === "user");
     await this.d.control.m(api.bots.clearChat, { uid: uid as never, now: this.now() });
+    this.d.onChanged?.(uid);
     if (had && this.d.folder) void this.keepMemory(uid, name ?? (await this.nameOf(uid)), "new_chat").catch(() => undefined);
   }
 
@@ -509,6 +514,7 @@ export class AmbientChat {
       const out = await this.d.control.m(api.bots.forgetChat, { uid: uid as never, now: this.now() });
       if (!out.removed) break;
     }
+    this.d.onChanged?.(uid);
   }
 
   /**

@@ -1483,3 +1483,7 @@ From an AI app (and for Amb): `needs_you` lists the same, and `set_aside_decisio
 ## Nightly idea
 
 An automation with delivery `bot` starts one of the person's bots at a time, with its instructions as a message from Ambient (no turn of Amb's). The `nightly_idea` template uses it: once a night the bot may build a small first version of an idea of its own and hand it over with `ask_owner` ("My idea: …", Keep going / Drop it), so it lands in Needs you.
+
+## Chats are live
+
+Every message in Amb's chat goes through one function (`AmbientChat.add`), whichever door it came by (the app, iMessage, Amb writing first). It tells the person's open apps on their event stream (`GET /v1/app/events`, `event: chat`, `{"chat":"ambient","at":…}`), and the app fetches the chat. The event says only that it changed: the message stays sealed and is read through the chat's own route. Clearing or deleting the chat announces itself the same way. The app still asks now and then on its own, for when the stream is down.

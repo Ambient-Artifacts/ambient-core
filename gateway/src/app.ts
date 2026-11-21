@@ -292,6 +292,7 @@ export function createApp(deps: AppDeps) {
   // The MCP servers a person gave Amb (set once the connections are up, below).
   let ambientMcp: (uid: string) => Promise<{ name: string; path: string; title: string }[]> = async () => [];
   const ambient: AmbientChat = new AmbientChat({
+    onChanged: (uid) => live.chatChanged(uid, "ambient"),
     attachments,
     mcpFor: (uid) => ambientMcp(uid),
     control,
