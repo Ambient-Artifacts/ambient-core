@@ -20,8 +20,10 @@ import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
 import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
 import { page as githubPage, type GitHubApps } from "./github-apps.ts";
 import { SlackError, type SlackApps } from "./slack-apps.ts";
+import { IMessageError, type IMessageChannel } from "../channels/imessage.ts";
+import type { AmbReach } from "../channels/reach.ts";
 import { LEARN, lessonsOf, type BotLearning } from "./learning.ts";
-import { NOTIFY, type AmbSettings } from "./amb-settings.ts";
+import { AmbSettingsError, NOTIFY, REACH, type AmbSettings } from "./amb-settings.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "./bot-templates.ts";
 import { passHeaders } from "../relay.ts";
 
@@ -68,6 +70,8 @@ export function botAppRoutes(
     slack?: () => SlackApps | undefined;
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
+    imessage?: () => IMessageChannel | undefined;
+    reach?: () => AmbReach | undefined;
     wakes?: () => Wakes | undefined;
     /** Search across Ambient's chat and the bots' threads (the Bots list's search field). */
     history?: () => HistorySearch | undefined;
@@ -266,7 +270,11 @@ export function botAppRoutes(
   r.get("/v1/app/ambient/chat", d.auth, async (req, res) => {
     const a = await actor(res);
     const chat = await d.ambient.list(a.uid);
-    if (req.query.seen !== "0") await d.ambient.seen(a.uid);
+    if (req.query.seen !== "0") {
+      await d.ambient.seen(a.uid);
+      // The chat is on their screen: what Amb says now is seen here, so no channel is rung.
+      d.reach?.()?.appActive(a.uid);
+    }
     res.json(chat);
   });
 
@@ -563,12 +571,61 @@ export function botAppRoutes(
     const a = await actor(res);
     const st = d.ambSettings?.();
     if (!st) return notEnabled(res);
-    const body = z.object({ notify: z.enum(NOTIFY).optional() }).safeParse(req.body);
+    const body = z.object({ notify: z.enum(NOTIFY).optional(), reach: z.enum(REACH).optional() }).safeParse(req.body);
     if (!body.success) {
-      res.status(400).json({ error: "bad_request", message: `Send notify: ${NOTIFY.join(" or ")}.` });
+      res.status(400).json({ error: "bad_request", message: `Send notify: ${NOTIFY.join(" or ")}, or reach: ${REACH.join(" or ")}.` });
       return;
     }
-    res.json(await st.set(a.uid, body.data));
+    try {
+      res.json(await st.set(a.uid, body.data));
+    } catch (err) {
+      if (err instanceof AmbSettingsError) res.status(err.status).json({ error: err.code, message: err.message });
+      else fail(res, err);
+    }
+  });
+
+  // ---- Amb on iMessage (docs/bots.md, "iMessage") ----
+
+  const imessageFail = (res: Response, err: unknown) => {
+    if (err instanceof IMessageError) res.status(err.status).json({ error: err.code, message: err.message });
+    else fail(res, err);
+  };
+  const noIMessage = (res: Response) => res.status(404).json({ error: "not_set_up", message: "iMessage isn't set up on this Ambient server." });
+
+  r.get("/v1/app/imessage", d.auth, async (_req, res) => {
+    const im = d.imessage?.();
+    if (!im) return noIMessage(res);
+    try {
+      res.json(await im.status((await actor(res)).uid));
+    } catch (err) {
+      imessageFail(res, err);
+    }
+  });
+
+  // A code to text to Amb's number: the number that texts it is theirs from then on.
+  r.post("/v1/app/imessage", d.auth, async (_req, res) => {
+    const im = d.imessage?.();
+    if (!im) return noIMessage(res);
+    try {
+      res.json(await im.start((await actor(res)).uid));
+    } catch (err) {
+      imessageFail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/imessage", d.auth, async (_req, res) => {
+    const im = d.imessage?.();
+    if (!im) return noIMessage(res);
+    try {
+      const a = await actor(res);
+      await im.disconnect(a.uid);
+      // Nothing to write to there anymore: Amb writes first in the app again.
+      const st = d.ambSettings?.();
+      if (st && (await st.reach(a.uid)) === im.kind) await st.set(a.uid, { reach: "app" });
+      res.json(await im.status(a.uid));
+    } catch (err) {
+      imessageFail(res, err);
+    }
   });
 
   // ---- bot templates (docs/bots.md, "Bot templates") ----
@@ -1227,6 +1284,25 @@ export function githubHookRouter(github: () => GitHubEvents | undefined, app: ()
     const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const out = await gh.receive(hook, { event: header("x-github-event"), signature: header("x-hub-signature-256"), delivery: header("x-github-delivery") }, body);
     res.status(out.status).json({ result: out.result });
+  });
+  return r;
+}
+
+/** What Linq sends for Amb's iMessage line (channels/imessage.ts): signed, answered at once. */
+export function linqHookRouter(imessage: () => IMessageChannel | undefined): Router {
+  const r = express.Router();
+  const perAddress = limiter(600);
+  r.post("/v1/hooks/linq", express.raw({ type: "*/*", limit: "1mb" }), async (req, res) => {
+    const im = imessage();
+    if (!im) return res.status(404).json({ error: "not_found" });
+    if (!perAddress(req.ip ?? "")) return res.status(429).json({ error: "slow_down" });
+    const header = (n: string) => (typeof req.headers[n] === "string" ? (req.headers[n] as string) : undefined);
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const out = await im.receive({ id: header("webhook-id"), timestamp: header("webhook-timestamp"), signature: header("webhook-signature") }, body).catch((err: Error) => {
+      console.warn(`[imessage] an event wasn't handled: ${err.message}`);
+      return { status: 200, body: { ok: false } };
+    });
+    res.status(out.status).json(out.body);
   });
   return r;
 }

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { exportJWK, generateKeyPair, type JWK } from "jose";
 import type { GitHubAppConfig } from "./bots/github-app.ts";
+import { loadLinq, type LinqConfig } from "./channels/imessage.ts";
 import type { AppleRevokeConfig } from "./auth/apple-revoke.ts";
 import { parseMasterKey, type MasterKey } from "./crypto.ts";
 import { loadMicrosoftConnect, type MicrosoftConnectConfig } from "./microsoft-connect.ts";
@@ -79,6 +80,8 @@ export interface GatewayConfig {
    * _WEBHOOK_SECRET. Absent: Connect GitHub answers `app: null`, owners' own webhooks still work.
    */
   githubApp?: GitHubAppConfig;
+  /** Amb's iMessage line at Linq (channels/imessage.ts), from BRAIN_LINQ_*. None: no iMessage. */
+  linq?: LinqConfig;
 }
 
 export async function generateSigningKey(): Promise<JWK> {
@@ -144,6 +147,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     msteamsBots: parseMsTeamsBots(env.BRAIN_MSTEAMS_BOTS),
     ambientModel: env.BRAIN_AMBIENT_MODEL || undefined,
     githubApp: loadGitHubApp(env),
+    linq: loadLinq(env),
     apns:
       env.BRAIN_APNS_KEY_ID && env.BRAIN_APNS_PRIVATE_KEY
         ? {

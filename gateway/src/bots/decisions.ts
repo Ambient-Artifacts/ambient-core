@@ -3,13 +3,14 @@
 //   a bot asks ──▶ onBotQuestion: by the bot's `delegate`, Ambient answers in the thread itself
 //                  (when the person's brain makes it clear), or it becomes a decision for the
 //                  person: a message in Ambient's chat with a card, and a push
-//   the person answers (app, chat in words, the bot's thread; later iMessage, Slack, Teams)
+//   the person answers (app, chat in words, the bot's thread, a text on iMessage; later Slack, Teams)
 //                  ──▶ answer(): the bot gets it, and it's settled everywhere
 //
 // Conversation first: a decision is a message in the conversation with Ambient, which every
 // channel shows in its own way (buttons in the app, Slack and Teams; "1/2/3" in iMessage).
 import { api, type Control } from "../control.ts";
-import type { Channel } from "../channels/channel.ts";
+import { ambientQuestionPush, botQuestionPush, type Channel } from "../channels/channel.ts";
+import type { AmbReach } from "../channels/reach.ts";
 import type { RoutineKeys } from "../routines/keys.ts";
 import { RoutineError, type Actor, type RoutineService } from "../routines/service.ts";
 import type { AmbientChat } from "./ambient.ts";
@@ -33,6 +34,11 @@ export interface ProposedChange {
   /** …or these settings (schedule, isolation, secrets, model, runtime, report, delegate). */
   settings?: Record<string, unknown>;
   why: string;
+}
+
+/** A question's answers as a text shows them (a channel without buttons): numbered, to answer by number or in words. */
+export function numbered(choices: string[]): string {
+  return choices.length ? `\n\n${choices.map((c, i) => `${i + 1}. ${c}`).join("\n")}\n\nAnswer with the number or in your own words.` : "";
 }
 
 /** "Apply", "yes", "ja", "ok", "do it": the person says yes to a proposed change. */
@@ -125,6 +131,8 @@ export class DecisionService {
       ambient: AmbientChat;
       /** Where a decision reaches the person besides the chat (the app: a push). */
       channels: Channel[];
+      /** Where what Amb says first goes: the person's channel, or the app's push (channels/reach.ts). */
+      reach?: AmbReach;
       /** The person as an actor with everything their roles allow (for answers Ambient files). */
       actorFor: (uid: string) => Promise<Actor>;
       now?: () => number;
@@ -232,6 +240,11 @@ export class DecisionService {
     const attached = q.files?.length ? `\n\n📎 ${q.files.join(", ")}: in ${q.bot.name}'s thread.` : "";
     const text = `${q.bot.name} asks: ${q.question}${work}${attached}${suggestion ? `\n\nI'd go with “${suggestion.option}”${suggestion.why ? `: ${suggestion.why}` : "."}` : ""}`;
     await this.d.ambient.say(q.uid, text, String(row.id));
+    if (this.d.reach) {
+      // One place hears of it: their channel (the question with its answers to pick from), or a push.
+      void this.d.reach.tell(q.uid, `${text}${numbered(q.choices)}`, botQuestionPush({ botId: q.routineId, name: q.bot.name, team: q.team, question: q.question })).catch(() => undefined);
+      return;
+    }
     for (const channel of this.d.channels) {
       void channel
         .deliver({ speaker: { kind: "bot", botId: q.routineId, name: q.bot.name, face: q.bot.face, color: q.bot.color, wear: q.bot.wear, team: q.team }, to: q.uid, kind: "question", text: q.question, ...(q.choices.length ? { choices: q.choices } : {}) })
@@ -254,7 +267,9 @@ export class DecisionService {
     const row = (await this.d.control.m(api.bots.createDecision, { uid: uid as never, iv: sealed.iv, ct: sealed.ciphertext, urgent: false, now: this.now() })) as unknown as DecisionRow;
     const preview = change.path && change.content !== undefined ? `\n\nThe new ${change.path} would be:\n\n${change.content.length > 1500 ? `${change.content.slice(0, 1500)}…` : change.content}` : change.settings ? `\n\n${JSON.stringify(change.settings)}` : "";
     await this.d.ambient.say(uid, `${question}${preview}`, String(row.id));
-    if (opts.push !== false) {
+    if (opts.push !== false && this.d.reach) {
+      void this.d.reach.tell(uid, `${question}${preview}${numbered(["Apply", "Not now"])}`, ambientQuestionPush(question)).catch(() => undefined);
+    } else if (opts.push !== false) {
       for (const channel of this.d.channels) {
         void channel.deliver({ speaker: { kind: "ambient" }, to: uid, kind: "question", text: question, choices: ["Apply", "Not now"] }).catch(() => undefined);
       }

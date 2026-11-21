@@ -186,8 +186,8 @@ describe("the scheduler", () => {
 
 describe("Amb's settings", () => {
   it("say whether Amb tells them about their bots (the heartbeat)", async () => {
-    expect((await call("GET", "/v1/app/ambient/settings")).json).toEqual({ notify: "important" });
-    expect((await call("PUT", "/v1/app/ambient/settings", { notify: "never" })).json).toEqual({ notify: "never" });
+    expect((await call("GET", "/v1/app/ambient/settings")).json).toEqual({ notify: "important", reach: "app" });
+    expect((await call("PUT", "/v1/app/ambient/settings", { notify: "never" })).json).toEqual({ notify: "never", reach: "app" });
     expect(await s.heartbeat.beat(lena.user.uid, { force: true })).toBe("skipped");
     await call("PUT", "/v1/app/ambient/settings", { notify: "important" });
     expect(await s.heartbeat.beat(lena.user.uid, { force: true })).not.toBe("skipped");

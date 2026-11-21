@@ -11,6 +11,8 @@ import type { Decision, DecisionService } from "../bots/decisions.ts";
 import type { Folders } from "../bots/files.ts";
 import { FolderError, type Author } from "../bots/folder.ts";
 import { SlackError } from "../bots/slack-apps.ts";
+import { AmbSettingsError } from "../bots/amb-settings.ts";
+import { IMessageError } from "../channels/imessage.ts";
 import { GitHubError } from "../bots/github.ts";
 import { historyLines } from "../bots/history.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "../bots/bot-templates.ts";
@@ -187,7 +189,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError || err instanceof SlackError) return error(err.message);
+      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError || err instanceof SlackError || err instanceof IMessageError || err instanceof AmbSettingsError) return error(err.message);
       throw err;
     }
   };
@@ -1191,20 +1193,48 @@ function registerLearningTools(
     );
   }
 
+  if (principal.personal && folders.imessage) {
+    const imessage = folders.imessage;
+    server.registerTool(
+      "connect_imessage",
+      {
+        title: "Ambient on iMessage",
+        description:
+          "Lets the user text Ambient on iMessage: the same conversation as in the app, answered where they write. Without arguments: whether it's connected, and if not, a code and the number to text it to (good for an hour); tell them to text exactly that code to that number from their phone, and give them the link when there is one as a Markdown link, [Text the code](<link>). The number that texts the code is theirs from then on. disconnect: true forgets their number. Where Ambient writes first is a separate choice (ambient_settings, reach). Only when the user asked.",
+        inputSchema: { disconnect: z.boolean().optional() },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ disconnect }) =>
+        guard(async () => {
+          if (disconnect) {
+            await imessage.disconnect(actor.uid);
+            if (folders.ambSettings && (await folders.ambSettings.reach(actor.uid)) === imessage.kind) await folders.ambSettings.set(actor.uid, { reach: "app" });
+            return result("iMessage is disconnected: their number is forgotten, and Ambient writes to them in the app.", { connected: false });
+          }
+          const st = await imessage.start(actor.uid);
+          if (st.connected) return result(`iMessage is connected (${st.handle}). They text Ambient${st.number ? ` at ${st.number}` : ""}; it answers there.`, { ...st });
+          if (!st.number) return result("iMessage can't be connected right now: the line's number isn't known. Try again in a minute.", { ...st });
+          return result(`Not connected yet. They text ${st.code} to ${st.number} from their phone (within the hour); Ambient answers there once it arrives.`, { ...st });
+        }),
+    );
+  }
+
   if (principal.personal && folders.ambSettings) {
     const settings = folders.ambSettings;
     server.registerTool(
       "ambient_settings",
       {
         title: "Ambient's settings",
-        description: 'Whether Ambient tells the user when one of their bots needs them (notify: "important": a failed run, a decision waiting long, an approval; "never"). Change it only when they ask.',
-        inputSchema: { notify: z.enum(["important", "never"]).optional() },
+        description:
+          'Two things about how Ambient reaches the user. notify: whether it tells them when one of their bots needs them ("important": a failed run, a decision waiting long, an approval; "never"). reach: where it writes first when it does ("app": a push; "imessage": a text, once they connected iMessage with connect_imessage). An answer always goes back where they asked, whatever reach is. Change either only when they ask.',
+        inputSchema: { notify: z.enum(["important", "never"]).optional(), reach: z.enum(["app", "imessage"]).optional() },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async ({ notify }) =>
+      async ({ notify, reach }) =>
         guard(async () => {
-          const v = notify ? await settings.set(actor.uid, { notify }) : await settings.get(actor.uid);
-          return result(v.notify === "never" ? "Ambient doesn't tell them about their bots on its own." : "Ambient tells them when a bot needs them (failed runs, decisions waiting, approvals).", { settings: v });
+          const v = notify || reach ? await settings.set(actor.uid, { ...(notify ? { notify } : {}), ...(reach ? { reach } : {}) }) : await settings.get(actor.uid);
+          const where = v.reach === "imessage" ? "It writes to them first on iMessage." : "It writes to them first in the app (a push).";
+          return result(`${v.notify === "never" ? "Ambient doesn't tell them about their bots on its own." : "Ambient tells them when a bot needs them (failed runs, decisions waiting, approvals)."} ${where}`, { settings: v });
         }),
     );
   }

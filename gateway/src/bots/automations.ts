@@ -244,6 +244,8 @@ export class Automations {
       files: BotFiles;
       decisions: DecisionService;
       notifier?: Notifier;
+      /** Where what Amb says first goes (the person's channel, or the app's push). */
+      reach?: import("../channels/reach.ts").AmbReach;
       /** Everyone with bots or a chat with Ambient (Convex `bots.people`). */
       people?: () => Promise<string[]>;
       actorFor: (uid: string) => Promise<Actor>;
@@ -480,7 +482,9 @@ export class Automations {
     const zone = a.trigger.kind === "time" ? a.trigger.schedule.timezone : vienna;
     const { hour } = localHourDay(this.now(), zone);
     if (hour >= QUIET_FROM || hour < QUIET_TO) return;
-    void this.d.notifier?.notify(uid, { title: a.name, body: text.length > 180 ? `${text.slice(0, 179)}…` : text, url: "ambient://ambient", thread: "ambient", collapseId: `automation-${a.id}` }).catch(() => undefined);
+    const push = { title: a.name, body: text.length > 180 ? `${text.slice(0, 179)}…` : text, url: "ambient://ambient", thread: "ambient", collapseId: `automation-${a.id}` };
+    if (this.d.reach) void this.d.reach.tell(uid, text, push).catch(() => undefined);
+    else void this.d.notifier?.notify(uid, push).catch(() => undefined);
   }
 
   // ---- the ticker: time automations and waiting decisions ----

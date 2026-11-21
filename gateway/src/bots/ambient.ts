@@ -1,4 +1,4 @@
-// Ambient, the master bot: a chat in the app (more channels later) that answers from the person's
+// Ambient, the master bot: a chat in the app (and on iMessage: channels/reach.ts) that answers from the person's
 // brain and looks after their bots, with Claude and the same tools they get in Claude with the
 // Ambient connector (ai/loop.ts). It changes a bot only when asked in the chat, through the same
 // tools any AI app uses, so the same rules hold: it drafts and pauses, the person turns things on.
@@ -35,7 +35,14 @@ export interface ChatMessage {
   createdAt: number;
   /** A decision this message brings (docs/bots.md, "Decisions"). */
   decision: Decision | null;
+  /** Where it was written, or where Amb's answer went: "app", or a channel ("imessage"). */
+  via: string;
 }
+
+/** How Amb is told a message came through a channel, and how to answer there (docs/bots.md, "Channels"). */
+const VIA_NOTES: Record<string, (name: string) => string> = {
+  imessage: (name) => `[${name} wrote this on iMessage, and your answer goes there as a text message: plain text, no Markdown, a few short lines. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision.]`,
+};
 
 /** What Ambient may use: reading the brain, and the person's loops and bots. Secrets stay in the app. */
 export const AMBIENT_TOOLS = new Set([
@@ -84,6 +91,7 @@ export const AMBIENT_TOOLS = new Set([
   "create_bot_from_template",
   "bot_learning",
   "ambient_settings",
+  "connect_imessage",
 ]);
 
 const HISTORY = 20;
@@ -165,6 +173,7 @@ export function ambientInstructions(name: string, self: AmbSelf | string = ""): 
     "You are their chief of staff: their bots report to you, you report to them. A bot's question you couldn't answer comes to them as a decision in this chat (open_decisions lists what's waiting). When they answer one in words here (\"take the second\", \"yes, publish it\"), file it with answer_decision. Bring up what's waiting when it fits, briefly, the oldest first; never invent a decision.",
     "New bots start from a template when one fits (bot_templates: Reviewer, Builder, Wiki keeper): ask the template's two or three questions, then create_bot_from_template; it's created paused, and you tell them what's left (a GitHub token in the app, the webhook). Automations are only what you do for them (list_automations: a morning brief, what waits on them, after a meeting, a weekly review, what's new in the brain); you create one only when they ask.",
     "Every bot learns on its own from what happens to its work (a failed run, a correction, its pull requests merged, edited, closed or reverted, its review comments acted on or not): you improve its memory and skills, and propose changes to its instructions, goal or settings (bot_learning shows its lessons and scorecard; learn: ask makes you propose everything for that bot). Telling them when a bot needs them is part of your job; ambient_settings switches it off only when they ask.",
+    "They can also text you on iMessage (connect_imessage gives them a code to text to your number; it's the same conversation as here). Where you write first, when something needs them, is theirs to choose: ambient_settings reach \"imessage\" or \"app\". Change it only when they ask.",
     "Answer from the tools, never guess: search or brief the brain first, name the pages you rely on. When there's nothing on it, say so in one sentence.",
     "Keep it short: a few sentences or a few bullets, plain words, no headings. Markdown (bold, lists, links) shows.",
     ...memoryLines(name, own),
@@ -225,6 +234,7 @@ export class AmbientChat {
           files: body.files ?? [],
           createdAt: m.createdAt,
           decision: m.decision && this.decisionView ? await this.decisionView(uid, m.decision as unknown as DecisionRow).catch(() => null) : null,
+          via: (body as { via?: string }).via ?? "app",
         };
       }),
     );
@@ -247,10 +257,10 @@ export class AmbientChat {
     await this.d.control.m(api.bots.chatSeen, { uid: uid as never, now: this.now() });
   }
 
-  private async add(uid: string, role: "user" | "ambient", text: string, decisionId?: string, files: FileRef[] = []): Promise<ChatMessage> {
-    const sealed = await sealMessage(this.d.keys, { kind: "user", uid }, { text, files }, CHAT_PURPOSE);
+  private async add(uid: string, role: "user" | "ambient", text: string, decisionId?: string, files: FileRef[] = [], via = "app"): Promise<ChatMessage> {
+    const sealed = await sealMessage(this.d.keys, { kind: "user", uid }, { text, files, via }, CHAT_PURPOSE);
     const out = await this.d.control.m(api.bots.addChat, { uid: uid as never, role, iv: sealed.iv, ct: sealed.ct, ...(decisionId ? { decisionId } : {}), now: this.now() });
-    return { id: String(out.id), role, text, files, createdAt: out.createdAt, decision: null };
+    return { id: String(out.id), role, text, files, createdAt: out.createdAt, decision: null, via };
   }
 
   /** A file sent in the person's chat (only theirs, only this chat's). */
@@ -324,10 +334,44 @@ export class AmbientChat {
   }
 
   /**
-   * Someone writes to Ambient. Stored at once; Claude's reply follows in the history. `done`
-   * (tests) resolves when the reply is stored.
+   * Amb's answer to a message is stored: where it goes besides the app's chat (channels/reach.ts
+   * sends it back through the channel the message came in by).
    */
-  async send(uid: string, name: string, text: string, attachments: ChatAttachment[] = []): Promise<{ message: ChatMessage; pending: boolean; done: Promise<void> }> {
+  onReply?: (uid: string, via: string, text: string) => Promise<void> | void;
+
+  /** Each person's answer in the making, and their messages from channels waiting behind it. */
+  private answering = new Map<string, Promise<void>>();
+  private queued = new Map<string, Promise<unknown>>();
+
+  /**
+   * A message that came in through a channel (iMessage). A channel can't be told "still answering",
+   * so its messages are taken one after the other: each waits for the answer in the making, then
+   * gets its own. Resolves once that answer is stored and sent back. One conversation, whichever
+   * way it's written.
+   */
+  async sendQueued(uid: string, name: string, text: string, via: string): Promise<ChatMessage> {
+    const turn = (this.queued.get(uid) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        for (let i = 0; i < 20 && this.isPending(uid); i++) await (this.answering.get(uid) ?? new Promise((r) => setTimeout(r, 250))).catch(() => undefined);
+        const out = await this.send(uid, name, text, [], via);
+        await out.done.catch(() => undefined);
+        return out.message;
+      });
+    this.queued.set(uid, turn);
+    try {
+      return await turn;
+    } finally {
+      if (this.queued.get(uid) === turn) this.queued.delete(uid);
+    }
+  }
+
+  /**
+   * Someone writes to Ambient. Stored at once; Claude's reply follows in the history. `done`
+   * (tests) resolves when the reply is stored. `via`: the channel it was written in ("app" unless
+   * a channel passes its own); the answer goes back the same way.
+   */
+  async send(uid: string, name: string, text: string, attachments: ChatAttachment[] = [], via = "app"): Promise<{ message: ChatMessage; pending: boolean; done: Promise<void> }> {
     const body = text.trim().slice(0, TEXT_MAX);
     const files = checkAttachments(attachments);
     if (!body && !files.length) throw new RoutineError("bad_request", "Write something first.", 400);
@@ -336,9 +380,13 @@ export class AmbientChat {
     // The files are kept (attachments.ts), so the chat shows them again; without the store, only their names.
     const kept = this.d.attachments && files.length ? await this.d.attachments.save({ kind: "user", uid }, {}, files) : [];
     const stored = kept.length ? body : [body, files.map((f) => `📎 ${f.name}`).join("\n")].filter(Boolean).join("\n\n");
-    const message = await this.add(uid, "user", stored, undefined, kept);
+    const message = await this.add(uid, "user", stored, undefined, kept, via);
     this.pending.set(uid, this.now());
-    const done = this.reply(uid, name, history, body, files).finally(() => this.pending.delete(uid));
+    const done = this.reply(uid, name, history, body, files, via).finally(() => {
+      this.pending.delete(uid);
+      this.answering.delete(uid);
+    });
+    this.answering.set(uid, done);
     return { message, pending: true, done };
   }
 
@@ -362,7 +410,10 @@ export class AmbientChat {
     return list.length ? { skills: list } : {};
   }
 
-  private async reply(uid: string, name: string, history: Turn[], question: string, files: ChatAttachment[] = []): Promise<void> {
+  private async reply(uid: string, name: string, history: Turn[], asked: string, files: ChatAttachment[] = [], via = "app"): Promise<void> {
+    // Written in a channel: Amb is told, so its answer fits there (short, plain text).
+    const viaNote = VIA_NOTES[via]?.(name);
+    const question = viaNote ? `${viaNote}\n\n${asked}` : asked;
     let text: string;
     let made: ChatAttachment[] = [];
     const computer = await this.computer(uid);
@@ -418,7 +469,9 @@ export class AmbientChat {
     }
     // What Ambient made for the person (a picture, a PDF): shown with its reply, kept like their own files.
     const kept = made.length && this.d.attachments ? await this.d.attachments.save({ kind: "user", uid }, {}, made).catch((err: Error) => (console.warn(`[ambient] couldn't keep the files: ${err.message}`), [])) : [];
-    await this.add(uid, "ambient", text, undefined, kept).catch((err: Error) => console.warn(`[ambient] couldn't store the reply: ${err.message}`));
+    await this.add(uid, "ambient", text, undefined, kept, via).catch((err: Error) => console.warn(`[ambient] couldn't store the reply: ${err.message}`));
+    // Asked in a channel, answered there (the app's chat has it either way).
+    if (via !== "app") await Promise.resolve(this.onReply?.(uid, via, text || (kept.length ? "I made you a file: it's in the Ambient app." : ""))).catch(() => undefined);
   }
 
   /**
