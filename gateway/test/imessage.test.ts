@@ -138,7 +138,9 @@ describe("connecting", () => {
   it("the code texted to the line links that number, once", async () => {
     expect(await inbound("+43 660 1234567", `my code is ${code.toLowerCase()}`)).toBe(200);
     expect(texts()).toEqual(["You're connected, Lena. Write to me here like in the app: it's one conversation."]);
-    expect(calls.at(-1)).toMatchObject({ path: `/v3/chats/${CHAT}/messages`, auth: "Bearer linq-test-key" });
+    expect(calls.at(-2)).toMatchObject({ path: `/v3/chats/${CHAT}/messages`, auth: "Bearer linq-test-key" });
+    // Its contact card follows, so the thread shows a name instead of a number.
+    expect(calls.at(-1)).toMatchObject({ method: "POST", path: `/v3/chats/${CHAT}/share_contact_card` });
     expect((await call("GET", "/v1/app/imessage")).json).toMatchObject({ connected: true, handle: "+43 ••• 4567", code: null });
     // The code is used up: a second number can't take the account with it.
     await inbound("+15550000002", code);

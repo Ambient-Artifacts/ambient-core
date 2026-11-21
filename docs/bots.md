@@ -1224,6 +1224,8 @@ Amb writes first, reach "imessage" ──▶ a text
   An answer over 3,000 characters is cut, with a line that the rest is in the app; what Amb made
   as a file stays in the app.
 - While Amb works on a text the chat is marked read and shows "typing" (best effort).
+- After linking, Amb shares the line's contact card (its name and picture, set up once in Linq's
+  dashboard), so the thread shows "Ambient" instead of a number. Without a card nothing is sent.
 - **Kept in the sealed records**: the person's link (their number, the Linq chat) under their own
   key. Finding the account for a number or a code needs a lookup that isn't under one owner: those
   rows hold only ids, keyed by an HMAC of the number, never the number itself.

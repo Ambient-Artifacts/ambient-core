@@ -421,6 +421,8 @@ export class IMessageChannel implements AmbChannel {
     await this.put(uid, CODE, {}, true);
     this.tries.delete(handle);
     const name = await this.d.inbox.nameOf(uid).catch(() => "");
-    await this.text(chatId, `You're connected${name && name !== "them" ? `, ${name.split(" ")[0]}` : ""}. Write to me here like in the app: it's one conversation.`);
+    await this.text(chatId, `You're connected${name && name !== "them" ? `, ${name.split(" ")[0]}` : ""}. Write to me here like in the app: it's one conversation.`);    // Its contact card, so the thread shows Ambient's name and picture instead of a number. Only
+    // when the line has one set up at Linq (404 otherwise): nothing depends on it.
+    await this.call("POST", `/v3/chats/${encodeURIComponent(chatId)}/share_contact_card`).catch(() => undefined);
   }
 }
