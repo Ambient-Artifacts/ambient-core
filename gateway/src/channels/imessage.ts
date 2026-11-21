@@ -729,7 +729,7 @@ export class IMessageChannel implements AmbChannel {
     const { files, said, skipped } = media.length ? await this.fetchFiles(media) : { files: [], said: [], skipped: [] };
     const message = [text, ...said].filter(Boolean).join("\n\n");
     if (!message && !files.length) {
-      if (skipped.length) await this.text(chatId, skipped.every((n) => n === "the voice memo") ? "I couldn't take that voice memo here. Type it, or send it again in a minute." : "I can't open that here. I read photos, PDFs, text files and voice memos; for anything else, send it to me in the Ambient app.");
+      if (skipped.length) await this.text(chatId, skipped.every((n) => n === "the voice memo") ? (this.d.transcribe ? "I couldn't take that voice memo here. Type it, or send it again in a minute." : "I can't listen to voice memos yet. Type it and I'll answer.") : "I can't open that here. I read photos, PDFs, text files and voice memos; for anything else, send it to me in the Ambient app.");
       return;
     }
     void this.call("POST", `/v3/chats/${encodeURIComponent(chatId)}/read`).catch(() => undefined);
