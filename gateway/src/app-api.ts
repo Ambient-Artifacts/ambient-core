@@ -224,9 +224,11 @@ export function appApiRouter(d: AppApiDeps): Router {
     send("retry: 5000\n\n");
     const stopRevisions = d.events.subscribe(uid, (revisions) => send(`event: revisions\ndata: ${JSON.stringify(revisions)}\n\n`));
     const stopLive = d.live?.subscribe(uid, (e) => send(`event: bot_live\ndata: ${JSON.stringify(e)}\n\n`));
+    const stopChats = d.live?.subscribeChats(uid, (e) => send(`event: chat\ndata: ${JSON.stringify(e)}\n\n`));
     const stop = () => {
       stopRevisions();
       stopLive?.();
+      stopChats?.();
     };
     const ping = setInterval(() => send(": ping\n\n"), 25_000);
     let done = false;

@@ -1483,3 +1483,13 @@ From an AI app (and for Amb): `needs_you` lists the same, and `set_aside_decisio
 ## Nightly idea
 
 An automation with delivery `bot` starts one of the person's bots at a time, with its instructions as a message from Ambient (no turn of Amb's). The `nightly_idea` template uses it: once a night the bot may build a small first version of an idea of its own and hand it over with `ask_owner` ("My idea: …", Keep going / Drop it), so it lands in Needs you.
+
+## Chats are live
+
+Every message in Amb's chat goes through one function (`AmbientChat.add`), whichever door it came by (the app, iMessage, Amb writing first). It tells the person's open apps on their event stream (`GET /v1/app/events`, `event: chat`, `{"chat":"ambient","at":…}`), and the app fetches the chat. The event says only that it changed: the message stays sealed and is read through the chat's own route. Clearing or deleting the chat announces itself the same way. The app still asks now and then on its own, for when the stream is down.
+
+## Reactions on iMessage
+
+Amb reacts to a person's text as people do. It starts its answer with `[react: 👍]` (exactly one emoji; `splitReaction` in `bots/ambient.ts`), and the channel puts that emoji on their last message (Linq `POST /v3/messages/{id}/reactions`): one of Messages' six tapbacks where it is one (❤️ 👍 👎 😂 ‼️ ❓), a custom emoji otherwise. A reaction alone is a whole answer; with words after it, the words follow as a text. The chat keeps the words, or the emoji when that was all. In the app there are no reactions: the brackets are taken off the same way.
+
+Only Amb decides: nothing reacts by itself (a timer that put 👀 on slow answers was taken out, 2026-11-21). To show it's on something before its answer comes, Amb calls its `react_on_imessage` tool (one emoji, on their last text) while it's still working. A person's own tapbacks on Amb's messages aren't read yet.

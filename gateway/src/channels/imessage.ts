@@ -250,6 +250,33 @@ export class IMessageChannel implements AmbChannel {
     return this.d.now?.() ?? Date.now();
   }
 
+  // ---- reactions (docs/bots.md, "iMessage") ----
+
+  /** Each person's last text (Linq's message id): what a reaction goes on. In memory: after a restart the next text sets it again. */
+  private lastHeard = new Map<string, string>();
+
+  /** The six tapbacks Messages has built in; any other emoji goes as a custom one. */
+  private static readonly TAPBACKS: Record<string, string> = { "❤️": "love", "❤": "love", "👍": "like", "👎": "dislike", "😂": "laugh", "‼️": "emphasize", "‼": "emphasize", "❓": "question" };
+
+  /**
+   * Amb's reaction to the person's last text: `emoji` on that message, as a tapback. Only ever
+   * Amb's own choice (its answer's `[react: …]`, or its react_on_imessage tool while it's still
+   * working): nothing reacts by itself (Nikolai, 2026-11-21). False when there's no text of
+   * theirs to put it on (none since the last restart) or Linq refused.
+   */
+  async react(uid: string, emoji: string): Promise<boolean> {
+    const on = this.lastHeard.get(uid);
+    if (!on) return false;
+    const type = IMessageChannel.TAPBACKS[emoji] ?? "custom";
+    try {
+      await this.call("POST", `/v3/messages/${encodeURIComponent(on)}/reactions`, { operation: "add", type, ...(type === "custom" ? { custom_emoji: emoji } : {}) });
+      return true;
+    } catch (err) {
+      console.warn(`[imessage] a reaction didn't go out: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
   /** Tests: everything a webhook started has finished. */
   async idle(): Promise<void> {
     while (this.pending.size) await Promise.allSettled([...this.pending]);
@@ -512,8 +539,11 @@ export class IMessageChannel implements AmbChannel {
   }
 
   /** Amb's text to a person who connected iMessage. `first`: Amb writes first (not an answer). */
-  async send(uid: string, text: string, opts: { first?: boolean; files?: OutFile[] } = {}): Promise<void> {
+  async send(uid: string, text: string, opts: { first?: boolean; files?: OutFile[]; react?: string } = {}): Promise<void> {
     const first = opts.first === true;
+    // Amb's reaction to their last text: on that message, before any words.
+    if (opts.react && !first) await this.react(uid, opts.react);
+    if (!text.trim() && !(opts.files ?? []).length) return;
     await this.out(uid, await this.sendable(uid, first), text, first, opts.files ?? []);
   }
 
@@ -698,11 +728,11 @@ export class IMessageChannel implements AmbChannel {
       .join("\n");
     const from = normalizeHandle(handle);
     if (this.struckOut(from)) return { status: 200, body: { ok: true } };
-    this.track(this.onText(from, chatId, text, parts.filter((p) => p.type === "media"), seen));
+    this.track(this.onText(from, chatId, text, parts.filter((p) => p.type === "media"), seen, m.id));
     return { status: 200, body: { ok: true } };
   }
 
-  private async onText(handle: string, chatId: string, text: string, media: { url?: string; filename?: string; mime_type?: string; size_bytes?: number }[], seen: { health?: string; line?: string } = {}): Promise<void> {
+  private async onText(handle: string, chatId: string, text: string, media: { url?: string; filename?: string; mime_type?: string; size_bytes?: number }[], seen: { health?: string; line?: string } = {}, messageId?: string): Promise<void> {
     const known = await this.index(HANDLE, this.indexKey("handle", handle));
     // A code someone is waiting with: the number becomes theirs (and stops being anyone else's).
     const claim = await this.claim(text);
@@ -736,6 +766,8 @@ export class IMessageChannel implements AmbChannel {
     const stopTyping = this.typing(chatId);
     // Some came through and some didn't: said at once, so they know what Amb is answering about.
     if (skipped.length) await this.text(chatId, `I can't open ${skipped.join(", ")} here (I read photos, PDFs, text files and voice memos). The Ambient app takes it.`).catch(() => undefined);
+    // Their text is what a reaction of Amb's goes on.
+    if (messageId) this.lastHeard.set(uid, messageId);
     try {
       await this.d.inbox.sendQueued(uid, await this.d.inbox.nameOf(uid), message, this.kind, files);
     } finally {

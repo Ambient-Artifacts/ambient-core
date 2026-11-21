@@ -41,8 +41,21 @@ export interface ChatMessage {
 
 /** How Amb is told a message came through a channel, and how to answer there (docs/bots.md, "Channels"). */
 const VIA_NOTES: Record<string, (name: string) => string> = {
-  imessage: (name) => `[${name} wrote this on iMessage, and your answer goes there as a text message: plain text, no Markdown, a few short lines. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision.]`,
+  imessage: (name) =>
+    `[${name} wrote this on iMessage, and your answer goes there as a text message: plain text, no Markdown, a few short lines. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision. You can react to their message as a person would, when you'd do so yourself; nothing reacts for you. Two ways: start your answer with [react: 👍] (one emoji, any: 👍 ❤️ 😂 🙏 🎉 🔥 🤝 …), where a reaction alone is a whole answer when words would add nothing ("thanks", "ok", "sounds good") and words after it follow as a text; or call react_on_imessage first when the work will take a while (👀), so they see you're on it before your answer comes. Not on every message.]`,
 };
+
+/**
+ * A reaction Amb put at the start of its answer ("[react: 👍] Done."): the emoji, and the answer
+ * without it. One emoji only; anything else in the brackets is left as text.
+ */
+export function splitReaction(text: string): { react: string | null; text: string } {
+  const m = /^\s*\[react:\s*([^\]\s]{1,16})\s*\]\s*/iu.exec(text);
+  if (!m || !/\p{Extended_Pictographic}/u.test(m[1]!) || /[\p{L}\p{N}]/u.test(m[1]!)) return { react: null, text };
+  // Exactly one emoji as a person sees it (a flag or a skin tone is several code points, one sign).
+  if ([...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(m[1]!)].length !== 1) return { react: null, text };
+  return { react: m[1]!, text: text.slice(m[0].length) };
+}
 
 /** What Ambient may use: reading the brain, and the person's loops and bots. Secrets stay in the app. */
 export const AMBIENT_TOOLS = new Set([
@@ -94,6 +107,7 @@ export const AMBIENT_TOOLS = new Set([
   "bot_learning",
   "ambient_settings",
   "connect_imessage",
+  "react_on_imessage",
   "mcp_connections",
   "grant_mcp_connection",
 ]);
@@ -208,6 +222,8 @@ export class AmbientChat {
       mcpFor?: (uid: string) => Promise<{ name: string; path: string; title: string }[]>;
       /** Files sent with messages, kept so the chat shows them again (attachments.ts). */
       attachments?: Attachments;
+      /** The person's chat changed (a message landed, or it was cleared): their open apps are told. */
+      onChanged?: (uid: string) => void;
       fetchImpl?: typeof fetch;
       now?: () => number;
     },
@@ -266,6 +282,8 @@ export class AmbientChat {
   private async add(uid: string, role: "user" | "ambient", text: string, decisionId?: string, files: FileRef[] = [], via = "app"): Promise<ChatMessage> {
     const sealed = await sealMessage(this.d.keys, { kind: "user", uid }, { text, files, via }, CHAT_PURPOSE);
     const out = await this.d.control.m(api.bots.addChat, { uid: uid as never, role, iv: sealed.iv, ct: sealed.ct, ...(decisionId ? { decisionId } : {}), now: this.now() });
+    // Every message goes through here, whichever door it came by: open apps fetch it at once.
+    this.d.onChanged?.(uid);
     return { id: String(out.id), role, text, files, createdAt: out.createdAt, decision: null, via };
   }
 
@@ -345,7 +363,7 @@ export class AmbientChat {
    * Amb's answer to a message is stored: where it goes besides the app's chat (channels/reach.ts
    * sends it back through the channel the message came in by).
    */
-  onReply?: (uid: string, via: string, text: string, files: FileRef[]) => Promise<void> | void;
+  onReply?: (uid: string, via: string, text: string, files: FileRef[], react?: string) => Promise<void> | void;
 
   /** Each person's answer in the making, and their messages from channels waiting behind it. */
   private answering = new Map<string, Promise<void>>();
@@ -484,9 +502,13 @@ export class AmbientChat {
     }
     // What Ambient made for the person (a picture, a PDF): shown with its reply, kept like their own files.
     const kept = made.length && this.d.attachments ? await this.d.attachments.save({ kind: "user", uid }, {}, made).catch((err: Error) => (console.warn(`[ambient] couldn't keep the files: ${err.message}`), [])) : [];
-    await this.add(uid, "ambient", text, undefined, kept, via).catch((err: Error) => console.warn(`[ambient] couldn't store the reply: ${err.message}`));
+    // A reaction at the start of the answer: the channel puts it on their message; the chat keeps
+    // the words, or the emoji when that was all of it.
+    const { react, text: words } = splitReaction(text);
+    const shown = words.trim() || kept.length ? words : (react ?? text);
+    await this.add(uid, "ambient", shown, undefined, kept, via).catch((err: Error) => console.warn(`[ambient] couldn't store the reply: ${err.message}`));
     // Asked in a channel, answered there (the app's chat has it either way).
-    if (via !== "app") await Promise.resolve(this.onReply?.(uid, via, text, kept)).catch(() => undefined);
+    if (via !== "app") await Promise.resolve(this.onReply?.(uid, via, words, kept, react ?? undefined)).catch(() => undefined);
   }
 
   /**
@@ -498,6 +520,7 @@ export class AmbientChat {
     this.unseen.delete(uid);
     const had = (await this.list(uid, 10).catch(() => ({ messages: [] as ChatMessage[] }))).messages.some((m) => m.role === "user");
     await this.d.control.m(api.bots.clearChat, { uid: uid as never, now: this.now() });
+    this.d.onChanged?.(uid);
     if (had && this.d.folder) void this.keepMemory(uid, name ?? (await this.nameOf(uid)), "new_chat").catch(() => undefined);
   }
 
@@ -509,6 +532,7 @@ export class AmbientChat {
       const out = await this.d.control.m(api.bots.forgetChat, { uid: uid as never, now: this.now() });
       if (!out.removed) break;
     }
+    this.d.onChanged?.(uid);
   }
 
   /**

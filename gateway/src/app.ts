@@ -292,6 +292,7 @@ export function createApp(deps: AppDeps) {
   // The MCP servers a person gave Amb (set once the connections are up, below).
   let ambientMcp: (uid: string) => Promise<{ name: string; path: string; title: string }[]> = async () => [];
   const ambient: AmbientChat = new AmbientChat({
+    onChanged: (uid) => live.chatChanged(uid, "ambient"),
     attachments,
     mcpFor: (uid) => ambientMcp(uid),
     control,
@@ -331,9 +332,9 @@ export function createApp(deps: AppDeps) {
   const reach = new AmbReach({ notifier, reachOf: (uid) => reachOf(uid) });
   folders.reach = reach;
   // What Amb made with its answer (a picture, a PDF) goes back with it.
-  ambient.onReply = async (uid, via, text, files) => {
+  ambient.onReply = async (uid, via, text, files, react) => {
     const made = await Promise.all(files.map((f) => ambient.file(uid, f.id).catch(() => null)));
-    await reach.reply(uid, via, text, made.filter((f): f is NonNullable<typeof f> => f !== null));
+    await reach.reply(uid, via, text, made.filter((f): f is NonNullable<typeof f> => f !== null), react);
   };
   if (config.linq) {
     // Voice memos become text, when a speech-to-text key is set (channels/transcribe.ts).
