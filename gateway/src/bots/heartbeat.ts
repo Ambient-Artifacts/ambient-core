@@ -6,6 +6,7 @@
 // because one felt like it. Nothing twice, at most 6 a day, none at night.
 import { api, type Control } from "../control.ts";
 import type { Notifier } from "../push.ts";
+import type { AmbReach } from "../channels/reach.ts";
 import type { AmbientChat } from "./ambient.ts";
 
 const EVERY_MS = 30 * 60_000;
@@ -60,6 +61,8 @@ export class Heartbeat {
       /** Everyone with bots or a chat with Ambient (Convex `bots.people`). */
       people?: () => Promise<string[]>;
       notifier?: Notifier;
+      /** Where what Amb says first goes (the person's channel, or the app's push). */
+      reach?: AmbReach;
 
       now?: () => number;
     },
@@ -130,7 +133,9 @@ export class Heartbeat {
     const speak = reply && reply.replace(/[.\s]/g, "").toUpperCase() !== NOTHING;
     if (speak) {
       await this.d.ambient.say(uid, reply);
-      void this.d.notifier?.notify(uid, { title: "Ambient", body: reply.length > 180 ? `${reply.slice(0, 179)}…` : reply, url: "ambient://ambient", thread: "ambient", collapseId: "ambient-heartbeat" }).catch(() => undefined);
+      const push = { title: "Ambient", body: reply.length > 180 ? `${reply.slice(0, 179)}…` : reply, url: "ambient://ambient", thread: "ambient", collapseId: "ambient-heartbeat" };
+      if (this.d.reach) void this.d.reach.tell(uid, reply, push).catch(() => undefined);
+      else void this.d.notifier?.notify(uid, push).catch(() => undefined);
     }
     // Seen either way: what Ambient chose not to bring up isn't brought up again.
     await this.d.control.m(api.bots.recordBeat, { uid: uid as never, at: now, day, sent: Boolean(speak), seen: fresh.map((e) => e.key) });

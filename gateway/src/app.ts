@@ -32,7 +32,7 @@ import { EventHub, PollingRevisionSource, Revisions, type RevisionSource } from 
 import { hostRouter } from "./routines/route.ts";
 import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
-import { ambientHostRouter, botRunRouter, githubHookRouter, slackHookRouter } from "./bots/route.ts";
+import { ambientHostRouter, botRunRouter, githubHookRouter, linqHookRouter, slackHookRouter } from "./bots/route.ts";
 import { GitHubEvents } from "./bots/github.ts";
 import { GitHubApps } from "./bots/github-apps.ts";
 import { SlackApps } from "./bots/slack-apps.ts";
@@ -50,6 +50,9 @@ import { DecisionService } from "./bots/decisions.ts";
 import { Heartbeat } from "./bots/heartbeat.ts";
 import { Wakes } from "./bots/wakes.ts";
 import { AppChannel } from "./channels/channel.ts";
+import { IMessageChannel } from "./channels/imessage.ts";
+import { AmbReach } from "./channels/reach.ts";
+import { Transcriber } from "./channels/transcribe.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadInstaller, loadRunner, RoutineService } from "./routines/service.ts";
 import { sessionUploadRouter } from "./sessions/route.ts";
@@ -105,6 +108,8 @@ export interface AppDeps {
   githubFetch?: typeof fetch;
   /** Tests: bots' Slack apps against a stand-in Slack Web API. */
   slack?: { apiBase?: string; fetchImpl?: typeof fetch };
+  /** Tests: Amb's iMessage line against a stand-in Linq API. */
+  linq?: { apiBase?: string; fetchImpl?: typeof fetch };
   /** Tests: how long after a signal Amb looks at a bot (default 10 minutes). */
   learning?: { reviewAfterMs?: number };
   /** Tests: Ambient's Microsoft app against a fake Microsoft, and no wait for its access to spread. */
@@ -307,19 +312,47 @@ export function createApp(deps: AppDeps) {
     })
     .catch((err: Error) => console.warn(`[bots] loops weren't adopted: ${err.message}`));
   const actorFor = async (uid: string) => ({ uid, teams: await directory.teamsOf(uid), personal: true, canWritePersonal: true, canWriteTeams: true });
-  const decisions: DecisionService = new DecisionService({ control, keys: routines.keys, routines, bots, ambient, channels: [new AppChannel(notifier)], actorFor, triageMs: deps.ambient?.triageMs });
+  // Where Amb's own words go besides the app's chat (channels/reach.ts): an answer back through
+  // the channel it was asked in; what Amb says first to the one place the person chose.
+  let reachOf: (uid: string) => Promise<string> = async () => "app";
+  // Someone asked Amb to stop texting: it writes first in the app again (set with Amb's settings, below).
+  let reachBackToApp: (uid: string) => Promise<void> = async () => undefined;
+  // A pick in a poll files the decision's answer (set once the decisions are up, just below).
+  let answerDecision: (uid: string, id: string, answer: string) => Promise<void> = async () => {
+    throw new Error("Decisions aren't up yet.");
+  };
+  const reach = new AmbReach({ notifier, reachOf: (uid) => reachOf(uid) });
+  folders.reach = reach;
+  // What Amb made with its answer (a picture, a PDF) goes back with it.
+  ambient.onReply = async (uid, via, text, files) => {
+    const made = await Promise.all(files.map((f) => ambient.file(uid, f.id).catch(() => null)));
+    await reach.reply(uid, via, text, made.filter((f): f is NonNullable<typeof f> => f !== null));
+  };
+  if (config.linq) {
+    // Voice memos become text, when a speech-to-text key is set (channels/transcribe.ts).
+    const transcriber = config.transcribe ? new Transcriber({ config: config.transcribe, fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl }) : undefined;
+    const imessage = new IMessageChannel({ control, keys: routineKeys, master: config.masterKey, config: config.linq, inbox: ambient, answer: (uid, id, answer) => answerDecision(uid, id, answer), onOptOut: (uid) => reachBackToApp(uid), ...(transcriber ? { transcribe: (bytes: Buffer, type: string) => transcriber.transcribe(bytes, type) } : {}), fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl, apiBase: deps.linq?.apiBase });
+    folders.imessage = imessage;
+    reach.add(imessage);
+  }
+  const decisions: DecisionService = new DecisionService({ control, keys: routines.keys, routines, bots, ambient, channels: [new AppChannel(notifier)], reach, actorFor, triageMs: deps.ambient?.triageMs });
   ambient.decisionView = (uid, row) => decisions.view(uid, row);
+  answerDecision = async (uid, id, answer) => void (await decisions.answer(await actorFor(uid), id, answer, "imessage"));
   onQuestion = (q) => void decisions.onBotQuestion(q);
   // Who Ambient's background work is for: everyone with bots or a chat with Ambient. Bots are
   // everyone's; with BRAIN_BOTS=all this was nobody (the "*" was dropped before asking Convex), so
   // the heartbeat, Amb's nightly memory and automations didn't run (2026-11-20).
   const withBots = async () => ((await control.q(api.bots.people, {})) as { users: string[] }).users.map(String);
-  const heartbeat = new Heartbeat({ control, ambient, people: withBots, notifier });
+  const heartbeat = new Heartbeat({ control, ambient, people: withBots, notifier, reach });
   // What Amb does on its own: templates on a schedule or an event (docs/bots.md, "Automations").
-  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, notifier, people: withBots, actorFor, turnMs: deps.ambient?.turnMs });
+  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, notifier, reach, people: withBots, actorFor, turnMs: deps.ambient?.turnMs });
   folders.automations = automations;
   // Watching the bots is part of Amb (its settings), not an automation.
-  const ambSettings = new AmbSettings({ control, keys: routineKeys, legacyOff: (uid) => automations.legacyWatchOff(uid) });
+  const ambSettings = new AmbSettings({ control, keys: routineKeys, legacyOff: (uid) => automations.legacyWatchOff(uid), canReach: (uid, kind) => reach.linked(uid, kind) });
+  reachOf = (uid) => ambSettings.reach(uid);
+  reachBackToApp = async (uid) => {
+    if ((await ambSettings.reach(uid)) !== "app") await ambSettings.set(uid, { reach: "app" });
+  };
   folders.ambSettings = ambSettings;
   heartbeat.watching = (uid) => ambSettings.notifies(uid);
   // Every bot learns on its own (docs/bots.md, "How bots learn").
@@ -396,6 +429,7 @@ export function createApp(deps: AppDeps) {
   app.use(botRunRouter({ bots, history: folders.history, wakes }));
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(slackHookRouter(() => folders.slack));
+  app.use(linqHookRouter(() => folders.imessage));
   app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(internalRouter({ secret: config.serviceSecret, upkeep, relay: (host, req, ms) => computers.relay(host, req, ms) }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));

@@ -58,6 +58,8 @@ export async function startStack(
     githubApp?: import("../src/bots/github-app.ts").GitHubAppConfig;
     /** Bots' Slack apps against a stand-in Slack Web API. */
     slackApi?: string;
+    /** Amb's iMessage line against a stand-in Linq API. */
+    linq?: { api: string; webhookSecret: string; number?: string; transcribeUrl?: string };
     /** How long after a signal Amb looks at a bot (learning.ts). */
     learningAfterMs?: number;
     /** The team brain for teams on their own computer (team-bundle.ts), instead of building it. */
@@ -127,6 +129,8 @@ export async function startStack(
     signups: opts.signups,
     requireSignInNonce: opts.requireSignInNonce,
     githubApp: opts.githubApp,
+    ...(opts.linq ? { linq: { apiKey: "linq-test-key", webhookSecret: opts.linq.webhookSecret, ...(opts.linq.number ? { number: opts.linq.number } : {}) } } : {}),
+    ...(opts.linq?.transcribeUrl ? { transcribe: { apiKey: "stt-test-key", url: opts.linq.transcribeUrl, model: "gpt-4o-transcribe" } } : {}),
   };
 
   // Team server with a copy of the fixture team wiki.
@@ -180,6 +184,7 @@ export async function startStack(
     mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
     githubBatchMs: opts.githubBatchMs ?? 60_000,
     ...(opts.slackApi ? { slack: { apiBase: opts.slackApi } } : {}),
+    ...(opts.linq ? { linq: { apiBase: opts.linq.api } } : {}),
     learning: { reviewAfterMs: opts.learningAfterMs ?? 60_000 },
     teamBundle: opts.teamBundle,
   });

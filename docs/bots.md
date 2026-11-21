@@ -161,10 +161,13 @@ over, answers 404 and the runner stops sending. Codex runs don't send it yet.
 `GET /v1/app/ambient/chat`:
 
 ```json
-{ "messages": [{ "id": "…", "role": "user", "text": "How are my bots?", "createdAt": 1763380000000 },
-               { "id": "…", "role": "ambient", "text": "Dev opened PR #41 …", "createdAt": 1763380000000 }],
+{ "messages": [{ "id": "…", "role": "user", "text": "How are my bots?", "via": "app", "createdAt": 1763380000000 },
+               { "id": "…", "role": "ambient", "text": "Dev opened PR #41 …", "via": "app", "createdAt": 1763380000000 }],
   "pending": false }
 ```
+
+`via` is where a message was written, and where Amb's answer to it went: `"app"`, or a channel
+(`"imessage"`; see [Channels](#channels)).
 
 `POST /v1/app/ambient/chat` with `{ "text": "…" }` answers at once with
 `{ "message": ChatMessage, "pending": true }`; the reply arrives in `GET` (poll every 2 seconds
@@ -1162,9 +1165,120 @@ Per person, a sealed record:
 - `notify`: `"important"` (default: the heartbeat, every half hour 08–21, tells them when a bot
   failed, a decision waited over two hours, or a command waits for approval; at most six messages
   a day, none at night) or `"never"`.
+- `reach`: where Amb writes first: `"app"` (default: a push) or `"imessage"` (a text; only once
+  iMessage is connected, 400 `not_connected` before). See [Channels](#channels).
 
-`GET /v1/app/ambient/settings` → `{ "notify": "important" }`; `PUT` with `{ "notify" }` → the same.
-MCP tool `ambient_settings` (`{ notify? }`), changed only when the person asks.
+`GET /v1/app/ambient/settings` → `{ "notify": "important", "reach": "app" }`; `PUT` with
+`{ "notify"?, "reach"? }` → the same. MCP tool `ambient_settings` (`{ notify?, reach? }`), changed
+only when the person asks.
+
+## Channels
+
+Amb has one conversation with a person. It's kept in the app's chat; a channel is another door to
+it (`gateway/src/channels/reach.ts`). iMessage is the first; Slack and Teams for Amb, and WhatsApp,
+follow the same rules. The rules are decided in code, never by the model:
+
+- **One history.** A message written in a channel is stored in Amb's chat like one written in the
+  app, with where it came from (`via` on a chat message: `"app"`, `"imessage"`). Amb answers with
+  the whole conversation in view, whichever door each turn came through, and the app shows all of
+  it. The channel itself only shows what was written there.
+- **An answer goes back where it was asked.** Asked in the app, answered in the app (no text).
+  Texted, answered by text, also when the answer takes a while. Amb is told which channel it's
+  answering in, so a text comes out short and without Markdown.
+- **What Amb says first goes to one place.** The heartbeat, a decision, an automation's message:
+  each is stored in the chat and then rings once, where `reach` says: the channel, or the app's
+  push. Never both. While the person has Amb's chat open in the app (it asked for the chat in the
+  last 90 seconds), the channel stays quiet and the push goes. When the channel can't take it (not
+  connected anymore, the provider refuses), the push goes out instead.
+- **A decision can be answered anywhere.** A channel asks it its own way: on iMessage the question
+  is a text and its answers a poll, and a tap on one files the answer (`via: "imessage"`). Where
+  there's no poll it comes with its answers numbered; a reply ("2", or a few words) is a message
+  to Amb, which files it with `answer_decision`.
+
+A bot's own thread isn't part of this: a bot answers in its thread (the app, or the Slack thread it
+was asked in). Pushes about a bot's thread, a failed run and approval cards stay the app's.
+
+### iMessage
+
+Amb's iMessage line is a hosted line at [Linq](https://linqapp.com) (`gateway/src/channels/imessage.ts`;
+set up with `BRAIN_LINQ_API_KEY` and `BRAIN_LINQ_WEBHOOK_SECRET`, see
+[configuration.md](configuration.md)). Without them there's no iMessage: the routes below answer
+404 `not_set_up` and the MCP tool isn't offered.
+
+```
+the app or an AI app ──▶ POST /v1/app/imessage ──▶ a code ("AMB-7K2Q9F") and the line's number
+the person texts the code to the line ──▶ Linq ──▶ POST /v1/hooks/linq (signed)
+     ──▶ the number is theirs now, linked to their account; "You're connected" comes back
+a text from a linked number ──▶ Amb's chat (via "imessage") ──▶ the answer goes back as a text
+Amb writes first, reach "imessage" ──▶ a text
+```
+
+- **The person writes first.** A shared line may only text numbers that texted it, and holding the
+  phone is what proves the number is theirs. A code is good for an hour and works once. A number
+  that texts a code someone else is waiting with becomes that account's (and stops being the
+  earlier one's).
+- **A number nobody linked gets nothing**: no answer, no turn, no workspace. After five texts
+  without a good code in an hour it's ignored.
+- **Only a person's own texts in a chat with the line** are taken: no group chats, nothing the
+  line sent itself. Each delivery is checked ([Standard Webhooks](https://www.standardwebhooks.com):
+  HMAC-SHA256 over `<webhook-id>.<webhook-timestamp>.<body>`, five minutes) and taken once.
+- **Decisions are polls.** A bot's question or Amb's own proposal with two or more answers goes
+  out as the question in a text, then a native poll with the answers. The poll's message id and
+  what each option says are kept with the person's records; a tap (`poll.vote.added`) from their
+  own number settles that decision and gets "Got it: …" back. A tap on one that's already
+  answered gets one line saying so. When Linq won't send the poll (the chat fell back to SMS),
+  the answers go as numbered text. Polls need iOS 26 on the phone to show as polls.
+- **Photos and files, both ways.** What a text brings is fetched from Linq's links and goes into
+  Amb's chat with the message, as files sent in the app do: pictures (JPEG, PNG, GIF, WebP), PDFs
+  and text files, up to 4 and 10 MB together. An iPhone's HEIC photo is turned into a JPEG first
+  (`channels/heic.ts`: in a worker thread, at most 2048 pixels on a side). Anything else (a video)
+  isn't opened: a line says so and that the app takes it, and the rest of the message still goes
+  through. What Amb makes with its answer (a picture, a PDF) is uploaded to Linq and sent in the
+  same message; a file that can't be sent is named, with "in the Ambient app".
+- **A voice memo is what was said.** With a speech-to-text key set (`BRAIN_TRANSCRIBE_API_KEY`,
+  [configuration.md](configuration.md)), a voice memo's audio goes to that service and its text
+  becomes the person's message to Amb, joined to anything they typed with it; Amb answers by
+  text. The audio itself isn't kept. Without a key, or when nothing can be made out, one line
+  says the memo couldn't be taken. Amb doesn't send voice memos.
+- An answer over 3,000 characters is cut, with a line that the rest is in the app.
+- While Amb works on a text the chat is marked read and shows "typing" (best effort).
+- After linking, Amb shares the line's contact card (its name and picture, set up once in Linq's
+  dashboard), so the thread shows "Ambient" instead of a number. Without a card nothing is sent.
+- **Kept in the sealed records**: the person's link (their number, the Linq chat) under their own
+  key. Finding the account for a number or a code needs a lookup that isn't under one owner: those
+  rows hold only ids, keyed by an HMAC of the number, never the number itself.
+- **Stop means stop.** A text that is one of Linq's opt-out keywords (STOP, UNSUBSCRIBE, OPT OUT in
+  any casing; CANCEL, END, QUIT in capitals, as Linq matches them), or says the same in words
+  ("please stop texting me", "schreib mir nicht mehr"), is not a message to Amb: no turn, nothing in
+  the chat. The link is marked opted out, `reach` goes back to `"app"`, and one line goes out saying
+  so and how to come back (the only send with `override_optout`). From then on nothing is sent by
+  text, not even tried. A send Linq refuses with 403 code 2024 does the same. It ends when the
+  person texts again, as it does at Linq; `reach` stays where it is until they choose iMessage again.
+- **Amb doesn't text into silence.** Before it writes first (never before an answer), it asks Linq
+  for the chat's health and the line's state (each at most every 15 minutes) and holds back when
+  the chat is `CRITICAL` or `OPTED_OUT`, when the line is flagged or not delivering, and when its
+  own messages went unanswered: two may go unanswered, the third waits a day, the fourth three
+  days, then nothing until the person writes. On an `AT_RISK` chat or line it's one a day. What's
+  held back goes out as a push instead. A text or a tap on a poll starts it afresh.
+  `phone_number.status_updated` makes it ask for the line's state again at once.
+- **What Amb writes first goes to the person, not to a chat** (`POST /v3/messages` with `to`, no
+  `from`): Linq picks the line, reuses their chat while its line is healthy and moves off a flagged
+  one by itself; the chat it lands in is kept. Answers go into the chat they were asked in.
+- **The contact card is shared again about once a day**, with the first text of the day: there's no
+  telling whether it was saved.
+
+The app's API:
+
+- `GET /v1/app/imessage` → `{ "connected", "handle", "number", "code", "expiresAt", "link", "optedOut" }`:
+  `handle` is their number mostly hidden; `code`, `expiresAt` and `link` (opens Messages with the
+  code filled in) while a code waits; `optedOut` while they've asked Amb to stop texting.
+- `POST /v1/app/imessage` → the same, with a code to text (the one still waiting, when it has more
+  than ten minutes left).
+- `DELETE /v1/app/imessage` → forgets the number; `reach` goes back to `"app"`.
+
+MCP tool `connect_imessage` (`{ disconnect? }`): the same three, for the person's AI and for Amb
+itself. Linq's part, once per server: a webhook subscription for `message.received`, `poll.vote.added` and `phone_number.status_updated` at
+`<origin>/v1/hooks/linq?version=2026-02-03`, whose signing secret is `BRAIN_LINQ_WEBHOOK_SECRET`.
 
 ## Bot templates
 

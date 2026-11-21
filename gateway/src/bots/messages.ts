@@ -15,20 +15,22 @@ export interface MessageBody {
   details?: string;
   /** Files sent with it (bots/attachments.ts): shown with the message, fetched by id. */
   files?: FileRef[];
+  /** Where it was written or sent when that's not the app ("imessage"; channels/reach.ts). */
+  via?: string;
 }
 
 export async function sealMessage(keys: RoutineKeys, owner: Owner, body: MessageBody, purpose = MESSAGE_PURPOSE) {
-  const sealed = await keys.seal(owner, purpose, JSON.stringify({ t: body.text, ...(body.choices?.length ? { c: body.choices } : {}), ...(body.details ? { d: body.details } : {}), ...(body.files?.length ? { f: body.files } : {}) }));
+  const sealed = await keys.seal(owner, purpose, JSON.stringify({ t: body.text, ...(body.choices?.length ? { c: body.choices } : {}), ...(body.details ? { d: body.details } : {}), ...(body.files?.length ? { f: body.files } : {}), ...(body.via && body.via !== "app" ? { v: body.via } : {}) }));
   return { iv: sealed.iv, ct: sealed.ciphertext };
 }
 
 export async function openMessage(keys: RoutineKeys, owner: Owner, iv: string, ct: string, purpose = MESSAGE_PURPOSE): Promise<MessageBody> {
   const raw = await keys.open(owner, purpose, iv, ct);
   try {
-    const j = JSON.parse(raw) as { t?: unknown; c?: unknown; d?: unknown; f?: unknown };
+    const j = JSON.parse(raw) as { t?: unknown; c?: unknown; d?: unknown; f?: unknown; v?: unknown };
     if (typeof j.t === "string") {
       const files = fileRefs(j.f);
-      return { text: j.t, ...(Array.isArray(j.c) ? { choices: j.c.filter((x): x is string => typeof x === "string") } : {}), ...(typeof j.d === "string" && j.d ? { details: j.d } : {}), ...(files.length ? { files } : {}) };
+      return { text: j.t, ...(Array.isArray(j.c) ? { choices: j.c.filter((x): x is string => typeof x === "string") } : {}), ...(typeof j.d === "string" && j.d ? { details: j.d } : {}), ...(files.length ? { files } : {}), ...(typeof j.v === "string" && j.v ? { via: j.v } : {}) };
     }
   } catch {
     // Not ours: shown as it is.
