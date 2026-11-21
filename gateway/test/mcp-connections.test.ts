@@ -87,7 +87,7 @@ async function signInService(req: import("node:http").IncomingMessage, res: impo
   if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
   const token = req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
   if (!valid.has(token)) {
-    return json(401, { error: "invalid_token" }, { "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/oauth"` });
+    return json(401, { error: "invalid_token" }, { "www-authenticate": `Bearer realm="OAuth", resource_metadata="${base}/.well-known/oauth-protected-resource/oauth", scope="read write"` });
   }
   const server = new McpServer({ name: "tracker", version: "1.0.0" });
   server.registerTool("list_issues", { description: "Lists open issues.", inputSchema: {} }, async () => {
@@ -293,6 +293,8 @@ describe("a service that wants a sign-in instead of a key", () => {
     expect(link.searchParams.get("redirect_uri")).toBe(`${s.origin}/v1/mcp/connected`);
     expect(link.searchParams.get("code_challenge_method")).toBe("S256");
     expect(link.searchParams.get("client_id")).toBe("client-1");
+    // The permissions the service named when it turned the first request away.
+    expect(link.searchParams.get("scope")).toBe("read write");
     // Ambient registered itself as the service's client, with where to send the person back.
     expect(registered[0]).toMatchObject({ client_name: "Ambient", redirect_uris: [`${s.origin}/v1/mcp/connected`] });
     expect((await connections()).length).toBe(before);

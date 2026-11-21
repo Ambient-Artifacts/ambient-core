@@ -22,7 +22,7 @@ import { isIP } from "node:net";
 import { randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { auth, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import { auth, extractWWWAuthenticateParams, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { isPrivateAddress } from "@brain/wiki";
 import { api, type Control } from "../control.ts";
@@ -429,7 +429,12 @@ export class McpConnections {
   private async beginSignIn(owner: Owner, what: { name: string; url: string; connectionId?: string; client?: OAuthClientInformationMixed }): Promise<string> {
     const pending: Pending = { state: randomBytes(24).toString("base64url"), name: what.name, url: what.url, ...(what.connectionId ? { connectionId: what.connectionId } : {}), ...(what.client ? { client: what.client } : {}), exp: this.now() + PENDING_TTL_MS };
     const provider = new SignIn(pending, { redirectUrl: this.redirectUrl, state: pending.state, interactive: true, save: async () => undefined });
-    const result = await auth(provider, { serverUrl: what.url, fetchFn: this.guarded() });
+    // What the server says when it turns a request away: where its sign-in is described, and
+    // which permissions to ask for (Notion: "default", Linear: "read write").
+    const hint = await this.guarded()(what.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) })
+      .then((res) => (res.status === 401 ? extractWWWAuthenticateParams(res) : {}))
+      .catch(() => ({}) as { resourceMetadataUrl?: URL; scope?: string });
+    const result = await auth(provider, { serverUrl: what.url, fetchFn: this.guarded(), ...(hint.resourceMetadataUrl ? { resourceMetadataUrl: hint.resourceMetadataUrl } : {}), ...(hint.scope ? { scope: hint.scope } : {}) });
     if (result !== "REDIRECT" || !provider.link) throw new McpConnectionError("no_sign_in", "The service didn't offer a sign-in.", 400);
     await this.writePending(owner, pending);
     await this.setStateOwner(pending.state, owner);
