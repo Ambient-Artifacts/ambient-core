@@ -112,3 +112,36 @@ export function mcpRelayRouter(d: {
   r.delete("/v1/bot/mcp/:id", notAllowed);
   return r;
 }
+
+const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function page(title: string, body: string, ok: boolean): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${ok ? '<meta http-equiv="refresh" content="1;url=ambient://connections">' : ""}<title>${esc(title)}</title><style>body{font:17px/1.5 -apple-system,system-ui,sans-serif;max-width:28rem;margin:18vh auto;padding:0 1.25rem;color:#1d1d1f;background:#fbfaf7}a{color:inherit}@media(prefers-color-scheme:dark){body{color:#f5f5f7;background:#141414}}</style></head><body><h1>${esc(title)}</h1>${body}${ok ? '<p><a href="ambient://connections">Back to Ambient</a></p>' : ""}</body></html>`;
+}
+
+/**
+ * Where a service sends the person back after its sign-in page (bots/mcp-connections.ts): the
+ * code and the state it was started with. The state says whose sign-in it is; nothing else does.
+ */
+export function mcpSignInRouter(connections: () => McpConnections | undefined): Router {
+  const r = express.Router();
+  r.get("/v1/mcp/connected", async (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    const mcp = connections();
+    if (!mcp) return res.status(404).send(page("Not set up", "<p>Connections aren't set up on this Ambient server.</p>", false));
+    const code = typeof req.query.code === "string" ? req.query.code : "";
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    if (typeof req.query.error === "string" || !code) {
+      return res.status(400).send(page("Not connected", "<p>The sign-in wasn't allowed. Start it again in Ambient whenever you like.</p>", false));
+    }
+    try {
+      const out = await mcp.finishSignIn(state, code);
+      res.send(page(`${out.name} is connected`, "<p>Give it to a bot or to Ambient under Connections.</p>", true));
+    } catch (err) {
+      const message = err instanceof McpConnectionError ? err.message : "That didn't work. Start the sign-in again in Ambient.";
+      res.status(err instanceof McpConnectionError ? err.status : 500).send(page("Not connected", `<p>${esc(message)}</p>`, false));
+    }
+  });
+  return r;
+}

@@ -1198,17 +1198,18 @@ function registerLearningTools(
     const mcp = folders.mcp;
     const teamArg: Record<string, z.ZodTypeAny> = principal.teams.length ? { team: z.string().max(80).optional().describe("A team's slug, for the team's connections and bots; leave out for the user's own.") } : {};
     const ownerOf = (team: unknown) => routines.botOwner(actor, typeof team === "string" && team ? team : null);
-    const line = (c: { name: string; host: string; tools: unknown[]; bots: string[]; amb: boolean }) => `${c.name} (${c.host}, ${c.tools.length} tools): ${[c.amb ? "Ambient" : "", c.bots.length ? `${c.bots.length} bot${c.bots.length === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ") || "nobody"} has it`;
+    const line = (c: { name: string; host: string; tools: unknown[]; bots: string[]; amb: boolean; needsSignIn: boolean }) => `${c.name} (${c.host}, ${c.tools.length} tools${c.needsSignIn ? ", its sign-in ran out: sign_in gives a new link" : ""}): ${[c.amb ? "Ambient" : "", c.bots.length ? `${c.bots.length} bot${c.bots.length === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ") || "nobody"} has it`;
     server.registerTool(
       "mcp_connections",
       {
         title: "MCP connections",
         description:
-          "The MCP servers the user (or a team) connected for their bots and Ambient: services reached with a key the gateway keeps, never the bot. Without arguments: the list, with each one's tools and who has it. add: connects a server by its https address and a name, with its key when it needs one (only a key the user gave you to store; it's kept sealed and never shown again); nobody has it until it's given with grant_mcp_connection. remove: an id to disconnect. refresh: an id, to ask the server for its tools again. Only when the user asked.",
+          "The MCP servers the user (or a team) connected for their bots and Ambient: services reached with a key or a sign-in the gateway keeps, never the bot. Without arguments: the list, with each one's tools and who has it. add: connects a server by its https address and a name, with its key when it needs one (only a key the user gave you to store; it's kept sealed and never shown again); a server that wants a sign-in instead returns a link for the user to open. Nobody has it until it's given with grant_mcp_connection. remove: an id to disconnect. refresh: an id, to ask the server for its tools again. sign_in: an id, for a new sign-in link when a connection's sign-in ran out. Only when the user asked.",
         inputSchema: {
           add: z.object({ name: z.string().min(1).max(60), url: z.string().min(4).max(2000), key: z.string().max(4000).optional(), header: z.string().max(64).optional().describe("The header the key goes in, when it isn't Authorization: Bearer.") }).optional(),
           remove: z.string().max(32).optional(),
           refresh: z.string().max(32).optional(),
+          sign_in: z.string().max(32).optional(),
           ...teamArg,
         },
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -1216,9 +1217,18 @@ function registerLearningTools(
       async (args) =>
         guard(async () => {
           const { add, remove, refresh } = args;
+          const again = (args as { sign_in?: string }).sign_in;
+          if (again) {
+            const out = await mcp.signInAgain(ownerOf((args as { team?: string }).team), again);
+            return result(`Give the user this link as a Markdown link, [Sign in again](${out.url}); it's good for half an hour.`, { signIn: out });
+          }
           const owner = ownerOf((args as { team?: string }).team);
           if (add) {
-            const c = await mcp.add(owner, add as { name: string; url: string; key?: string; header?: string });
+            const out = await mcp.add(owner, add as { name: string; url: string; key?: string; header?: string });
+            if ("signIn" in out) {
+              return result(`${(add as { name: string }).name} wants a sign-in at its own page. Give the user this link as a Markdown link, [Sign in to ${(add as { name: string }).name}](${out.signIn.url}): once they allowed it there (within half an hour), it shows in mcp_connections.`, out);
+            }
+            const c = out.connection;
             return result(`Connected ${c.name} (${c.tools.length} tools). Nobody has it yet: give it to a bot or to Ambient with grant_mcp_connection.`, { connection: c });
           }
           if (remove) {

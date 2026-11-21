@@ -610,7 +610,21 @@ export function botAppRoutes(
     const body = z.object({ name: z.string().trim().min(1).max(60), url: z.string().trim().min(4).max(2000), key: z.string().max(4000).optional(), header: z.string().max(64).optional() }).safeParse(req.body);
     if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send a name and the server's address (and its key, when it needs one)." });
     try {
-      res.status(201).json({ connection: await mcp.add(d.routines.botOwner(await actor(res), teamOf(req)), body.data) });
+      const out = await mcp.add(d.routines.botOwner(await actor(res), teamOf(req)), body.data);
+      // A server that wants a sign-in: the link to the service's page; the connection appears once it's allowed there.
+      if ("signIn" in out) res.status(200).json(out);
+      else res.status(201).json(out);
+    } catch (err) {
+      mcpFail(res, err);
+    }
+  });
+
+  // A new sign-in for a connection whose sign-in ran out: the link to the service's page.
+  r.post("/v1/app/mcp-connections/:id/sign-in", d.auth, async (req, res) => {
+    const mcp = d.mcp?.();
+    if (!mcp) return notEnabled(res);
+    try {
+      res.json({ signIn: await mcp.signInAgain(d.routines.botOwner(await actor(res), teamOf(req)), String(req.params.id)) });
     } catch (err) {
       mcpFail(res, err);
     }

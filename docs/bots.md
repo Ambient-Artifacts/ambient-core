@@ -1112,22 +1112,38 @@ a bot's run ──▶ POST /v1/bot/mcp/:id (its run token) ──▶ the gateway
 - **Tools only**, over Streamable HTTP: no resources or prompts, no server that only speaks the
   older SSE transport. Up to 200 tools per connection; a tool's description and schema are cut to
   what a model should have to read. The key goes as `Authorization: Bearer`, or in another header
-  when the service wants one (`header`). Sign-in on the service's own page (OAuth) isn't built yet.
+  when the service wants one (`header`).
+- **A sign-in instead of a key.** A server that refuses without a key and offers OAuth the way MCP
+  has it (protected-resource and authorization-server metadata, PKCE) is connected by signing in
+  at the service's own page: adding it answers with a link there (`signIn.url`); the service sends
+  the person back to `/v1/mcp/connected` with a code and the state the sign-in was started with,
+  and only then is the connection kept. Ambient registers itself as the service's client where the
+  service lets clients do that (dynamic client registration); a service that wants a client
+  registered by hand isn't supported yet. A state works once, for half an hour. Ambient holds the
+  sign-in (never shown, never sent to a run), renews it when it ran out and keeps the new one. When
+  it can't be renewed, the bot's call says so, the connection reads `needsSignIn: true`, and
+  `POST …/:id/sign-in` gives a new link that mends the same connection, grants included.
 - **Kept in the sealed records** under the owner's key: one record per connection, with its
   address, key, tools and grants.
 
 The app's API (with `?team=<slug>` for a team's):
 
 - `GET /v1/app/mcp-connections` → `{ "connections": [Connection] }`. A Connection is
-  `{ id, name, slug, host, hasKey, tools: [{ name, description }], bots: [routine id], amb, addedAt }`;
-  never its key or its whole address.
-- `POST /v1/app/mcp-connections` with `{ name, url, key?, header? }` → 201 `{ "connection" }`; 400
-  `bad_url`, `refused` (the key), `unreachable`, `redirected`.
+  `{ id, name, slug, host, hasKey, signIn: "key" | "oauth" | "none", needsSignIn, tools: [{ name, description }], bots: [routine id], amb, addedAt }`;
+  never its key, its sign-in or its whole address.
+- `POST /v1/app/mcp-connections` with `{ name, url, key?, header? }` → 201 `{ "connection" }`, or
+  200 `{ "signIn": { "url" } }` when the server wants a sign-in (open the link; the connection is
+  in the list once it's allowed there); 400 `bad_url`, `refused` (the key), `unreachable`,
+  `redirected`.
+- `POST /v1/app/mcp-connections/:id/sign-in` → `{ "signIn": { "url" } }`: a new sign-in for a
+  connection whose sign-in ran out.
+- `GET /v1/mcp/connected?code=…&state=…` → the page the service sends the person back to; it opens
+  `ambient://connections`.
 - `POST /v1/app/mcp-connections/:id/refresh` → asks for the tools again.
 - `DELETE /v1/app/mcp-connections/:id` → 204.
 - `PUT /v1/app/mcp-connections/:id/grants` with `{ bot, on }` or `{ amb: true, on }` → `{ "connection" }`.
 
-MCP tools: `mcp_connections` (the list; `add`, `remove`, `refresh`) and `grant_mcp_connection`
+MCP tools: `mcp_connections` (the list; `add`, `remove`, `refresh`, `sign_in`) and `grant_mcp_connection`
 (`connection`, `bot` or `amb`, `on`), for the person's AI and for Amb, only when they ask.
 
 ## Automations

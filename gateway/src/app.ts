@@ -53,7 +53,7 @@ import { AppChannel } from "./channels/channel.ts";
 import { IMessageChannel } from "./channels/imessage.ts";
 import { AmbReach } from "./channels/reach.ts";
 import { McpConnections } from "./bots/mcp-connections.ts";
-import { mcpRelayPath, mcpRelayRouter } from "./bots/mcp-relay.ts";
+import { mcpRelayPath, mcpRelayRouter, mcpSignInRouter } from "./bots/mcp-relay.ts";
 import { Transcriber } from "./channels/transcribe.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadInstaller, loadRunner, RoutineService } from "./routines/service.ts";
@@ -417,7 +417,7 @@ export function createApp(deps: AppDeps) {
   routines.githubToken = async (owner, id) => githubApp.tokenFor(owner, { id, ...(await github.watchOf(owner, id)) });
   // MCP servers people connect once and give to bots or to Amb (docs/bots.md, "MCP connections");
   // a run reaches them through the gateway (bots/mcp-relay.ts), never with their key.
-  const mcpConnections = new McpConnections({ control, keys: routineKeys, fetchImpl: deps.fetchImpl, allowLocal: deps.mcpConnections?.allowLocal });
+  const mcpConnections = new McpConnections({ control, keys: routineKeys, origin: config.origin, fetchImpl: deps.fetchImpl, allowLocal: deps.mcpConnections?.allowLocal });
   folders.mcp = mcpConnections;
   routines.mcpFor = async (owner, id) => (await mcpConnections.forBot(owner, id)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id) }));
   ambientMcp = async (uid) => (await mcpConnections.forAmb(uid)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id), title: c.title }));
@@ -443,6 +443,7 @@ export function createApp(deps: AppDeps) {
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(slackHookRouter(() => folders.slack));
   app.use(linqHookRouter(() => folders.imessage));
+  app.use(mcpSignInRouter(() => folders.mcp));
   app.use(mcpRelayRouter({ connections: () => folders.mcp, control, ambUid: (token) => computers.uidOfToken(token), version: VERSION }));
   app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(internalRouter({ secret: config.serviceSecret, upkeep, relay: (host, req, ms) => computers.relay(host, req, ms) }));

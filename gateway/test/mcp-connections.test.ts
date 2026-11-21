@@ -47,6 +47,63 @@ async function relay(path: string, token: string) {
   return client;
 }
 
+// ---- a second stand-in service at /oauth: no key, a sign-in at its own page (OAuth, as MCP has it) ----
+/** The access tokens it takes right now, how often tokens were asked for, and whether renewing works. */
+const valid = new Set<string>();
+let issued = 0;
+let renewals = 0;
+let renewable = true;
+const registered: Record<string, unknown>[] = [];
+
+async function signInService(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, raw: string): Promise<boolean> {
+  const base = `http://127.0.0.1:${(service.address() as AddressInfo).port}`;
+  const url = new URL(req.url ?? "/", base);
+  const json = (status: number, body: unknown, headers: Record<string, string> = {}) => (res.writeHead(status, { "content-type": "application/json", ...headers }).end(JSON.stringify(body)), true);
+  if (url.pathname === "/.well-known/oauth-protected-resource/oauth" || url.pathname === "/.well-known/oauth-protected-resource") {
+    return json(200, { resource: `${base}/oauth`, authorization_servers: [base] });
+  }
+  if (url.pathname === "/.well-known/oauth-authorization-server") {
+    return json(200, { issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, registration_endpoint: `${base}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] });
+  }
+  if (url.pathname.startsWith("/.well-known/")) return json(404, { error: "not_found" });
+  if (url.pathname === "/register" && req.method === "POST") {
+    const body = JSON.parse(raw) as Record<string, unknown>;
+    registered.push(body);
+    return json(201, { ...body, client_id: `client-${registered.length}` });
+  }
+  if (url.pathname === "/token" && req.method === "POST") {
+    const form = new URLSearchParams(raw);
+    if (form.get("grant_type") === "authorization_code") {
+      if (form.get("code") !== "good-code" || !form.get("code_verifier")) return json(400, { error: "invalid_grant" });
+    } else if (form.get("grant_type") === "refresh_token") {
+      renewals++;
+      if (!renewable || !form.get("refresh_token")?.startsWith("rt-")) return json(400, { error: "invalid_grant" });
+    } else return json(400, { error: "unsupported_grant_type" });
+    issued++;
+    valid.add(`at-${issued}`);
+    return json(200, { access_token: `at-${issued}`, refresh_token: `rt-${issued}`, token_type: "Bearer", expires_in: 3600 });
+  }
+  if (url.pathname !== "/oauth") return false;
+  if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
+  const token = req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
+  if (!valid.has(token)) {
+    return json(401, { error: "invalid_token" }, { "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/oauth"` });
+  }
+  const server = new McpServer({ name: "tracker", version: "1.0.0" });
+  server.registerTool("list_issues", { description: "Lists open issues.", inputSchema: {} }, async () => {
+    seen.push({ auth: req.headers.authorization, tool: "list_issues" });
+    return { content: [{ type: "text", text: "2 open issues." }] };
+  });
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  res.on("close", () => {
+    void transport.close();
+    void server.close();
+  });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, JSON.parse(raw) as unknown);
+  return true;
+}
+
 beforeAll(async () => {
   // The stand-in service: an MCP server with two tools, behind "Authorization: Bearer <KEY>".
   service = createServer((req, res) => {
@@ -55,6 +112,7 @@ beforeAll(async () => {
     req.on("end", () => {
       void (async () => {
         if (req.url === "/moved") return res.writeHead(302, { location: "/mcp" }).end();
+        if (await signInService(req, res, Buffer.concat(chunks).toString("utf8"))) return;
         if (req.headers.authorization !== `Bearer ${KEY}`) return res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: "unauthorized" }));
         if (req.method !== "POST") return res.writeHead(405).end();
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
@@ -216,5 +274,100 @@ describe("who has it", () => {
     expect(run.mcp).toBeUndefined();
     await expect(relay(`/v1/bot/mcp/${id}`, run.runToken)).rejects.toThrow();
     await hostCall(host, "POST", `/v1/host/runs/${run.run.id}`, { status: "succeeded", summary: "ok" });
+  });
+});
+
+describe("a service that wants a sign-in instead of a key", () => {
+  let id = "";
+  let reader = "";
+  const oauthUrl = () => serviceUrl.replace("/mcp", "/oauth");
+  const back = (state: string, code: string) => fetch(`${s.origin}/v1/mcp/connected?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
+  const connections = async () => (await call("GET", "/v1/app/mcp-connections")).json.connections as (Connection & { signIn: string; needsSignIn: boolean })[];
+
+  it("adding it answers with a link to the service's sign-in page, and keeps nothing yet", async () => {
+    const before = (await connections()).length;
+    const out = await call("POST", "/v1/app/mcp-connections", { name: "Tracker", url: oauthUrl() });
+    expect(out.status, JSON.stringify(out.json)).toBe(200);
+    const link = new URL(String((out.json.signIn as { url: string }).url));
+    expect(link.pathname).toBe("/authorize");
+    expect(link.searchParams.get("redirect_uri")).toBe(`${s.origin}/v1/mcp/connected`);
+    expect(link.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(link.searchParams.get("client_id")).toBe("client-1");
+    // Ambient registered itself as the service's client, with where to send the person back.
+    expect(registered[0]).toMatchObject({ client_name: "Ambient", redirect_uris: [`${s.origin}/v1/mcp/connected`] });
+    expect((await connections()).length).toBe(before);
+
+    // Sent back with a state nobody started, a wrong code, or a refusal: nothing is connected.
+    expect((await back("made-up-state-0123456789abcdef", "good-code")).status).toBe(400);
+    const state = link.searchParams.get("state")!;
+    expect((await fetch(`${s.origin}/v1/mcp/connected?error=access_denied&state=${state}`)).status).toBe(400);
+    const wrong = await back(state, "wrong-code");
+    expect(wrong.status).toBe(400);
+    expect(await wrong.text()).toContain("Not connected");
+    // A state works once: the same one again is refused, even with the right code.
+    expect((await back(state, "good-code")).status).toBe(400);
+    expect((await connections()).length).toBe(before);
+  });
+
+  it("allowed there, it's connected: its tools are known and the sign-in is kept, never shown", async () => {
+    const out = await call("POST", "/v1/app/mcp-connections", { name: "Tracker", url: oauthUrl() });
+    const state = new URL(String((out.json.signIn as { url: string }).url)).searchParams.get("state")!;
+    const done = await back(state, "good-code");
+    expect(done.status).toBe(200);
+    expect(await done.text()).toContain("Tracker is connected");
+    const c = (await connections()).find((x) => x.name === "Tracker")!;
+    expect(c).toMatchObject({ slug: "tracker", signIn: "oauth", needsSignIn: false, hasKey: false, bots: [], amb: false });
+    expect(c.tools.map((t) => t.name)).toEqual(["list_issues"]);
+    expect(JSON.stringify(await connections())).not.toMatch(/at-\d|rt-\d/);
+    id = c.id;
+  });
+
+  it("a bot's run uses it; when the sign-in ran out, Ambient renews it by itself and keeps the new one", async () => {
+    reader = await bot("Reader");
+    await call("PUT", `/v1/app/mcp-connections/${id}/grants`, { bot: reader, on: true });
+    const run = await startRun(reader);
+    expect(JSON.stringify(run)).not.toMatch(/at-\d|rt-\d/);
+    const client = await relay(run.mcp![0]!.path, run.runToken);
+    expect(text(await client.callTool({ name: "list_issues", arguments: {} }))).toBe("2 open issues.");
+    const first = seen.at(-1)!.auth;
+    // The service stops taking that token (it ran out): the next call still works, with a new one.
+    valid.clear();
+    const before = renewals;
+    expect(text(await client.callTool({ name: "list_issues", arguments: {} }))).toBe("2 open issues.");
+    expect(renewals).toBe(before + 1);
+    expect(seen.at(-1)!.auth).not.toBe(first);
+    // The new sign-in was kept: the call after that needs no renewal.
+    expect(text(await client.callTool({ name: "list_issues", arguments: {} }))).toBe("2 open issues.");
+    expect(renewals).toBe(before + 1);
+    await client.close().catch(() => undefined);
+    await hostCall(host, "POST", `/v1/host/runs/${run.run.id}`, { status: "succeeded", summary: "ok" });
+  });
+
+  it("when it can't be renewed, the bot is told, the connection says so, and signing in again mends it", async () => {
+    valid.clear();
+    renewable = false;
+    const run = await startRun(reader);
+    const client = await relay(run.mcp![0]!.path, run.runToken);
+    const failed = await client.callTool({ name: "list_issues", arguments: {} });
+    expect(failed).toMatchObject({ isError: true });
+    expect(text(failed)).toContain("sign-in at Tracker ran out");
+    expect((await connections()).find((x) => x.id === id)).toMatchObject({ needsSignIn: true, bots: [reader] });
+
+    renewable = true;
+    const again = await call("POST", `/v1/app/mcp-connections/${id}/sign-in`);
+    const link = new URL(String((again.json.signIn as { url: string }).url));
+    // The same client as before: Ambient doesn't register itself twice.
+    expect(link.searchParams.get("client_id")).toBe("client-2");
+    expect((await back(link.searchParams.get("state")!, "good-code")).status).toBe(200);
+    const mended = (await connections()).filter((x) => x.name === "Tracker");
+    // Mended in place: the same connection, with who had it.
+    expect(mended).toHaveLength(1);
+    expect(mended[0]).toMatchObject({ id, needsSignIn: false, bots: [reader] });
+    expect(text(await client.callTool({ name: "list_issues", arguments: {} }))).toBe("2 open issues.");
+    await client.close().catch(() => undefined);
+    await hostCall(host, "POST", `/v1/host/runs/${run.run.id}`, { status: "succeeded", summary: "ok" });
+    // A key-connected server has no sign-in to start again.
+    const keyed = (await connections()).find((x) => x.signIn === "key")!;
+    expect((await call("POST", `/v1/app/mcp-connections/${keyed.id}/sign-in`)).status).toBe(400);
   });
 });
