@@ -20,6 +20,8 @@ import { api, type Control } from "../control.ts";
 import type { MasterKey } from "../crypto.ts";
 import type { RoutineKeys } from "../routines/keys.ts";
 import { numbered, type AmbChannel, type OutFile, type Question } from "./reach.ts";
+import { heicToJpeg, isHeic } from "./heic.ts";
+import { AUDIO_BYTES_MAX, isAudio } from "./transcribe.ts";
 
 const LINK = "imessage:link";
 const HANDLE = "imessage:handle";
@@ -46,7 +48,7 @@ const DAY_MS = 24 * 60 * 60_000;
 /** What a text may bring Amb, as its chat takes it: up to 4 files, 10 MB together. */
 const FILES_MAX = 4;
 const FILES_BYTES_MAX = 10 * 1024 * 1024;
-/** The kinds Amb can read: pictures Claude takes, PDFs and text. iPhone's HEIC photos aren't among them yet. */
+/** The kinds Amb can read as they are: pictures Claude takes, PDFs and text. An iPhone's HEIC photo is turned into a JPEG first, a voice memo into text. */
 const READABLE = /^(image\/(jpeg|png|gif|webp)|application\/pdf|application\/json|text\/.+)$/;
 /**
  * How long Amb waits before it writes first again to someone who hasn't answered what it sent
@@ -233,6 +235,8 @@ export class IMessageChannel implements AmbChannel {
       inbox: AmbInbox;
       /** Files a pick in a poll as the decision's answer. Without it, polls aren't sent. */
       answer?: AnswerDecision;
+      /** Turns a voice memo into what was said (channels/transcribe.ts). Without it, voice memos aren't taken. */
+      transcribe?: (bytes: Buffer, type: string) => Promise<string>;
       /** They asked Amb to stop texting: where it writes first goes back to the app. */
       onOptOut?: (uid: string) => Promise<void> | void;
       fetchImpl?: typeof fetch;
@@ -531,37 +535,53 @@ export class IMessageChannel implements AmbChannel {
     return out.json.attachment_id;
   }
 
+  private async download(url: string, max: number): Promise<Buffer> {
+    const res = await (this.d.fetchImpl ?? fetch)(url, { signal: AbortSignal.timeout(60_000) });
+    if (!res.ok) throw new Error(`answered ${res.status}`);
+    const body = Buffer.from(await res.arrayBuffer());
+    if (!body.length || body.length > max) throw new Error("too large");
+    return body;
+  }
+
   /**
-   * The files a text brought, as Amb's chat takes them: fetched from Linq's links (they're good
-   * for an hour), the kinds Amb can read, up to 4 and 10 MB together. `skipped` names the rest.
+   * What a text brought, as Amb's chat takes it. Files are fetched from Linq's links (good for an
+   * hour): the kinds Amb reads as they are, an iPhone's HEIC photo as a JPEG, up to 4 and 10 MB
+   * together. A voice memo becomes what was said (`said`), when a transcriber is set up.
+   * `skipped` names what couldn't be taken.
    */
-  private async fetchFiles(media: { url?: string; filename?: string; mime_type?: string; size_bytes?: number }[]): Promise<{ files: { name: string; type: string; data: string }[]; skipped: string[] }> {
+  private async fetchFiles(media: { url?: string; filename?: string; mime_type?: string; size_bytes?: number }[]): Promise<{ files: { name: string; type: string; data: string }[]; said: string[]; skipped: string[] }> {
     const files: { name: string; type: string; data: string }[] = [];
+    const said: string[] = [];
     const skipped: string[] = [];
     let bytes = 0;
     for (const m of media) {
       const name = (m.filename ?? "file").replace(/[\/\\\0\r\n]/g, "_").slice(0, 200);
       const type = (m.mime_type ?? "").toLowerCase().split(";")[0]!.trim();
-      const declared = m.size_bytes ?? 0;
       // Linq's links are https (tests: the stand-in's own address).
-      const fetchable = !!m.url && (m.url.startsWith("https://") || (!!this.d.apiBase && m.url.startsWith(this.d.apiBase)));
-      if (!fetchable || !m.url || !READABLE.test(type) || files.length >= FILES_MAX || bytes + declared > FILES_BYTES_MAX) {
-        skipped.push(name);
-        continue;
-      }
+      const url = m.url && (m.url.startsWith("https://") || (!!this.d.apiBase && m.url.startsWith(this.d.apiBase))) ? m.url : null;
+      const audio = isAudio(type, name);
+      const heic = isHeic(type, name);
       try {
-        const res = await (this.d.fetchImpl ?? fetch)(m.url, { signal: AbortSignal.timeout(30_000) });
-        if (!res.ok) throw new Error(`answered ${res.status}`);
-        const body = Buffer.from(await res.arrayBuffer());
-        if (!body.length || bytes + body.length > FILES_BYTES_MAX) throw new Error("too large");
+        if (!url) throw new Error("no link");
+        if (audio) {
+          if (!this.d.transcribe) throw new Error("no transcriber");
+          const text = await this.d.transcribe(await this.download(url, AUDIO_BYTES_MAX), type);
+          if (!text) throw new Error("nothing made out");
+          said.push(text);
+          continue;
+        }
+        if ((!heic && !READABLE.test(type)) || files.length >= FILES_MAX) throw new Error("not a kind Amb reads");
+        let body = await this.download(url, 2 * FILES_BYTES_MAX);
+        if (heic) body = await heicToJpeg(body);
+        if (bytes + body.length > FILES_BYTES_MAX) throw new Error("too large");
         bytes += body.length;
-        files.push({ name, type, data: body.toString("base64") });
+        files.push(heic ? { name: name.replace(/\.hei[cf]$/i, "") + ".jpg", type: "image/jpeg", data: body.toString("base64") } : { name, type, data: body.toString("base64") });
       } catch (err) {
-        console.warn(`[imessage] a file wasn't fetched: ${(err as Error).message}`);
-        skipped.push(name);
+        console.warn(`[imessage] a file wasn't taken: ${(err as Error).message}`);
+        skipped.push(audio ? "the voice memo" : name);
       }
     }
-    return { files, skipped };
+    return { files, said, skipped };
   }
 
   /**
@@ -705,17 +725,19 @@ export class IMessageChannel implements AmbChannel {
     }
     await this.heard(uid, link, { chatId, ...seen });
     // Photos, PDFs and text files come along; what Amb can't read here is said, not dropped silently.
-    const { files, skipped } = media.length ? await this.fetchFiles(media) : { files: [], skipped: [] };
-    if (!text && !files.length) {
-      if (skipped.length) await this.text(chatId, "I can't open that here. I read photos (JPEG, PNG), PDFs and text files; for anything else, send it to me in the Ambient app.");
+    // A voice memo is what was said: it joins what was typed, as their message.
+    const { files, said, skipped } = media.length ? await this.fetchFiles(media) : { files: [], said: [], skipped: [] };
+    const message = [text, ...said].filter(Boolean).join("\n\n");
+    if (!message && !files.length) {
+      if (skipped.length) await this.text(chatId, skipped.every((n) => n === "the voice memo") ? "I couldn't take that voice memo here. Type it, or send it again in a minute." : "I can't open that here. I read photos, PDFs, text files and voice memos; for anything else, send it to me in the Ambient app.");
       return;
     }
     void this.call("POST", `/v3/chats/${encodeURIComponent(chatId)}/read`).catch(() => undefined);
     const stopTyping = this.typing(chatId);
     // Some came through and some didn't: said at once, so they know what Amb is answering about.
-    if (skipped.length) await this.text(chatId, `I can't open ${skipped.join(", ")} here (I read photos as JPEG or PNG, PDFs and text files). The Ambient app takes it.`).catch(() => undefined);
+    if (skipped.length) await this.text(chatId, `I can't open ${skipped.join(", ")} here (I read photos, PDFs, text files and voice memos). The Ambient app takes it.`).catch(() => undefined);
     try {
-      await this.d.inbox.sendQueued(uid, await this.d.inbox.nameOf(uid), text, this.kind, files);
+      await this.d.inbox.sendQueued(uid, await this.d.inbox.nameOf(uid), message, this.kind, files);
     } finally {
       stopTyping();
     }

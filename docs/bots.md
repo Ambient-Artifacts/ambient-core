@@ -1229,11 +1229,17 @@ Amb writes first, reach "imessage" ──▶ a text
   answered gets one line saying so. When Linq won't send the poll (the chat fell back to SMS),
   the answers go as numbered text. Polls need iOS 26 on the phone to show as polls.
 - **Photos and files, both ways.** What a text brings is fetched from Linq's links and goes into
-  Amb's chat with the message, as files sent in the app do: pictures as JPEG, PNG, GIF or WebP,
-  PDFs and text files, up to 4 and 10 MB together. Anything else (an iPhone's HEIC photo, a video,
-  a voice memo) isn't opened: a line says so and that the app takes it, and the rest of the message
-  still goes through. What Amb makes with its answer (a picture, a PDF) is uploaded to Linq and
-  sent in the same message; a file that can't be sent is named, with "in the Ambient app".
+  Amb's chat with the message, as files sent in the app do: pictures (JPEG, PNG, GIF, WebP), PDFs
+  and text files, up to 4 and 10 MB together. An iPhone's HEIC photo is turned into a JPEG first
+  (`channels/heic.ts`: in a worker thread, at most 2048 pixels on a side). Anything else (a video)
+  isn't opened: a line says so and that the app takes it, and the rest of the message still goes
+  through. What Amb makes with its answer (a picture, a PDF) is uploaded to Linq and sent in the
+  same message; a file that can't be sent is named, with "in the Ambient app".
+- **A voice memo is what was said.** With a speech-to-text key set (`BRAIN_TRANSCRIBE_API_KEY`,
+  [configuration.md](configuration.md)), a voice memo's audio goes to that service and its text
+  becomes the person's message to Amb, joined to anything they typed with it; Amb answers by
+  text. The audio itself isn't kept. Without a key, or when nothing can be made out, one line
+  says the memo couldn't be taken. Amb doesn't send voice memos.
 - An answer over 3,000 characters is cut, with a line that the rest is in the app.
 - While Amb works on a text the chat is marked read and shows "typing" (best effort).
 - After linking, Amb shares the line's contact card (its name and picture, set up once in Linq's

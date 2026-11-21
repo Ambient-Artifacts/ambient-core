@@ -59,7 +59,7 @@ export async function startStack(
     /** Bots' Slack apps against a stand-in Slack Web API. */
     slackApi?: string;
     /** Amb's iMessage line against a stand-in Linq API. */
-    linq?: { api: string; webhookSecret: string; number?: string };
+    linq?: { api: string; webhookSecret: string; number?: string; transcribeUrl?: string };
     /** How long after a signal Amb looks at a bot (learning.ts). */
     learningAfterMs?: number;
     /** The team brain for teams on their own computer (team-bundle.ts), instead of building it. */
@@ -130,6 +130,7 @@ export async function startStack(
     requireSignInNonce: opts.requireSignInNonce,
     githubApp: opts.githubApp,
     ...(opts.linq ? { linq: { apiKey: "linq-test-key", webhookSecret: opts.linq.webhookSecret, ...(opts.linq.number ? { number: opts.linq.number } : {}) } } : {}),
+    ...(opts.linq?.transcribeUrl ? { transcribe: { apiKey: "stt-test-key", url: opts.linq.transcribeUrl, model: "gpt-4o-transcribe" } } : {}),
   };
 
   // Team server with a copy of the fixture team wiki.

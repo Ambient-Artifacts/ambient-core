@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { exportJWK, generateKeyPair, type JWK } from "jose";
 import type { GitHubAppConfig } from "./bots/github-app.ts";
 import { loadLinq, type LinqConfig } from "./channels/imessage.ts";
+import { loadTranscribe, type TranscribeConfig } from "./channels/transcribe.ts";
 import type { AppleRevokeConfig } from "./auth/apple-revoke.ts";
 import { parseMasterKey, type MasterKey } from "./crypto.ts";
 import { loadMicrosoftConnect, type MicrosoftConnectConfig } from "./microsoft-connect.ts";
@@ -82,6 +83,8 @@ export interface GatewayConfig {
   githubApp?: GitHubAppConfig;
   /** Amb's iMessage line at Linq (channels/imessage.ts), from BRAIN_LINQ_*. None: no iMessage. */
   linq?: LinqConfig;
+  /** Speech-to-text for voice memos (channels/transcribe.ts), from BRAIN_TRANSCRIBE_*. None: voice memos aren't taken. */
+  transcribe?: TranscribeConfig;
 }
 
 export async function generateSigningKey(): Promise<JWK> {
@@ -148,6 +151,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     ambientModel: env.BRAIN_AMBIENT_MODEL || undefined,
     githubApp: loadGitHubApp(env),
     linq: loadLinq(env),
+    transcribe: loadTranscribe(env),
     apns:
       env.BRAIN_APNS_KEY_ID && env.BRAIN_APNS_PRIVATE_KEY
         ? {

@@ -52,6 +52,7 @@ import { Wakes } from "./bots/wakes.ts";
 import { AppChannel } from "./channels/channel.ts";
 import { IMessageChannel } from "./channels/imessage.ts";
 import { AmbReach } from "./channels/reach.ts";
+import { Transcriber } from "./channels/transcribe.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadInstaller, loadRunner, RoutineService } from "./routines/service.ts";
 import { sessionUploadRouter } from "./sessions/route.ts";
@@ -328,7 +329,9 @@ export function createApp(deps: AppDeps) {
     await reach.reply(uid, via, text, made.filter((f): f is NonNullable<typeof f> => f !== null));
   };
   if (config.linq) {
-    const imessage = new IMessageChannel({ control, keys: routineKeys, master: config.masterKey, config: config.linq, inbox: ambient, answer: (uid, id, answer) => answerDecision(uid, id, answer), onOptOut: (uid) => reachBackToApp(uid), fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl, apiBase: deps.linq?.apiBase });
+    // Voice memos become text, when a speech-to-text key is set (channels/transcribe.ts).
+    const transcriber = config.transcribe ? new Transcriber({ config: config.transcribe, fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl }) : undefined;
+    const imessage = new IMessageChannel({ control, keys: routineKeys, master: config.masterKey, config: config.linq, inbox: ambient, answer: (uid, id, answer) => answerDecision(uid, id, answer), onOptOut: (uid) => reachBackToApp(uid), ...(transcriber ? { transcribe: (bytes: Buffer, type: string) => transcriber.transcribe(bytes, type) } : {}), fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl, apiBase: deps.linq?.apiBase });
     folders.imessage = imessage;
     reach.add(imessage);
   }

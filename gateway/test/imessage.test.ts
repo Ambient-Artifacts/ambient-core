@@ -38,6 +38,10 @@ let refuseCode = 2027;
 let uploads = 0;
 /** A 1×1 PNG. */
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+/** A 64×48 HEIC photo, made for this test. */
+const HEIC = Buffer.from("AAAAHGZ0eXBoZWljAAAAAG1pZjFoZWljbWlhZgAAAX1tZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAACJpbG9jAAAAAERAAAEAAQAAAAABoQABAAAAAAAAAJsAAAAjaWluZgAAAAAAAQAAABVpbmZlAgAAAAABAABodmMxAAAAAA5waXRtAAAAAAABAAAA/WlwcnAAAADdaXBjbwAAAHZodmNDAQNwAAAAkAAAAAAAHvAA/P34+AAADwNgAAEAGEABDAH//wNwAAADAJAAAAMAAAMAHroCQGEAAQAqQgEBA3AAAAMAkAAAAwAAAwAeoCCBBZbq5Ka5uAhoMCAAAAMDIAAAAwAhYgABAAZEAcFzwIkAAAATY29scm5jbHgAAQANAAaAAAAAFGlzcGUAAAAAAAAAQAAAAEAAAAAoY2xhcAAAAEAAAAABAAAAMAAAAAEAAAAAAAAAAv////AAAAACAAAAEHBpeGkAAAAAAwgICAAAABhpcG1hAAAAAAAAAAEAAQWBAgMFhAAAAKNtZGF0AAAAlygBrwngPg6bnk4QdLDGLT7Bfo0eRrgROeCsXvMQQXwUPtF+Pd3WdNbc4Jc6+I7W+fjA2sG9LFi30u5j+XSS8bSwBT76HVY8ugUsL6GZLnFzhTtoTKLrdR6w0we1GlkFjknIA2ZQ+aj0xkIWJ67ZViawnDcaMcXwXvRdYNG1ECvK9ysYbbL5gJa9M5eiRNYa6AL7DzF1oOA=", "base64");
+/** What the speech-to-text stand-in makes out. */
+let heard = "Remind me to call Heiko tomorrow about the workshop, and ask Chatty how last night went.";
 let chatHealth = "HEALTHY";
 let lineStatus = "ACTIVE";
 let lineReputation = "HEALTHY";
@@ -65,7 +69,7 @@ async function inbound(from: string, value: string | null, opts: { secret?: Buff
       direction: "inbound",
       chat: { id: CHAT, is_group: opts.group ?? false, owner_handle: { handle: LINE, is_me: true } },
       sender_handle: { handle: from, is_me: false, service: "iMessage" },
-      parts: [...(value !== null ? [{ type: "text", value }] : []), ...(opts.media ? [{ type: "media", id: "m0", url: "https://example.com/IMG_0001.HEIC", filename: "IMG_0001.HEIC", mime_type: "image/heic", size_bytes: 2_000_000 }] : []), ...(opts.files ?? []).map((f, i) => ({ type: "media", id: `m${i + 1}`, ...f }))],
+      parts: [...(value !== null ? [{ type: "text", value }] : []), ...(opts.media ? [{ type: "media", id: "m0", url: "https://example.com/clip.mov", filename: "clip.mov", mime_type: "video/quicktime", size_bytes: 2_000_000 }] : []), ...(opts.files ?? []).map((f, i) => ({ type: "media", id: `m${i + 1}`, ...f }))],
     },
   });
   const ts = String(opts.ts ?? Math.floor(Date.now() / 1000));
@@ -123,11 +127,15 @@ beforeAll(async () => {
       try {
         if (raw) parsed = JSON.parse(raw) as Record<string, unknown>;
       } catch {
-        parsed = { bytes: bytes.length }; // an upload's raw bytes
+        parsed = { bytes: bytes.length, head: bytes.subarray(0, 300).toString("latin1") }; // an upload's raw bytes, or a form
       }
       calls.push({ method: req.method ?? "", path, auth: String(req.headers.authorization ?? ""), body: parsed });
       // Files: a photo someone texted (Linq's download link), and what Amb sends (upload URL, then the bytes).
       if (req.method === "GET" && path === "/files/shot.png") return res.writeHead(200, { "content-type": "image/png" }).end(PNG);
+      if (req.method === "GET" && path === "/files/IMG_0002.HEIC") return res.writeHead(200, { "content-type": "image/heic" }).end(HEIC);
+      if (req.method === "GET" && path === "/files/memo.caf") return res.writeHead(200, { "content-type": "audio/x-caf" }).end(Buffer.from("not really audio"));
+      // The speech-to-text service (OpenAI's transcription API's shape).
+      if (req.method === "POST" && path === "/v1/audio/transcriptions") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ text: heard }));
       if (req.method === "POST" && path === "/v3/attachments") {
         const id = `att-${++uploads}`;
         return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ attachment_id: id, upload_url: `http://127.0.0.1:${(linq.address() as AddressInfo).port}/upload/${id}`, download_url: "https://cdn.example.com/x", http_method: "PUT", expires_at: "2026-11-21T13:00:00Z", required_headers: { "content-type": String(parsed.content_type) } }));
@@ -154,7 +162,7 @@ beforeAll(async () => {
   await new Promise<void>((r) => linq.listen(0, "127.0.0.1", r));
   s = await startStack({
     ambient: { apiKey: "sk-test", fetchImpl: fakeAnthropic },
-    linq: { api: `http://127.0.0.1:${(linq.address() as AddressInfo).port}`, webhookSecret: SECRET, number: LINE },
+    linq: { api: `http://127.0.0.1:${(linq.address() as AddressInfo).port}`, webhookSecret: SECRET, number: LINE, transcribeUrl: `http://127.0.0.1:${(linq.address() as AddressInfo).port}/v1/audio/transcriptions` },
     push: async (_device, message) => {
       pushes.push(message);
       return "sent";
@@ -267,7 +275,7 @@ describe("one conversation, answered where it was asked", () => {
     expect(asked.at(-1)).not.toContain("wrote this on iMessage");
   });
 
-  it("a photo Amb can't read (an iPhone's HEIC) gets a short note, not a turn", async () => {
+  it("a file Amb can't read (a video) gets a short note, not a turn", async () => {
     const before = (await chat()).length;
     await inbound(LENA, null, { media: true });
     expect(texts().at(-1)).toContain("can't open that here");
@@ -285,8 +293,39 @@ describe("one conversation, answered where it was asked", () => {
     // A picture alone is a message too; one Amb can't read beside one it can is said, and the rest goes through.
     const before = texts().length;
     await inbound(LENA, null, { files: [shot], media: true });
-    expect(texts().slice(before)[0]).toContain("I can't open IMG_0001.HEIC here");
+    expect(texts().slice(before)[0]).toContain("I can't open clip.mov here");
     expect(((await call("GET", "/v1/app/ambient/chat?seen=0")).json.messages as { files: unknown[] }[]).at(-2)!.files).toHaveLength(1);
+  });
+
+  it("an iPhone's HEIC photo arrives as a JPEG Amb can see", async () => {
+    const base = `http://127.0.0.1:${(linq.address() as AddressInfo).port}`;
+    await inbound(LENA, "Is this the right cable?", { files: [{ url: `${base}/files/IMG_0002.HEIC`, filename: "IMG_0002.HEIC", mime_type: "image/heic", size_bytes: HEIC.length }] });
+    expect(asked.at(-1)).toContain('"media_type":"image/jpeg"');
+    const all = (await call("GET", "/v1/app/ambient/chat?seen=0")).json.messages as { role: string; files: { name: string; type: string }[] }[];
+    expect(all.at(-2)).toMatchObject({ role: "user", files: [{ name: "IMG_0002.jpg", type: "image/jpeg" }] });
+  });
+
+  it("a voice memo is what was said: Amb gets it as their message and answers by text", async () => {
+    const base = `http://127.0.0.1:${(linq.address() as AddressInfo).port}`;
+    const memo = { url: `${base}/files/memo.caf`, filename: "Audio Message.caf", mime_type: "audio/x-caf", size_bytes: 16 };
+    const before = texts().length;
+    await inbound(LENA, null, { files: [memo] });
+    const stt = calls.filter((c) => c.path === "/v1/audio/transcriptions").at(-1)!;
+    expect(stt.auth).toBe("Bearer stt-test-key");
+    expect(String(stt.body.head)).toContain("gpt-4o-transcribe");
+    expect(asked.at(-1)).toContain("Remind me to call Heiko tomorrow");
+    const all = await chat();
+    expect(all.at(-2)).toMatchObject({ role: "user", via: "imessage", text: heard });
+    expect(texts().length).toBe(before + 1);
+    // Typed words and a memo together are one message; a memo nothing can be made out of is said.
+    await inbound(LENA, "Also:", { files: [memo] });
+    expect((await chat()).at(-2)!.text).toBe(`Also:\n\n${heard}`);
+    heard = "";
+    const chatBefore = (await chat()).length;
+    await inbound(LENA, null, { files: [memo] });
+    expect(texts().at(-1)).toContain("couldn't take that voice memo");
+    expect((await chat()).length).toBe(chatBefore);
+    heard = "Back to normal.";
   });
 
   it("what Amb made goes back with its answer", async () => {

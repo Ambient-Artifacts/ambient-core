@@ -16,7 +16,9 @@
     "@modelcontextprotocol/sdk": "^1.32.1",
     "convex": "^1.46.0",
     "express": "^5.2.1",
+    "heic-decode": "^2.1.0",
     "jose": "^6.2.12",
+    "jpeg-js": "^0.4.4",
     "oauth4webapi": "3.8.8",
     "oidc-provider": "^9.12.2",
     "zod": "^4.6.5"
