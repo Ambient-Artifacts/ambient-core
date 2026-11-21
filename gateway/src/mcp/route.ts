@@ -1,11 +1,18 @@
 import express, { type NextFunction, type Request, type Response, type Router } from "express";
 import type { SettingsService } from "../team-admin.ts";
+import type { Voices } from "../voices.ts";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AuthError, type Principal, type ResourceTarget, type createBearerVerifier } from "../auth/bearer.ts";
 import type { RoutineService } from "../routines/service.ts";
+import type { BotService } from "../bots/service.ts";
+import type { AdminService } from "../bots/admin.ts";
+import type { DecisionService } from "../bots/decisions.ts";
+import type { Folders } from "../bots/files.ts";
 import { personalInstructions } from "./context.ts";
 import { buildMcpServer, type ReaderSource } from "./tools.ts";
 import { addressKey, strikes } from "../limiter.ts";
+import type { PeopleService } from "../people.ts";
+import type { UpkeepState } from "../upkeep.ts";
 
 export const MCP_SCOPES = ["personal:read", "personal:write", "team:read", "team:write"];
 export const TEAM_MCP_SCOPES = ["team:read", "team:write"];
@@ -38,10 +45,20 @@ export function mcpRouter(deps: {
   verify: ReturnType<typeof createBearerVerifier>;
   readers: ReaderSource;
   routines?: RoutineService;
+  bots?: BotService;
+  admin?: AdminService;
+  decisions?: DecisionService;
+  folders?: Folders;
   settings?: SettingsService;
+  voices?: Voices;
   version: string;
   /** The user's name, for the instructions an app gets when it connects. */
   userName?: (uid: string) => Promise<string | undefined>;
+  /** A bot's run signing in with its run token (bot-principal.ts); null for any other token. */
+  botPrincipal?: (authorization: string | undefined, target: ResourceTarget) => Promise<Principal | null>;
+  /** Teams and the person's profile, and their upkeep (account-tools.ts). */
+  people?: PeopleService;
+  upkeep?: (uid: string) => Promise<UpkeepState>;
 }): Router {
   const router = express.Router();
 
@@ -83,7 +100,9 @@ export function mcpRouter(deps: {
     }
     try {
       const proof = req.headers.dpop;
-      res.locals.principal = await deps.verify(req.headers.authorization, where.target, { method: req.method, proof: typeof proof === "string" ? proof : undefined });
+      res.locals.principal =
+        (await deps.botPrincipal?.(req.headers.authorization, where.target)) ??
+        (await deps.verify(req.headers.authorization, where.target, { method: req.method, proof: typeof proof === "string" ? proof : undefined }));
     } catch (err) {
       if (!(err instanceof AuthError)) return next(err);
       if (err.strike) failures.add(address);
@@ -104,7 +123,7 @@ export function mcpRouter(deps: {
     const personal = connecting
       ? await personalInstructions(principal, deps.readers, { name: await deps.userName?.(principal.uid).catch(() => undefined) })
       : null;
-    const server = buildMcpServer({ principal, readers: deps.readers, routines: deps.routines, settings: deps.settings, version: deps.version, personal });
+    const server = buildMcpServer({ principal, readers: deps.readers, routines: deps.routines, bots: deps.bots, admin: deps.admin, decisions: deps.decisions, folders: deps.folders, settings: deps.settings, voices: deps.voices, people: deps.people, upkeep: deps.upkeep, userName: deps.userName, version: deps.version, personal });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       void transport.close();

@@ -4,19 +4,25 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkHealth } from "../src/worker/health.ts";
-import { appCall, signIn, startStack, type Stack } from "./helpers.ts";
+import { appCall, INVITE, signIn, startStack, type Stack } from "./helpers.ts";
 
 let s: Stack;
 let owner: string;
 let ownerUid: string;
 
 beforeAll(async () => {
+  // These tests are about Ambient's pool of hosted servers (self-hosting with spare servers); new
+  // teams otherwise run on their own computer (team-computer.test.ts).
+  process.env.BRAIN_TEAM_POOL = "true";
   s = await startStack();
   const signedIn = await signIn(s, "apple-owner", "Lena Vogel");
   owner = signedIn.access_token;
   ownerUid = signedIn.user.uid;
 });
-afterAll(() => s.close());
+afterAll(() => {
+  delete process.env.BRAIN_TEAM_POOL;
+  s.close();
+});
 
 describe("teams from the app", () => {
   let code: string;
@@ -24,7 +30,7 @@ describe("teams from the app", () => {
   let maya: string;
 
   it("creates a team on the free pool server, which then serves it", async () => {
-    const health = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() }) });
+    const health = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() }), poolInUse: true });
     expect(health.problems).toEqual([]);
 
     const made = await appCall(s, owner, "POST", "/v1/app/teams", { name: "Ambient Artifacts" });
@@ -39,11 +45,19 @@ describe("teams from the app", () => {
     expect(q.status).toBe(200);
   });
 
-  it("says so when the pool is empty, and the health check flags it", async () => {
+  it("keeps a person to one team: a second is refused, with what to do", async () => {
     const again = await appCall(s, owner, "POST", "/v1/app/teams", { name: "Second Team" });
+    expect(again.status).toBe(409);
+    expect(again.json).toMatchObject({ error: "one_team" });
+    expect(String(again.json.message)).toContain("You're in Ambient Artifacts already");
+  });
+
+  it("says so when the pool is empty, and the health check flags it", async () => {
+    const other = (await signIn(s, "apple-second-owner", "Jonas Berg")).access_token;
+    const again = await appCall(s, other, "POST", "/v1/app/teams", { name: "Second Team" });
     expect(again.status).toBe(503);
     expect(again.json.error).toBe("no_server");
-    const health = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() }) });
+    const health = await checkHealth({ control: s.control, gatewayUrl: s.origin, unit: async () => ({ result: "success", lastRunAt: Date.now() }), poolInUse: true });
     expect(health.problems.map((p) => p.key)).toContain("pool:empty");
   });
 
@@ -101,5 +115,18 @@ describe("teams from the app", () => {
     const rows = await s.t.run(async (ctx) => ctx.db.query("invites").collect());
     const made = rows.filter((r) => r.codeHash.startsWith("h1:"));
     expect(made.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("one team per person", () => {
+  it("joining another team is refused; joining your own again is fine", async () => {
+    // The owner is in Ambient Artifacts; ACME's invite is for another team.
+    const other = await appCall(s, owner, "POST", "/v1/app/teams/join", { code: INVITE });
+    expect(other.status).toBe(409);
+    expect(other.json).toMatchObject({ error: "one_team" });
+    const fresh = (await signIn(s, "apple-one-team", "Ida Kern")).access_token;
+    expect((await appCall(s, fresh, "POST", "/v1/app/teams/join", { code: INVITE })).status).toBe(200);
+    expect((await appCall(s, fresh, "POST", "/v1/app/teams/join", { code: INVITE })).status).toBe(200);
+    expect((await appCall(s, fresh, "POST", "/v1/app/teams", { name: "Ida's Team" })).json).toMatchObject({ error: "one_team" });
   });
 });

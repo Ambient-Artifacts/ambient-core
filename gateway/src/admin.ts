@@ -3,7 +3,9 @@
 //   node --import tsx gateway/src/admin-cli.ts user add you@example.com --name "You"
 // (in Docker: `docker compose exec gateway admin …`). Everything goes through the same
 // services the app API uses, so the rules (scopes, team servers, encryption) are the same.
-import { slugify } from "@brain/spec";
+import { createHash } from "node:crypto";
+import { BOT_COLORS, BOT_SHAPES, slugify } from "@brain/spec";
+import { BotFolder } from "./bots/folder.ts";
 import { HasContent } from "@brain/wiki";
 import { Pairing } from "./auth/pairing.ts";
 import { PatService } from "./auth/pats.ts";
@@ -51,6 +53,12 @@ Teams
   server add <server-id> <url>
       Put a team server in the pool (the Docker setup does this for its own).
 
+GitHub
+  github-app new <builder|reviewer|wiki_keeper> --account <org-or-user> [--name <name>]
+      A link to make a template role's GitHub App, each its own GitHub user with just its role's
+      access. Open it, tap Create on GitHub: done. Names are unique across GitHub: by default
+      "Ambient Reviewer (<account>)"; --name sets it.
+
 Wikis in your own git repo (https; the access token comes on stdin, e.g. < token.txt)
   repo <email> <url> [--existing]
       Keep the user's personal wiki in step with their repo (synced every 15 minutes).
@@ -61,6 +69,17 @@ Wikis in your own git repo (https; the access token comes on stdin, e.g. < token
   team ignore <slug> [<path>...] [--clear]
       Folders and files of the team's repo that aren't knowledge (templates, scripts, a README):
       they stay out of the brain. Without paths: what's left out now. --clear: nothing is.
+
+Bots
+  bots adopt-loops <email> [--team <slug>] [--dry-run]
+      With bots, every loop is a bot: turn the person's plain loops (or, with --team, the team's,
+      as that person, who must own or admin it) into bots that run exactly as before: on the
+      computer itself, with all of the owner's keys, reporting news. Safe to run again.
+
+Work sessions
+  sessions retry
+      Work sessions that ran out of attempts (an outage, a key out of credit) are summarized
+      again, each on its person's computer.
 `;
 
 export class AdminError extends Error {}
@@ -76,7 +95,13 @@ export interface AdminDeps {
 
 type Flags = Record<string, string | true>;
 /** Flags that stand alone; every other flag takes a value. */
-const SWITCHES = ["upkeep", "claude-code", "help", "existing", "read-only", "clear"];
+const SWITCHES = ["upkeep", "claude-code", "help", "existing", "read-only", "clear", "dry-run"];
+
+/** A face and colour for a loop that becomes a bot, picked from its id: the same every run. */
+export function adoptedLook(id: string): { face: (typeof BOT_SHAPES)[number]; color: (typeof BOT_COLORS)[number] } {
+  const h = createHash("sha256").update(id).digest();
+  return { face: BOT_SHAPES[h[0]! % BOT_SHAPES.length]!, color: BOT_COLORS[h[1]! % BOT_COLORS.length]! };
+}
 
 function parse(args: string[]): { words: string[]; flags: Flags } {
   const words: string[] = [];
@@ -118,7 +143,8 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
   const findUser = async (ref: string | undefined) => {
     const out = await d.control.q(api.admin.findUser, { ref: need(ref, "The user's email") });
     if (out.matches > 1) throw new AdminError(`${out.matches} accounts have the email ${ref}. Use the user id from \`admin list\`.`);
-    if (!out.user) throw new AdminError(`No account for ${ref}. Make one with: admin user add ${ref}`);
+    // Only Apple's and admin-entered emails identify an account (control/convex/admin.ts, lookup).
+    if (!out.user) throw new AdminError(`No account for ${ref}. Accounts that signed in with Microsoft or Google are found by their id (admin list), not by email. To make one: admin user add ${ref}`);
     return out.user;
   };
 
@@ -187,6 +213,53 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     ].join("\n");
   }
 
+  // Work sessions that ran out of attempts (an outage, a key out of credit) get them back.
+  if (cmd === "sessions" && sub === "retry") {
+    const n = await d.control.m(api.sessions.unstick, { now: Date.now() });
+    return n ? `${n} work session(s) will be summarized again, each on its person's computer.` : "No work session had run out of attempts.";
+  }
+
+  // Loops become bots (docs/bots.md, "Loops are bots"): each keeps how it runs today.
+  if (cmd === "bots" && sub === "adopt-loops") {
+    const u = await findUser(words[2]);
+    const slug = text(flags, "team");
+    const dry = flags["dry-run"] === true;
+    const personal = new PersonalStore(d.control, d.config.masterKey);
+    const keys = new RoutineKeys({ control: d.control, personal, master: d.config.masterKey });
+    const folder = new BotFolder({ control: d.control, keys });
+    const routines = new RoutineService({ control: d.control, keys, codes: new CodeHasher(d.config.masterKey), origin, folder });
+    const teams = await new Directory(d.control, 0).teamsOf(u.uid);
+    if (slug && !teams.some((t) => t.slug === slug)) throw new AdminError(`${u.name} isn't in a team "${slug}".`);
+    const actor = { uid: u.uid, teams, personal: true, canWritePersonal: true, canWriteTeams: true };
+    const all = (await routines.list(actor)).routines.filter((r) => (slug ? r.team?.slug === slug : r.team === null));
+    const loops = all.filter((r) => r.bot === null);
+    if (!loops.length) return `${slug ? `The team "${slug}"` : u.name} has no plain loops left (${all.length} bot(s)).`;
+    const owner = slug ? `team ${slug}` : u.name;
+    const lines: string[] = [];
+    for (const r of loops) {
+      const where = r.team ? `${r.team.name}'s server` : r.computer ? r.computer.name : null;
+      if (!where) {
+        lines.push(`  skipped: "${r.name}" (${owner}): no computer, so it never runs; pick one in the app first.`);
+        continue;
+      }
+      if (dry) {
+        lines.push(`  would become a bot: "${r.name}" (${owner}), on ${where}, on the computer itself, all of the owner's keys, news only${r.enabled ? "" : ", paused"}.`);
+        continue;
+      }
+      const look = adoptedLook(r.id);
+      try {
+        await routines.update(actor, r.id, { bot: { ...look, runtime: "claude-code", isolation: "host", secrets: null, report: "news" } }, "admin:adopt-loops");
+        // Its prompt is its AGENTS.md: the first version, so later changes can be undone to it.
+        const teamId = slug ? teams.find((t) => t.slug === slug)!.id : null;
+        await folder.recordAgents(teamId ? { kind: "team", teamId } : { kind: "user", uid: u.uid }, r.id, r.prompt, null, { kind: "user", name: null }, "was a loop");
+        lines.push(`  now a bot: "${r.name}" (${owner}), on ${where}.`);
+      } catch (err) {
+        lines.push(`  not changed: "${r.name}" (${owner}): ${(err as Error).message}`);
+      }
+    }
+    return [`${dry ? "Dry run, nothing changed" : "Loops to bots"} for ${owner}:`, ...lines].join("\n");
+  }
+
   if (cmd === "computer-code") {
     const u = await findUser(sub);
     const personal = new PersonalStore(d.control, d.config.masterKey);
@@ -198,7 +271,7 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     });
     const teams = await new Directory(d.control, 0).teamsOf(u.uid);
     const out = await routines.addComputer({ uid: u.uid, teams, personal: true, canWritePersonal: true, canWriteTeams: true }, text(flags, "name") ?? "Server");
-    return [`Setup code for ${u.name}'s computer "${out.computer.name}", valid 30 minutes. On that computer (Linux, systemd, Claude Code signed in):`, out.commands].join("\n");
+    return [`Setup code for ${u.name}'s computer "${out.computer.name}", valid 30 minutes. On that computer (Linux with systemd), as root:`, out.commands].join("\n");
   }
 
   if (cmd === "team" && sub === "create") {
@@ -209,10 +282,12 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
       name,
       peopleSlug: `people/${slugify(owner.name) || "member"}`,
       now: now(),
+      pool: true,
     });
-    if (!made.ok) {
-      if (made.error === "no_server") throw new AdminError("No free team server. Start one and add it with: admin server add <server-id> <url>");
-      throw new AdminError("Give the team a name.");
+    if (!made.ok || !made.server) {
+      if (!made.ok && made.error === "one_team") throw new AdminError(`${owner.name} is in ${(made as { team?: string }).team ?? "a team"} already, and a person is in one team.`);
+      if (!made.ok && made.error !== "no_server") throw new AdminError("Give the team a name.");
+      throw new AdminError("No free team server. Start one and add it with: admin server add <server-id> <url>");
     }
     const link = new TeamLink(origin, d.config.signingKeys[0]!, d.fetchImpl, (team) => new Revisions(d.control).teamChanged(team.id));
     try {
@@ -306,6 +381,18 @@ export async function runAdmin(args: string[], d: AdminDeps): Promise<string> {
     const next = [...rules.filter((r) => r.match !== match), { match, team: slug }];
     await d.control.m(api.sessions.setRules, { uid: u.uid, rules: next });
     return `${u.name}'s work sessions in ${match} now go to ${slug} (after the 30-minute hold). Rules: ${next.map((r) => `${r.match} → ${r.team}`).join(", ")}`;
+  }
+
+  if (cmd === "github-app" && sub === "new") {
+    const role = need(words[2], "The role (builder, reviewer or wiki_keeper)");
+    const account = typeof flags.account === "string" ? flags.account : "";
+    if (!account) throw new AdminError("Say whose GitHub account it's made under: --account <org-or-user>.");
+    const { GitHubApps } = await import("./bots/github-apps.ts");
+    const apps = new GitHubApps({ control: d.control, keys: undefined as never, master: d.config.masterKey, origin, github: undefined as never, apiBase: d.config.githubApp?.apiBase });
+    const url = await apps.roleAppUrl(role as never, account, typeof flags.name === "string" ? flags.name : undefined).catch((err: Error) => {
+      throw new AdminError(err.message);
+    });
+    return `Open this within an hour and tap Create on GitHub (it's made under ${account}):\n${url}`;
   }
 
   if (cmd === "server" && sub === "add") {

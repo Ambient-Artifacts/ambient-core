@@ -127,5 +127,8 @@ describe("team repo", () => {
 
     expect((await appCall(s, lena, "DELETE", "/v1/app/teams/acme/repo")).status).toBe(204);
     expect((await appCall(s, lena, "GET", "/v1/app/teams/acme/repo")).json.repo).toBeNull();
+
+    // Connected again, to a repo that shares the wiki's history: still asked who keeps it.
+    expect(await appCall(s, lena, "POST", "/v1/app/teams/acme/repo", { url, token: "t" })).toMatchObject({ status: 409, json: { error: "has_content" } });
   });
 });

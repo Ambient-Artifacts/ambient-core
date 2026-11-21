@@ -31,7 +31,8 @@ if ! command -v gh >/dev/null; then
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
   apt-get update -qq
 fi
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh python3-pil webp >/dev/null
+# podman: bots that run in their own container (docs/bots.md); the runner builds their image.
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh python3-pil webp podman >/dev/null
 
 su - routines -c 'test -x ~/.local/bin/claude || curl -fsSL https://claude.ai/install.sh | bash' >/dev/null
 su - routines -c 'git config --global credential.https://github.com.helper "!gh auth git-credential"

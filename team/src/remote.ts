@@ -172,12 +172,14 @@ export class TeamRemote {
     if (!info.empty) {
       await g(["fetch", "-q", "origin", info.branch], true);
       const shared = await g(["merge-base", "HEAD", "FETCH_HEAD"]).then(() => true, () => false);
+      const files = (await g(["ls-tree", "-r", "--name-only", "FETCH_HEAD"])).split("\n").filter(Boolean);
+      // Shared history is a reconnect, but not a way to keep it: the repo may be one another tool
+      // keeps. Until someone says how (a mode, or `existing`), ask, as for any repo with files.
+      if (!opts.existing && (!shared || opts.mode === undefined)) {
+        await forget();
+        throw HasContent.of(files);
+      }
       if (!shared) {
-        const files = (await g(["ls-tree", "-r", "--name-only", "FETCH_HEAD"])).split("\n").filter(Boolean);
-        if (!opts.existing) {
-          await forget();
-          throw HasContent.of(files);
-        }
         if (adopt) {
           const notes = (await g(["ls-files", "--", "notes"])).trim();
           if (notes) {

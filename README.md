@@ -21,7 +21,7 @@ This repository is Ambient's server: the MCP gateway, the personal and team wiki
 
 ## ✨ Features
 
-- **One MCP server for every AI app.** OAuth 2.1 with dynamic client registration for Claude, ChatGPT and other MCP clients; personal access tokens for the rest. Tools: `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items`, `transcript`, `save_note` and `log_work`.
+- **One MCP server for every AI app.** OAuth 2.1 with dynamic client registration for Claude, ChatGPT and other MCP clients; personal access tokens for the rest. Tools: `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items`, `transcript`, `save_note`, `log_work` and `suggest_correction`.
 - **Personal wikis, encrypted at rest.** Each user's pages are sealed with their own data key (AES-256-GCM) before they reach the database. The key that wraps those keys never leaves the gateway.
 - **Team wikis in git.** Each team's wiki is a git repository on the team's own server: plain markdown with front matter, one commit per change. Connect your own GitHub or GitLab repo and the wiki stays in step with it, both ways.
 - **Work sessions become notes.** The [Claude Code plugin](integrations/claude-code) sends finished sessions; the gateway cuts them down, strips secrets in the formats it knows, and Claude writes a short note. Folder rules route sessions to a team after a 30-minute hold.

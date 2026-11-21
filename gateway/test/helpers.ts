@@ -48,6 +48,24 @@ export async function startStack(
     /** Ambient's Microsoft app against a fake Microsoft; `microsoftFetch` also serves the team server's Graph calls. */
     microsoftConnect?: { connector: MicrosoftConnector; propagationDelayMs?: number };
     microsoftFetch?: typeof fetch;
+    /** Ambient's chat against a fake Anthropic (no heartbeat timer in tests). */
+    ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number };
+    /** How long after a change bots are mirrored into git (tests: short; `idle()` waits). */
+    mirrorDelayMs?: number;
+    /** GitHub's events on one PR are gathered this long before they wake its bot. */
+    githubBatchMs?: number;
+    /** Ambient's GitHub App, against a stand-in GitHub API (`apiBase`). */
+    githubApp?: import("../src/bots/github-app.ts").GitHubAppConfig;
+    /** Bots' Slack apps against a stand-in Slack Web API. */
+    slackApi?: string;
+    /** MCP connections may point at a stand-in server on 127.0.0.1. */
+    mcpLocal?: boolean;
+    /** Amb's iMessage line against a stand-in Linq API. */
+    linq?: { api: string; webhookSecret: string; number?: string; transcribeUrl?: string };
+    /** How long after a signal Amb looks at a bot (learning.ts). */
+    learningAfterMs?: number;
+    /** The team brain for teams on their own computer (team-bundle.ts), instead of building it. */
+    teamBundle?: () => Promise<import("../src/team-bundle.ts").TeamBundle>;
   } = {},
 ) {
   const serviceSecret = randomBytes(24).toString("hex");
@@ -112,6 +130,9 @@ export async function startStack(
     allowFileRepos: true,
     signups: opts.signups,
     requireSignInNonce: opts.requireSignInNonce,
+    githubApp: opts.githubApp,
+    ...(opts.linq ? { linq: { apiKey: "linq-test-key", webhookSecret: opts.linq.webhookSecret, ...(opts.linq.number ? { number: opts.linq.number } : {}) } } : {}),
+    ...(opts.linq?.transcribeUrl ? { transcribe: { apiKey: "stt-test-key", url: opts.linq.transcribeUrl, model: "gpt-4o-transcribe" } } : {}),
   };
 
   // Team server with a copy of the fixture team wiki.
@@ -150,10 +171,10 @@ export async function startStack(
   await t.mutation(internal.teams.registerServer, { serverId: "pool-1", url: poolUrl });
 
   // convex-test's generic signatures don't line up with ConvexHttpClient's; the runtime shape does.
-  const call = t as unknown as { query: (f: unknown, a: unknown) => Promise<never>; mutation: (f: unknown, a: unknown) => Promise<never> };
+  const call = t as unknown as { query: (f: unknown, a: unknown) => Promise<never>; mutation: (f: unknown, a: unknown) => Promise<never>; action: (f: unknown, a: unknown) => Promise<never> };
   const stack = createApp({
     config,
-    convex: { query: (fn, args) => call.query(fn, args), mutation: (fn, args) => call.mutation(fn, args) },
+    convex: { query: (fn, args) => call.query(fn, args), mutation: (fn, args) => call.mutation(fn, args), action: (fn, args) => call.action(fn, args) },
     apple: appleVerifier([BUNDLE_ID], { keys: [appleJwk] }),
     revisionPollMs: opts.revisionPollMs,
     streamMaxMs: opts.streamMaxMs,
@@ -161,6 +182,14 @@ export async function startStack(
     microsoft: microsoftVerifier([MICROSOFT_CLIENT], { keys: [microsoftJwk] }),
     google: googleVerifier([GOOGLE_CLIENT], { keys: [googleJwk] }),
     microsoftConnect: opts.microsoftConnect ? { ...opts.microsoftConnect, fetchImpl: opts.microsoftFetch } : undefined,
+    ambient: { ...opts.ambient, noHeartbeat: true },
+    mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
+    githubBatchMs: opts.githubBatchMs ?? 60_000,
+    ...(opts.slackApi ? { slack: { apiBase: opts.slackApi } } : {}),
+    ...(opts.mcpLocal ? { mcpConnections: { allowLocal: true } } : {}),
+    ...(opts.linq ? { linq: { apiBase: opts.linq.api } } : {}),
+    learning: { reviewAfterMs: opts.learningAfterMs ?? 60_000 },
+    teamBundle: opts.teamBundle,
   });
   gatewayServer.on("request", stack.app);
 
@@ -172,6 +201,7 @@ export async function startStack(
     config,
     teamId: String(teamId),
     teamServer,
+    teamWiki: wiki,
     dataDir,
     poolDir,
     appleToken,
@@ -183,9 +213,16 @@ export async function startStack(
     teams: stack.teams,
     notifier: stack.notifier,
     sessions: stack.sessions,
+    pats: stack.pats,
     revisions: stack.revisions,
     events: stack.events,
     microsoftConnect: stack.microsoftConnect,
+    bots: stack.bots,
+    ambient: stack.ambient,
+    decisions: stack.decisions,
+    heartbeat: stack.heartbeat,
+    folders: stack.folders,
+    automations: stack.automations,
     graphTokens,
     deliverer,
     close: async () => {
@@ -323,6 +360,12 @@ export async function appCall(stack: Stack, token: string, method: string, path:
   });
   const text = await res.text();
   return { status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
+}
+
+/** As appCall, the answer as it is (a file's bytes and headers). */
+export async function appRaw(stack: Stack, token: string, method: string, path: string): Promise<Response> {
+  const url = `${stack.origin}${path}`;
+  return fetch(url, { method, headers: await appHeaders(token, method, url) });
 }
 
 /** The fixture personal wiki as sync ops. */

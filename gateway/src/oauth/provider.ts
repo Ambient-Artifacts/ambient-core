@@ -41,6 +41,25 @@ export function parseResource(origin: string, resource: string): { path: string;
   return m ? { path: `/t/${m[1]}/mcp`, teamSlug: m[1]! } : null;
 }
 
+const LOOPBACKS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Redirect URIs for clients that register themselves (docs/connect-agents.md): a client with an
+ * `http://` redirect on a loopback host (Claude Code, Codex, Cursor, VS Code) is a native app, so
+ * its redirect matches on any port (RFC 8252 §7.3: they pick a free port each time they sign in);
+ * every other redirect must be https. Plain http to any other host is refused at registration.
+ * Runs for every client oidc-provider reads, also ones registered before this rule: an old
+ * loopback client becomes native the next time it's loaded.
+ */
+export function redirectPolicy(metadata: { application_type?: string; redirect_uris?: string[] }, registering: boolean) {
+  const uris = metadata.redirect_uris ?? [];
+  const parsed = uris.map((u) => URL.parse(u));
+  if (registering && parsed.some((u) => u && u.protocol === "http:" && !LOOPBACKS.has(u.hostname))) {
+    throw new errors.InvalidClientMetadata("redirect_uris: plain http is only for this computer (localhost, 127.0.0.1, [::1]); use https");
+  }
+  if (parsed.some((u) => u && u.protocol === "http:" && LOOPBACKS.has(u.hostname))) metadata.application_type = "native";
+}
+
 export function createProvider(cfg: GatewayConfig, directory: Directory, control: Control): Provider {
   const configuration: Configuration = {
     adapter: convexAdapterFactory(control, cfg.masterKey),
@@ -56,6 +75,13 @@ export function createProvider(cfg: GatewayConfig, directory: Directory, control
         dpop_bound_access_tokens: true,
       },
     ],
+    // Not a field anyone sends: its validator is the hook where redirectPolicy runs on each client.
+    extraClientMetadata: {
+      properties: ["ambient_redirect_policy"],
+      validator: (ctx, key, _value, metadata) => {
+        if (key === "ambient_redirect_policy") redirectPolicy(metadata as never, ctx?.oidc?.route === "registration");
+      },
+    },
     clientDefaults: {
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],

@@ -52,8 +52,9 @@ function cleanBody(md: string): string {
 export function notePath(note: TeamNoteV1, title: string): string {
   const date = note.recorded_at.slice(0, 10);
   const id6 = note.note_id.slice(-6).toLowerCase();
-  // Work sessions with AI agents have their own folder; notes/ is recorded conversations.
-  return `${note.kind === "session" ? "sessions" : "notes"}/${date.slice(0, 7)}/${date}-${slugify(title) || "note"}-${id6}.md`;
+  // Work sessions with AI agents and corrections have their own folders; notes/ is recorded conversations.
+  const folder = note.kind === "session" ? "sessions" : note.kind === "correction" ? "corrections" : "notes";
+  return `${folder}/${date.slice(0, 7)}/${date}-${slugify(title) || "note"}-${id6}.md`;
 }
 
 export interface IngestResult {
@@ -151,7 +152,8 @@ export async function ingestNote(
   // Another tool keeps the wiki, or the team's own pipeline writes its meeting notes from the
   // transcripts: Ambient adds no page for this note, and only its files go out. (Read-only, a
   // transcript kept here would be out of reach: the MCP finds transcripts through their note.)
-  const ownNotes = settings.notes.by === "own" && note.kind !== "session";
+  // A correction has no transcript and is for whoever keeps the page: always filed, like a session.
+  const ownNotes = settings.notes.by === "own" && note.kind !== "session" && note.kind !== "correction";
   if (opts.readOnly || ownNotes) {
     if (!files.length) throw new IngestError(409, opts.readOnly ? "read_only" : "no_transcript_destination");
     const where = (f: DestinationFile) => (f.kind === "transcript" && settings.transcripts.kind === "repo" ? wiki.place(`${settings.transcripts.folder}/${f.file}`) : `drive:${f.file}`);
@@ -185,9 +187,22 @@ export async function ingestNote(
   const index = new EntityIndex(wiki.store);
   const recorder = recordedBy ? { ref: recordedBy, name: note.recorded_by_name ?? null } : undefined;
   const canon = (v: unknown) => [...new Set(refs(v).map((r) => index.canonical(r, { recorder })).filter((r): r is string => r !== null))];
-  const people = canon(fm.people);
-  if (recordedBy && !people.includes(recordedBy)) people.unshift(recordedBy);
+  // A correction is about the pages it names, never a new one, and not about the person who sent it.
+  const correction = note.kind === "correction";
+  const linked = (v: unknown) => (correction ? canon(v).filter((r) => wiki.store.getByRef(r)) : canon(v));
+  const people = linked(fm.people);
+  if (recordedBy && !correction && !people.includes(recordedBy)) people.unshift(recordedBy);
 
+  // A correction is the person's own words: nothing compiled it.
+  const compiled = correction
+    ? null
+    : note.client.compiler === "extractive"
+      ? { engine: "fm-ondevice", status: "partial", fallback: "extractive" }
+      : note.client.compiler === "session-summary"
+        ? { engine: "server", status: "compiled", fallback: "none" }
+        : note.client.compiler === "fm-pcc"
+          ? { engine: "fm-pcc", status: "compiled", fallback: "none" }
+          : { engine: "fm-ondevice", status: "compiled", fallback: "none" };
   const frontmatter: Record<string, unknown> = {
     id: note.note_id,
     type: "note",
@@ -202,18 +217,12 @@ export async function ingestNote(
     ...(recordedBy ? { recorded_by: recordedBy } : {}),
     consent: note.consent,
     people,
-    orgs: canon(fm.orgs),
-    projects: canon(fm.projects),
-    topics: canon(fm.topics),
+    orgs: linked(fm.orgs),
+    projects: linked(fm.projects),
+    topics: linked(fm.topics),
     ...(work(fm.work) ? { work: work(fm.work) } : {}),
     ...(rawPath ? { raw: rawPath } : {}),
-    compile: note.client.compiler === "extractive"
-      ? { engine: "fm-ondevice", status: "partial", fallback: "extractive" }
-      : note.client.compiler === "session-summary"
-        ? { engine: "server", status: "compiled", fallback: "none" }
-        : note.client.compiler === "fm-pcc"
-          ? { engine: "fm-pcc", status: "compiled", fallback: "none" }
-          : { engine: "fm-ondevice", status: "compiled", fallback: "none" },
+    ...(compiled ? { compile: compiled } : {}),
     updated: today,
   };
   const parsed = NoteFrontmatter.safeParse(frontmatter);
