@@ -18,6 +18,22 @@ export interface AmbChannel {
   linked(uid: string): Promise<boolean>;
   /** Sends Amb's text there (in the channel's own form). Throws when it can't. */
   send(uid: string, text: string): Promise<void>;
+  /**
+   * Sends a question with its answers to pick from in the channel's own way (iMessage: a poll),
+   * when it has one; a pick comes back as the decision's answer. Throws when it can't.
+   */
+  ask?(uid: string, text: string, question: Question): Promise<void>;
+}
+
+/** A decision as a channel asks it: the answers to pick from, and which decision a pick settles. */
+export interface Question {
+  decisionId: string;
+  choices: string[];
+}
+
+/** A question's answers as plain text shows them: numbered, to answer by number or in words. */
+export function numbered(choices: string[]): string {
+  return choices.length ? `\n\n${choices.map((c, i) => `${i + 1}. ${c}`).join("\n")}\n\nAnswer with the number or in your own words.` : "";
 }
 
 /** The app was used this recently: Amb's chat is likely on screen. */
@@ -72,14 +88,16 @@ export class AmbReach {
 
   /**
    * Amb writes first (it's already in the chat): one place hears of it. Returns where it went:
-   * the channel's kind, "app" (a push), or "none" (no push service and no channel).
+   * the channel's kind, "app" (a push), or "none" (no push service and no channel). With a
+   * `question`, the channel asks it its own way (a poll), or as text with the answers numbered.
    */
-  async tell(uid: string, text: string, push: PushMessage): Promise<string> {
+  async tell(uid: string, text: string, push: PushMessage, question?: Question): Promise<string> {
     const want = await this.d.reachOf(uid).catch(() => "app");
     const channel = want !== "app" && !this.inApp(uid) ? this.channels.get(want) : undefined;
     if (channel && (await channel.linked(uid).catch(() => false))) {
       try {
-        await channel.send(uid, text);
+        if (question && question.choices.length >= 2 && channel.ask) await channel.ask(uid, text, question);
+        else await channel.send(uid, `${text}${question ? numbered(question.choices) : ""}`);
         return channel.kind;
       } catch (err) {
         console.warn(`[reach] ${want} didn't take it, sent as a push: ${(err as Error).message}`);

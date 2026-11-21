@@ -19,11 +19,14 @@ import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { api, type Control } from "../control.ts";
 import type { MasterKey } from "../crypto.ts";
 import type { RoutineKeys } from "../routines/keys.ts";
-import type { AmbChannel } from "./reach.ts";
+import { numbered, type AmbChannel, type Question } from "./reach.ts";
 
 const LINK = "imessage:link";
 const HANDLE = "imessage:handle";
 const CODE = "imessage:code";
+const POLL = "imessage:poll";
+/** A poll's pick settles its decision for this long; an older poll is answered in words. */
+const POLL_TTL_MS = 14 * 24 * 60 * 60_000;
 const INDEX_OWNER = { ownerKind: "team" as const, ownerId: "_imessage" };
 const CODE_TTL_MS = 60 * 60_000;
 const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -67,6 +70,13 @@ interface Pending {
   exp: number;
 }
 
+/** A decision sent as a poll: which decision, and what each option says. */
+interface PollRecord {
+  decisionId: string;
+  options: { id: string; text: string }[];
+  at: number;
+}
+
 export interface IMessageStatus {
   connected: boolean;
   /** Their number, mostly hidden ("+43 ••• 4567"). */
@@ -97,6 +107,9 @@ export interface AmbInbox {
   nameOf(uid: string): Promise<string>;
 }
 
+/** Files a decision's answer for the person (DecisionService.answer); throws the server's sentence when it can't. */
+export type AnswerDecision = (uid: string, decisionId: string, answer: string) => Promise<void>;
+
 interface LinqEvent {
   event_type?: string;
   event_id?: string;
@@ -106,6 +119,9 @@ interface LinqEvent {
     chat?: { id?: string; is_group?: boolean; owner_handle?: { handle?: string } };
     sender_handle?: { handle?: string; is_me?: boolean };
     parts?: { type?: string; value?: string }[];
+    /** A poll vote: the poll's message and the option picked. */
+    message_id?: string;
+    option_id?: string;
   };
 }
 
@@ -153,6 +169,8 @@ export class IMessageChannel implements AmbChannel {
       master: MasterKey;
       config: LinqConfig;
       inbox: AmbInbox;
+      /** Files a pick in a poll as the decision's answer. Without it, polls aren't sent. */
+      answer?: AnswerDecision;
       fetchImpl?: typeof fetch;
       /** Linq's API (tests: a stand-in). */
       apiBase?: string;
@@ -176,8 +194,8 @@ export class IMessageChannel implements AmbChannel {
 
   // ---- records ----
 
-  private async get<T>(uid: string, kind: string): Promise<T | null> {
-    const r = (await this.d.control.q(api.records.get, { ownerKind: "user", ownerId: uid, kind, key: "it" })) as { iv: string; ct: string; deleted: boolean } | null;
+  private async get<T>(uid: string, kind: string, key = "it"): Promise<T | null> {
+    const r = (await this.d.control.q(api.records.get, { ownerKind: "user", ownerId: uid, kind, key })) as { iv: string; ct: string; deleted: boolean } | null;
     if (!r || r.deleted) return null;
     const raw = await this.d.keys.open({ kind: "user", uid }, `record:${kind}`, r.iv, r.ct).catch(() => null);
     try {
@@ -187,10 +205,10 @@ export class IMessageChannel implements AmbChannel {
     }
   }
 
-  private async put(uid: string, kind: string, value: unknown, deleted = false): Promise<void> {
+  private async put(uid: string, kind: string, value: unknown, deleted = false, key = "it"): Promise<void> {
     const content = JSON.stringify(value);
     const sealed = await this.d.keys.seal({ kind: "user", uid }, `record:${kind}`, JSON.stringify({ c: content }));
-    await this.d.control.m(api.records.put, { ownerKind: "user", ownerId: uid, kind, key: "it", iv: sealed.iv, ct: sealed.ciphertext, size: content.length, byKind: "user", ...(deleted ? { deleted: true } : {}), keep: 1, now: this.now() });
+    await this.d.control.m(api.records.put, { ownerKind: "user", ownerId: uid, kind, key, iv: sealed.iv, ct: sealed.ciphertext, size: content.length, byKind: "user", ...(deleted ? { deleted: true } : {}), keep: 1, now: this.now() });
   }
 
   /** The key a number or a code is looked up by: an HMAC, so the rows hold no numbers. */
@@ -304,6 +322,48 @@ export class IMessageChannel implements AmbChannel {
     await this.text(link.chatId, text);
   }
 
+  /**
+   * A decision as iMessage asks it: the question as a text, then a poll with its answers; a tap on
+   * one settles the decision (onVote). When the poll can't be sent (the chat fell back to SMS, the
+   * line doesn't do polls), the answers go as numbered text instead, so the question is never lost.
+   */
+  async ask(uid: string, text: string, question: Question): Promise<void> {
+    const link = await this.get<Link>(uid, LINK);
+    if (!link) throw new IMessageError("not_connected", "iMessage isn't connected.", 400);
+    if (!this.d.answer) return this.text(link.chatId, `${text}${numbered(question.choices)}`);
+    await this.text(link.chatId, text);
+    try {
+      const out = await this.call<{ message_id?: string; poll?: { options?: { option_id?: string; text?: string }[] } }>("POST", `/v3/chats/${encodeURIComponent(link.chatId)}/polls`, {
+        poll: { options: question.choices.map((c) => ({ text: c.slice(0, 200) })), idempotency_key: `decision-${question.decisionId}` },
+      });
+      const options = (out.json.poll?.options ?? []).flatMap((o) => (o.option_id && o.text ? [{ id: o.option_id, text: o.text }] : []));
+      if (!out.json.message_id || options.length < 2) throw new Error("Linq sent no poll back");
+      await this.put(uid, POLL, { decisionId: question.decisionId, options, at: this.now() } satisfies PollRecord, false, out.json.message_id);
+    } catch (err) {
+      console.warn(`[imessage] a poll didn't go out, sent as text: ${(err as Error).message}`);
+      await this.text(link.chatId, numbered(question.choices).trim());
+    }
+  }
+
+  /** A tap on a poll's option: the decision's answer, when it's the person's own poll and still open. */
+  private async onVote(handle: string, chatId: string, messageId: string, optionId: string): Promise<void> {
+    const known = await this.index(HANDLE, this.indexKey("handle", handle));
+    if (!known || !this.d.answer) return;
+    const uid = known.u;
+    const link = await this.get<Link>(uid, LINK);
+    if (!link || link.handle !== handle) return;
+    const poll = await this.get<PollRecord>(uid, POLL, messageId);
+    const option = poll?.options.find((o) => o.id === optionId);
+    if (!poll || !option || this.now() - poll.at > POLL_TTL_MS) return;
+    try {
+      await this.d.answer(uid, poll.decisionId, option.text);
+      await this.text(chatId, `Got it: ${option.text}.`);
+    } catch (err) {
+      // Already answered elsewhere (the app, the bot's thread), or gone: said once, in the server's words.
+      await this.text(chatId, (err as Error).message || "That one's already answered.");
+    }
+  }
+
   // ---- what Linq sends ----
 
   /** Standard Webhooks: HMAC-SHA256 over "<id>.<timestamp>.<body>" with the secret's bytes, base64. */
@@ -332,6 +392,15 @@ export class IMessageChannel implements AmbChannel {
     const m = event.data;
     const handle = m?.sender_handle?.handle;
     const chatId = m?.chat?.id;
+    // A tap on a poll Amb sent: the decision's answer.
+    if (event.event_type === "poll.vote.added") {
+      if (!m || !handle || !chatId || !m.message_id || !m.option_id || m.sender_handle?.is_me || m.chat?.is_group) return { status: 200, body: { ok: true } };
+      const voteId = event.event_id ?? headers.id!;
+      if (this.seen.has(voteId)) return { status: 200, body: { ok: true } };
+      this.seen.set(voteId, this.now());
+      this.track(this.onVote(normalizeHandle(handle), chatId, m.message_id, m.option_id));
+      return { status: 200, body: { ok: true } };
+    }
     // Only a person's own text in a chat with the line: no groups, nothing the line sent itself.
     if (event.event_type !== "message.received" || !m || !handle || !chatId || m.sender_handle?.is_me || m.direction === "outbound" || m.chat?.is_group) return { status: 200, body: { ok: true } };
     const id = m.id ?? event.event_id ?? headers.id!;

@@ -36,11 +36,6 @@ export interface ProposedChange {
   why: string;
 }
 
-/** A question's answers as a text shows them (a channel without buttons): numbered, to answer by number or in words. */
-export function numbered(choices: string[]): string {
-  return choices.length ? `\n\n${choices.map((c, i) => `${i + 1}. ${c}`).join("\n")}\n\nAnswer with the number or in your own words.` : "";
-}
-
 /** "Apply", "yes", "ja", "ok", "do it": the person says yes to a proposed change. */
 export function saysYes(text: string): boolean {
   return /^\s*(apply|yes|yep|yeah|ja|jo|ok|okay|sure|do it|go|mach|passt)\b/i.test(text);
@@ -242,7 +237,7 @@ export class DecisionService {
     await this.d.ambient.say(q.uid, text, String(row.id));
     if (this.d.reach) {
       // One place hears of it: their channel (the question with its answers to pick from), or a push.
-      void this.d.reach.tell(q.uid, `${text}${numbered(q.choices)}`, botQuestionPush({ botId: q.routineId, name: q.bot.name, team: q.team, question: q.question })).catch(() => undefined);
+      void this.d.reach.tell(q.uid, text, botQuestionPush({ botId: q.routineId, name: q.bot.name, team: q.team, question: q.question }), { decisionId: String(row.id), choices: q.choices }).catch(() => undefined);
       return;
     }
     for (const channel of this.d.channels) {
@@ -268,7 +263,7 @@ export class DecisionService {
     const preview = change.path && change.content !== undefined ? `\n\nThe new ${change.path} would be:\n\n${change.content.length > 1500 ? `${change.content.slice(0, 1500)}…` : change.content}` : change.settings ? `\n\n${JSON.stringify(change.settings)}` : "";
     await this.d.ambient.say(uid, `${question}${preview}`, String(row.id));
     if (opts.push !== false && this.d.reach) {
-      void this.d.reach.tell(uid, `${question}${preview}${numbered(["Apply", "Not now"])}`, ambientQuestionPush(question)).catch(() => undefined);
+      void this.d.reach.tell(uid, `${question}${preview}`, ambientQuestionPush(question), { decisionId: String(row.id), choices: ["Apply", "Not now"] }).catch(() => undefined);
     } else if (opts.push !== false) {
       for (const channel of this.d.channels) {
         void channel.deliver({ speaker: { kind: "ambient" }, to: uid, kind: "question", text: question, choices: ["Apply", "Not now"] }).catch(() => undefined);

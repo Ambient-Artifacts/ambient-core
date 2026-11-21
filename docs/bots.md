@@ -1190,8 +1190,10 @@ follow the same rules. The rules are decided in code, never by the model:
   push. Never both. While the person has Amb's chat open in the app (it asked for the chat in the
   last 90 seconds), the channel stays quiet and the push goes. When the channel can't take it (not
   connected anymore, the provider refuses), the push goes out instead.
-- **A decision can be answered anywhere.** In a text it comes with its answers numbered; the reply
-  ("2", or a few words) is a message to Amb, which files it with `answer_decision`.
+- **A decision can be answered anywhere.** A channel asks it its own way: on iMessage the question
+  is a text and its answers a poll, and a tap on one files the answer (`via: "imessage"`). Where
+  there's no poll it comes with its answers numbered; a reply ("2", or a few words) is a message
+  to Amb, which files it with `answer_decision`.
 
 A bot's own thread isn't part of this: a bot answers in its thread (the app, or the Slack thread it
 was asked in). Pushes about a bot's thread, a failed run and approval cards stay the app's.
@@ -1220,6 +1222,12 @@ Amb writes first, reach "imessage" ──▶ a text
 - **Only a person's own texts in a chat with the line** are taken: no group chats, nothing the
   line sent itself. Each delivery is checked ([Standard Webhooks](https://www.standardwebhooks.com):
   HMAC-SHA256 over `<webhook-id>.<webhook-timestamp>.<body>`, five minutes) and taken once.
+- **Decisions are polls.** A bot's question or Amb's own proposal with two or more answers goes
+  out as the question in a text, then a native poll with the answers. The poll's message id and
+  what each option says are kept with the person's records; a tap (`poll.vote.added`) from their
+  own number settles that decision and gets "Got it: …" back. A tap on one that's already
+  answered gets one line saying so. When Linq won't send the poll (the chat fell back to SMS),
+  the answers go as numbered text. Polls need iOS 26 on the phone to show as polls.
 - **Text only, so far.** A photo or file without words gets a short note to send it in the app.
   An answer over 3,000 characters is cut, with a line that the rest is in the app; what Amb made
   as a file stays in the app.
@@ -1242,7 +1250,7 @@ The app's API:
 - `DELETE /v1/app/imessage` → forgets the number; `reach` goes back to `"app"`.
 
 MCP tool `connect_imessage` (`{ disconnect? }`): the same three, for the person's AI and for Amb
-itself. Linq's part, once per server: a webhook subscription for `message.received` at
+itself. Linq's part, once per server: a webhook subscription for `message.received` and `poll.vote.added` at
 `<origin>/v1/hooks/linq?version=2026-02-03`, whose signing secret is `BRAIN_LINQ_WEBHOOK_SECRET`.
 
 ## Bot templates

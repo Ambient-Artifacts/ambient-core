@@ -33,6 +33,8 @@ const fakeAnthropic: typeof fetch = async (input, init) => {
 const calls: { method: string; path: string; auth: string; body: Record<string, unknown> }[] = [];
 const pushes: PushMessage[] = [];
 let refuseSends = false;
+let refusePolls = false;
+let polls = 0;
 let linq: Server;
 let s: Stack;
 let lena: AppSession;
@@ -65,6 +67,22 @@ async function inbound(from: string, value: string | null, opts: { secret?: Buff
   return res.status;
 }
 
+/** A tap on a poll's option, as Linq posts it. */
+async function vote(from: string, messageId: string, optionId: string, eventId = `vote-${++n}`) {
+  const body = JSON.stringify({
+    api_version: "v3",
+    webhook_version: "2026-02-03",
+    event_type: "poll.vote.added",
+    event_id: eventId,
+    data: { message_id: messageId, direction: "inbound", chat: { id: CHAT, is_group: false, owner_handle: null }, sender_handle: { handle: from, is_me: false, service: "iMessage" }, option_id: optionId, service: "iMessage" },
+  });
+  const ts = String(Math.floor(Date.now() / 1000));
+  const sig = createHmac("sha256", SECRET_BYTES).update(`wh-${eventId}.${ts}.${body}`).digest("base64");
+  const res = await fetch(`${s.origin}/v1/hooks/linq`, { method: "POST", headers: { "content-type": "application/json", "webhook-id": `wh-${eventId}`, "webhook-timestamp": ts, "webhook-signature": `v1,${sig}` }, body });
+  await s.folders.imessage!.idle();
+  return res.status;
+}
+
 beforeAll(async () => {
   linq = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -77,6 +95,12 @@ beforeAll(async () => {
         return res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ success: false, error: { status: 403, code: 2024, message: "Recipient opted out" } }));
       }
       if (req.method === "POST" && (path.endsWith("/typing") || path.endsWith("/read"))) return res.writeHead(204).end();
+      if (req.method === "POST" && path.endsWith("/polls")) {
+        if (refusePolls) return res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ success: false, error: { status: 403, code: 2018, message: "Polls are iMessage-only" } }));
+        polls++;
+        const options = ((JSON.parse(raw) as { poll: { options: { text: string }[] } }).poll.options).map((o, i) => ({ option_id: `opt-${polls}-${i}`, text: o.text }));
+        return res.writeHead(202, { "content-type": "application/json" }).end(JSON.stringify({ chat_id: CHAT, message_id: `poll-${polls}`, poll: { options } }));
+      }
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
     });
   });
@@ -264,6 +288,57 @@ describe("what Amb says first goes to one place", () => {
       expect(pushes).toHaveLength(1);
     } finally {
       refuseSends = false;
+    }
+  });
+});
+
+describe("a decision on iMessage is a poll", () => {
+  type Decision = { id: string; status: string; answer: { text: string; via: string } | null };
+  const open = async () => (await call("GET", "/v1/app/decisions")).json.decisions as Decision[];
+  let host = "";
+
+  /** A bot that's running and asks its owner `question`. */
+  async function botAsks(name: string, question: string, choices: string[]) {
+    if (!host) {
+      const code = String((await call("POST", "/v1/app/computers", { name: "Poll server" })).json.code);
+      host = String(((await (await fetch(`${s.origin}/v1/host/setup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, info: { hostname: "srv", os: "Linux 6.8", runner: "0.14.0", claude: "2.1.326 (Claude Code)" } }) })).json()) as { token: string }).token);
+    }
+    const computer = ((await call("GET", "/v1/app/routines")).json.computers as { id: string; name: string }[]).find((c) => c.name === "Poll server")!.id;
+    const id = ((await call("POST", "/v1/app/routines", { name, prompt: "x", schedule: { every: "day", time: "09:00", timezone: "Europe/Vienna" }, computer, bot: { isolation: "host", delegate: "never" } })).json.routine as { id: string }).id;
+    const start = (await (await fetch(`${s.origin}/v1/host/routines/${id}/runs`, { method: "POST", headers: { authorization: `Bearer ${host}` } })).json()) as { runToken: string };
+    await fetch(`${s.origin}/v1/bot/ask`, { method: "POST", headers: { authorization: `Bearer ${start.runToken}`, "content-type": "application/json" }, body: JSON.stringify({ question, choices }) });
+    for (let i = 0; i < 50 && !calls.some((c) => c.path.endsWith("/polls") || (c.body.message as { parts?: { value: string }[] } | undefined)?.parts?.[0]?.value.includes(question)); i++) await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  it("the question comes as a text and its answers as a poll; a tap settles it", async () => {
+    const before = texts().length;
+    await botAsks("Picky", "Which headline?", ["Bold one", "Calm one"]);
+    expect(texts().slice(before)).toEqual(["Picky asks: Which headline?"]);
+    const poll = calls.filter((c) => c.path === `/v3/chats/${CHAT}/polls`).at(-1)!;
+    expect((poll.body.poll as { options: { text: string }[] }).options.map((o) => o.text)).toEqual(["Bold one", "Calm one"]);
+    const waiting = await open();
+    expect(waiting).toHaveLength(1);
+    // A stranger's tap, and a tap on an option that isn't the poll's, change nothing.
+    await vote("+15550000009", `poll-${polls}`, `opt-${polls}-1`);
+    await vote(LENA, `poll-${polls}`, "opt-unknown");
+    expect(await open()).toHaveLength(1);
+    await vote(LENA, `poll-${polls}`, `opt-${polls}-1`);
+    expect(texts().at(-1)).toBe("Got it: Calm one.");
+    expect(await open()).toEqual([]);
+    // A second tap: it's said once that it's settled, and nothing changes.
+    await vote(LENA, `poll-${polls}`, `opt-${polls}-0`);
+    expect(texts().at(-1)).toContain("already answered");
+  });
+
+  it("when the poll can't be sent, the answers go as numbered text", async () => {
+    refusePolls = true;
+    try {
+      const before = texts().length;
+      await botAsks("Fussy", "Ship it?", ["Yes", "Not yet"]);
+      expect(texts().slice(before)).toEqual(["Fussy asks: Ship it?", "1. Yes\n2. Not yet\n\nAnswer with the number or in your own words."]);
+    } finally {
+      refusePolls = false;
     }
   });
 });

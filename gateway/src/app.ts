@@ -314,16 +314,21 @@ export function createApp(deps: AppDeps) {
   // Where Amb's own words go besides the app's chat (channels/reach.ts): an answer back through
   // the channel it was asked in; what Amb says first to the one place the person chose.
   let reachOf: (uid: string) => Promise<string> = async () => "app";
+  // A pick in a poll files the decision's answer (set once the decisions are up, just below).
+  let answerDecision: (uid: string, id: string, answer: string) => Promise<void> = async () => {
+    throw new Error("Decisions aren't up yet.");
+  };
   const reach = new AmbReach({ notifier, reachOf: (uid) => reachOf(uid) });
   folders.reach = reach;
   ambient.onReply = (uid, via, text) => reach.reply(uid, via, text);
   if (config.linq) {
-    const imessage = new IMessageChannel({ control, keys: routineKeys, master: config.masterKey, config: config.linq, inbox: ambient, fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl, apiBase: deps.linq?.apiBase });
+    const imessage = new IMessageChannel({ control, keys: routineKeys, master: config.masterKey, config: config.linq, inbox: ambient, answer: (uid, id, answer) => answerDecision(uid, id, answer), fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl, apiBase: deps.linq?.apiBase });
     folders.imessage = imessage;
     reach.add(imessage);
   }
   const decisions: DecisionService = new DecisionService({ control, keys: routines.keys, routines, bots, ambient, channels: [new AppChannel(notifier)], reach, actorFor, triageMs: deps.ambient?.triageMs });
   ambient.decisionView = (uid, row) => decisions.view(uid, row);
+  answerDecision = async (uid, id, answer) => void (await decisions.answer(await actorFor(uid), id, answer, "imessage"));
   onQuestion = (q) => void decisions.onBotQuestion(q);
   // Who Ambient's background work is for: everyone with bots or a chat with Ambient. Bots are
   // everyone's; with BRAIN_BOTS=all this was nobody (the "*" was dropped before asking Convex), so
