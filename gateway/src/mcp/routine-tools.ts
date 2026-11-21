@@ -13,6 +13,7 @@ import { FolderError, type Author } from "../bots/folder.ts";
 import { SlackError } from "../bots/slack-apps.ts";
 import { AmbSettingsError } from "../bots/amb-settings.ts";
 import { IMessageError } from "../channels/imessage.ts";
+import { McpConnectionError } from "../bots/mcp-connections.ts";
 import { GitHubError } from "../bots/github.ts";
 import { historyLines } from "../bots/history.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "../bots/bot-templates.ts";
@@ -189,7 +190,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError || err instanceof SlackError || err instanceof IMessageError || err instanceof AmbSettingsError) return error(err.message);
+      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError || err instanceof SlackError || err instanceof IMessageError || err instanceof AmbSettingsError || err instanceof McpConnectionError) return error(err.message);
       throw err;
     }
   };
@@ -1189,6 +1190,83 @@ function registerLearningTools(
             ].join("\n\n"),
             v,
           );
+        }),
+    );
+  }
+
+  if (folders.mcp) {
+    const mcp = folders.mcp;
+    const teamArg: Record<string, z.ZodTypeAny> = principal.teams.length ? { team: z.string().max(80).optional().describe("A team's slug, for the team's connections and bots; leave out for the user's own.") } : {};
+    const ownerOf = (team: unknown) => routines.botOwner(actor, typeof team === "string" && team ? team : null);
+    const line = (c: { name: string; host: string; tools: unknown[]; bots: string[]; amb: boolean; needsSignIn: boolean }) => `${c.name} (${c.host}, ${c.tools.length} tools${c.needsSignIn ? ", its sign-in ran out: sign_in gives a new link" : ""}): ${[c.amb ? "Ambient" : "", c.bots.length ? `${c.bots.length} bot${c.bots.length === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ") || "nobody"} has it`;
+    server.registerTool(
+      "mcp_connections",
+      {
+        title: "MCP connections",
+        description:
+          "The MCP servers the user (or a team) connected for their bots and Ambient: services reached with a key or a sign-in the gateway keeps, never the bot. Without arguments: the list, with each one's tools and who has it. add: connects a server by its https address and a name, with its key when it needs one (only a key the user gave you to store; it's kept sealed and never shown again); a server that wants a sign-in instead returns a link for the user to open. Nobody has it until it's given with grant_mcp_connection. remove: an id to disconnect. refresh: an id, to ask the server for its tools again. sign_in: an id, for a new sign-in link when a connection's sign-in ran out. Only when the user asked.",
+        inputSchema: {
+          add: z.object({ name: z.string().min(1).max(60), url: z.string().min(4).max(2000), key: z.string().max(4000).optional(), header: z.string().max(64).optional().describe("The header the key goes in, when it isn't Authorization: Bearer.") }).optional(),
+          remove: z.string().max(32).optional(),
+          refresh: z.string().max(32).optional(),
+          sign_in: z.string().max(32).optional(),
+          ...teamArg,
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) =>
+        guard(async () => {
+          const { add, remove, refresh } = args;
+          const again = (args as { sign_in?: string }).sign_in;
+          if (again) {
+            const out = await mcp.signInAgain(ownerOf((args as { team?: string }).team), again);
+            return result(`Give the user this link as a Markdown link, [Sign in again](${out.url}); it's good for half an hour.`, { signIn: out });
+          }
+          const owner = ownerOf((args as { team?: string }).team);
+          if (add) {
+            const out = await mcp.add(owner, add as { name: string; url: string; key?: string; header?: string });
+            if ("signIn" in out) {
+              return result(`${(add as { name: string }).name} wants a sign-in at its own page. Give the user this link as a Markdown link, [Sign in to ${(add as { name: string }).name}](${out.signIn.url}): once they allowed it there (within half an hour), it shows in mcp_connections.`, out);
+            }
+            const c = out.connection;
+            return result(`Connected ${c.name} (${c.tools.length} tools). Nobody has it yet: give it to a bot or to Ambient with grant_mcp_connection.`, { connection: c });
+          }
+          if (remove) {
+            await mcp.remove(owner, remove as string);
+            return result("Disconnected. The bots that had it lose it with their next tool call.", { removed: remove });
+          }
+          if (refresh) {
+            const c = await mcp.refresh(owner, refresh as string);
+            return result(`${c.name} has ${c.tools.length} tools now.`, { connection: c });
+          }
+          const list = await mcp.list(owner);
+          return result(list.length ? list.map(line).join("\n") : "No MCP servers are connected yet.", { connections: list });
+        }),
+    );
+    server.registerTool(
+      "grant_mcp_connection",
+      {
+        title: "Give a connection to a bot or to Ambient",
+        description:
+          "Gives a connected MCP server (mcp_connections lists them) to one bot, by its id, or to Ambient itself (amb: true; the user's own connections only), or takes it away (on: false). A bot gets it with its next run and loses it with its next tool call; Ambient gets it with the user's next message. A person's connection goes to their own bots, a team's to the team's. Only when the user asked.",
+        inputSchema: { connection: z.string().max(32).describe("The connection's id."), bot: z.string().max(64).optional().describe("The bot (its id)."), amb: z.boolean().optional(), on: z.boolean(), ...teamArg },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async (args) =>
+        guard(async () => {
+          const { connection, bot, amb, on } = args;
+          const owner = ownerOf((args as { team?: string }).team);
+          if (amb && bot) return error("Give it to one at a time: a bot, or Ambient.");
+          if (amb) {
+            if (owner.kind === "team") return error("Ambient uses the user's own connections, not a team's.");
+            const c = await mcp.grant(owner, connection as string, { amb: true }, on as boolean);
+            return result(on ? `Ambient has ${c.name} from their next message.` : `Ambient doesn't have ${c.name} anymore.`, { connection: c });
+          }
+          if (!bot) return error("Say who: bot (its id), or amb: true.");
+          const f = await routines.folderOf(actor, bot as string, true);
+          if ((f.teamId ?? null) !== (owner.kind === "team" ? owner.teamId : null)) return error(owner.kind === "team" ? "That bot isn't the team's." : "That's a team's bot: give it one of the team's connections (pass team).");
+          const c = await mcp.grant(owner, connection as string, { routineId: f.routineId }, on as boolean);
+          return result(on ? `${f.name} has ${c.name} from its next run.` : `${f.name} doesn't have ${c.name} anymore.`, { connection: c });
         }),
     );
   }

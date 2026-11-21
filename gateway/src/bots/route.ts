@@ -22,6 +22,7 @@ import { page as githubPage, type GitHubApps } from "./github-apps.ts";
 import { SlackError, type SlackApps } from "./slack-apps.ts";
 import { IMessageError, type IMessageChannel } from "../channels/imessage.ts";
 import type { AmbReach } from "../channels/reach.ts";
+import { McpConnectionError, type McpConnections } from "./mcp-connections.ts";
 import { LEARN, lessonsOf, type BotLearning } from "./learning.ts";
 import { AmbSettingsError, NOTIFY, REACH, type AmbSettings } from "./amb-settings.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "./bot-templates.ts";
@@ -71,6 +72,7 @@ export function botAppRoutes(
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
     imessage?: () => IMessageChannel | undefined;
+    mcp?: () => McpConnections | undefined;
     reach?: () => AmbReach | undefined;
     wakes?: () => Wakes | undefined;
     /** Search across Ambient's chat and the bots' threads (the Bots list's search field). */
@@ -581,6 +583,97 @@ export function botAppRoutes(
     } catch (err) {
       if (err instanceof AmbSettingsError) res.status(err.status).json({ error: err.code, message: err.message });
       else fail(res, err);
+    }
+  });
+
+  // ---- MCP connections: a server connected once, given to bots or to Amb (docs/bots.md, "MCP connections") ----
+
+  const mcpFail = (res: Response, err: unknown) => {
+    if (err instanceof McpConnectionError) res.status(err.status).json({ error: err.code, message: err.message });
+    else fail(res, err);
+  };
+
+  // The person's own, or with ?team= a team's (its owners and admins).
+  r.get("/v1/app/mcp-connections", d.auth, async (req, res) => {
+    const mcp = d.mcp?.();
+    if (!mcp) return notEnabled(res);
+    try {
+      res.json({ connections: await mcp.list(d.routines.botOwner(await actor(res), teamOf(req))) });
+    } catch (err) {
+      mcpFail(res, err);
+    }
+  });
+
+  r.post("/v1/app/mcp-connections", d.auth, d.json, async (req, res) => {
+    const mcp = d.mcp?.();
+    if (!mcp) return notEnabled(res);
+    const body = z.object({ name: z.string().trim().min(1).max(60), url: z.string().trim().min(4).max(2000), key: z.string().max(4000).optional(), header: z.string().max(64).optional() }).safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send a name and the server's address (and its key, when it needs one)." });
+    try {
+      const out = await mcp.add(d.routines.botOwner(await actor(res), teamOf(req)), body.data);
+      // A server that wants a sign-in: the link to the service's page; the connection appears once it's allowed there.
+      if ("signIn" in out) res.status(200).json(out);
+      else res.status(201).json(out);
+    } catch (err) {
+      mcpFail(res, err);
+    }
+  });
+
+  // A new sign-in for a connection whose sign-in ran out: the link to the service's page.
+  r.post("/v1/app/mcp-connections/:id/sign-in", d.auth, async (req, res) => {
+    const mcp = d.mcp?.();
+    if (!mcp) return notEnabled(res);
+    try {
+      res.json({ signIn: await mcp.signInAgain(d.routines.botOwner(await actor(res), teamOf(req)), String(req.params.id)) });
+    } catch (err) {
+      mcpFail(res, err);
+    }
+  });
+
+  // Asks the server for its tools again.
+  r.post("/v1/app/mcp-connections/:id/refresh", d.auth, async (req, res) => {
+    const mcp = d.mcp?.();
+    if (!mcp) return notEnabled(res);
+    try {
+      res.json({ connection: await mcp.refresh(d.routines.botOwner(await actor(res), teamOf(req)), String(req.params.id)) });
+    } catch (err) {
+      mcpFail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/mcp-connections/:id", d.auth, async (req, res) => {
+    const mcp = d.mcp?.();
+    if (!mcp) return notEnabled(res);
+    try {
+      await mcp.remove(d.routines.botOwner(await actor(res), teamOf(req)), String(req.params.id));
+      res.status(204).end();
+    } catch (err) {
+      mcpFail(res, err);
+    }
+  });
+
+  // Who has it: a bot (`bot`: its id) or Amb (`amb: true`), `on` or off.
+  r.put("/v1/app/mcp-connections/:id/grants", d.auth, d.json, async (req, res) => {
+    const mcp = d.mcp?.();
+    if (!mcp) return notEnabled(res);
+    const body = z.object({ bot: z.string().max(64).optional(), amb: z.literal(true).optional(), on: z.boolean() }).safeParse(req.body);
+    if (!body.success || (!body.data.bot && !body.data.amb) || (body.data.bot && body.data.amb)) return res.status(400).json({ error: "bad_request", message: "Send bot (its id) or amb: true, and on." });
+    try {
+      const a = await actor(res);
+      const team = teamOf(req);
+      const owner = d.routines.botOwner(a, team);
+      if (body.data.amb) {
+        if (team) return res.status(400).json({ error: "bad_request", message: "Ambient uses your own connections, not a team's." });
+        return res.json({ connection: await mcp.grant(owner, String(req.params.id), { amb: true }, body.data.on) });
+      }
+      // The bot must be one of this owner's: a person's connection never goes to a team's bot, or the other way.
+      const f = await d.routines.folderOf(a, body.data.bot!, true);
+      if ((f.teamId ?? null) !== (owner.kind === "team" ? owner.teamId : null)) {
+        return res.status(400).json({ error: "wrong_owner", message: owner.kind === "team" ? "That bot isn't the team's." : "That's a team's bot: give it one of the team's connections." });
+      }
+      res.json({ connection: await mcp.grant(owner, String(req.params.id), { routineId: f.routineId }, body.data.on) });
+    } catch (err) {
+      mcpFail(res, err);
     }
   });
 

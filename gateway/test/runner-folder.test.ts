@@ -79,6 +79,7 @@ beforeAll(async () => {
     `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 printf '%s\\n' "$@" > args.txt
+prev=""; for a in "$@"; do if [ "$prev" = "--mcp-config" ]; then cp "$a" mcp-seen.json 2>/dev/null; fi; prev="$a"; done
 if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > prompt.txt; else cat > prompt.txt; fi
 out=""
 for a in "$@"; do case "$a" in OUTDIR=*) out="\${a#OUTDIR=}" ;; esac; done
@@ -167,6 +168,31 @@ describe("a bot's folder on the computer", () => {
     // Skills never go into the user's own ~/.claude, and the run's folder is gone afterwards.
     expect(existsSync(join(dir, ".claude"))).toBe(false);
     expect(existsSync(join(dir, "state", "runs", "run00000001"))).toBe(false);
+  });
+
+  it("gives the run the services its bot was given, at the gateway with the run's token, and nothing else", async () => {
+    start = {
+      run: { id: "run00000009", trigger: "schedule" },
+      routine: { id: "bot00000001", name: "Release notes", prompt: "Wake up.", folder: join(dir, "work") },
+      env: {},
+      bot: { face: "classic", runtime: "claude-code", isolation: "host", report: "news" },
+      resume: null,
+      runToken: RUN_TOKEN,
+      mcp: [
+        { name: "notion", path: "/v1/bot/mcp/0123456789abcdef" },
+        // Names that would shadow the run's own servers, and addresses that aren't the gateway's relay, are left out.
+        { name: "ambient", path: "/v1/bot/mcp/aaaaaaaaaaaaaaaa" },
+        { name: "evil", path: "https://example.com/mcp" },
+        { name: "Bad Name", path: "/v1/bot/mcp/bbbbbbbbbbbbbbbb" },
+      ],
+    } as Start;
+    const out = await runner(["run", "bot00000001"]);
+    expect(out.code, out.out).toBe(0);
+    const args = lines(join(dir, "work", "args.txt"));
+    expect(after(args, "--allowedTools")!.endsWith(",mcp__ambient,mcp__notion")).toBe(true);
+    const config = JSON.parse(readFileSync(join(dir, "work", "mcp-seen.json"), "utf8")) as { mcpServers: Record<string, { url?: string; headers?: Record<string, string> }> };
+    expect(Object.keys(config.mcpServers).sort()).toEqual(["ambient", "ambient-bot", "notion"]);
+    expect(config.mcpServers.notion).toEqual({ type: "http", url: `${origin}/v1/bot/mcp/0123456789abcdef`, headers: { Authorization: `Bearer ${RUN_TOKEN}` } });
   });
 
   it("fetches the files that came with its owner's message into its folder, and names them", async () => {

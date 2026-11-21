@@ -134,6 +134,8 @@ const BLOCKED = (() => {
   return b;
 })();
 const isPrivate = (ip: string) => BLOCKED.check(ip, isIP(ip) === 6 ? "ipv6" : "ipv4");
+/** Whether an address is one of ours to never reach (private, loopback, link-local, reserved): for anything that fetches an address a person gave. */
+export const isPrivateAddress = isPrivate;
 
 /** A clean https URL to a public host (or file:// in tests); credentials in the URL are refused. */
 export async function checkRepoUrl(raw: string, opts: GitOptions = {}): Promise<string> {

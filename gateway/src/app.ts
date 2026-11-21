@@ -52,6 +52,8 @@ import { Wakes } from "./bots/wakes.ts";
 import { AppChannel } from "./channels/channel.ts";
 import { IMessageChannel } from "./channels/imessage.ts";
 import { AmbReach } from "./channels/reach.ts";
+import { McpConnections } from "./bots/mcp-connections.ts";
+import { mcpRelayPath, mcpRelayRouter, mcpSignInRouter } from "./bots/mcp-relay.ts";
 import { Transcriber } from "./channels/transcribe.ts";
 import { RoutineKeys } from "./routines/keys.ts";
 import { loadInstaller, loadRunner, RoutineService } from "./routines/service.ts";
@@ -108,6 +110,8 @@ export interface AppDeps {
   githubFetch?: typeof fetch;
   /** Tests: bots' Slack apps against a stand-in Slack Web API. */
   slack?: { apiBase?: string; fetchImpl?: typeof fetch };
+  /** Tests: MCP servers on 127.0.0.1 over http may be connected. */
+  mcpConnections?: { allowLocal?: boolean };
   /** Tests: Amb's iMessage line against a stand-in Linq API. */
   linq?: { apiBase?: string; fetchImpl?: typeof fetch };
   /** Tests: how long after a signal Amb looks at a bot (default 10 minutes). */
@@ -285,8 +289,11 @@ export function createApp(deps: AppDeps) {
   const upkeepFor = (uid: string) => upkeepOf({ control, upkeep }, uid);
   // Root commands Ambient asks for, run by the computer's runner after an approval (or at once on full access).
   const admin = new AdminService({ control, keys: routines.keys, routines, computers, notifier });
+  // The MCP servers a person gave Amb (set once the connections are up, below).
+  let ambientMcp: (uid: string) => Promise<{ name: string; path: string; title: string }[]> = async () => [];
   const ambient: AmbientChat = new AmbientChat({
     attachments,
+    mcpFor: (uid) => ambientMcp(uid),
     control,
     keys: routines.keys,
     mcp: async (uid): Promise<McpServer> => {
@@ -408,6 +415,12 @@ export function createApp(deps: AppDeps) {
   folders.githubApp = githubApp;
   github.appOf = async (owner, bot) => (await githubApp.appFor(owner, bot))?.key ?? null;
   routines.githubToken = async (owner, id) => githubApp.tokenFor(owner, { id, ...(await github.watchOf(owner, id)) });
+  // MCP servers people connect once and give to bots or to Amb (docs/bots.md, "MCP connections");
+  // a run reaches them through the gateway (bots/mcp-relay.ts), never with their key.
+  const mcpConnections = new McpConnections({ control, keys: routineKeys, origin: config.origin, allowLocal: deps.mcpConnections?.allowLocal });
+  folders.mcp = mcpConnections;
+  routines.mcpFor = async (owner, id) => (await mcpConnections.forBot(owner, id)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id) }));
+  ambientMcp = async (uid) => (await mcpConnections.forAmb(uid)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id), title: c.title }));
   // Bots' own Slack apps (docs/bots.md, "Slack"): one app per bot, made by Ambient, one tap to install.
   const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
   folders.slack = slack;
@@ -430,6 +443,8 @@ export function createApp(deps: AppDeps) {
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(slackHookRouter(() => folders.slack));
   app.use(linqHookRouter(() => folders.imessage));
+  app.use(mcpSignInRouter(() => folders.mcp));
+  app.use(mcpRelayRouter({ connections: () => folders.mcp, control, ambUid: (token) => computers.uidOfToken(token), version: VERSION }));
   app.use(ambientHostRouter({ routines, directory, computers }));
   app.use(internalRouter({ secret: config.serviceSecret, upkeep, relay: (host, req, ms) => computers.relay(host, req, ms) }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));

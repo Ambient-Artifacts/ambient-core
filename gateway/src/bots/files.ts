@@ -121,6 +121,8 @@ export interface Folders {
   learning?: import("./learning.ts").BotLearning;
   /** Amb's settings per person (docs/bots.md, "Amb's settings"). */
   ambSettings?: import("./amb-settings.ts").AmbSettings;
+  /** MCP servers people connect and give to bots (docs/bots.md, "MCP connections"). */
+  mcp?: import("./mcp-connections.ts").McpConnections;
   /** Amb on iMessage, when a line is set up (docs/bots.md, "iMessage"). */
   imessage?: import("../channels/imessage.ts").IMessageChannel;
   /** Where Amb's own words go besides the app's chat (docs/bots.md, "Channels"). */
