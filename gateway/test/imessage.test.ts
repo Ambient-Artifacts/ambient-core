@@ -6,7 +6,7 @@ import { createHmac } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { normalizeHandle, toPlainText } from "../src/channels/imessage.ts";
+import { isOptOut, normalizeHandle, toPlainText } from "../src/channels/imessage.ts";
 import type { PushMessage } from "../src/push.ts";
 import { appCall, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
 
@@ -33,6 +33,11 @@ const fakeAnthropic: typeof fetch = async (input, init) => {
 const calls: { method: string; path: string; auth: string; body: Record<string, unknown> }[] = [];
 const pushes: PushMessage[] = [];
 let refuseSends = false;
+/** Linq's error code for a refused send (2024: they opted out). */
+let refuseCode = 2027;
+let chatHealth = "HEALTHY";
+let lineStatus = "ACTIVE";
+let lineReputation = "HEALTHY";
 let refusePolls = false;
 let polls = 0;
 let linq: Server;
@@ -67,6 +72,26 @@ async function inbound(from: string, value: string | null, opts: { secret?: Buff
   return res.status;
 }
 
+/** What Linq last said about lines and chats is forgotten, so the next send asks again. */
+function askLinqAgain() {
+  const im = s.folders.imessage as unknown as { lines: unknown; healths: Map<string, unknown> };
+  im.lines = undefined;
+  im.healths.clear();
+}
+const tell = (text: string) => s.folders.reach!.tell(lena.user.uid, text, { title: "Ambient", body: text, url: "ambient://ambient", thread: "ambient" });
+const firsts = () => calls.filter((c) => c.method === "POST" && c.path === "/v3/messages");
+
+/** Any event, signed as Linq signs it. */
+async function event(body: Record<string, unknown>) {
+  const id = `evt-${++n}`;
+  const raw = JSON.stringify({ api_version: "v3", webhook_version: "2026-02-03", event_id: id, ...body });
+  const ts = String(Math.floor(Date.now() / 1000));
+  const sig = createHmac("sha256", SECRET_BYTES).update(`wh-${id}.${ts}.${raw}`).digest("base64");
+  const res = await fetch(`${s.origin}/v1/hooks/linq`, { method: "POST", headers: { "content-type": "application/json", "webhook-id": `wh-${id}`, "webhook-timestamp": ts, "webhook-signature": `v1,${sig}` }, body: raw });
+  await s.folders.imessage!.idle();
+  return res.status;
+}
+
 /** A tap on a poll's option, as Linq posts it. */
 async function vote(from: string, messageId: string, optionId: string, eventId = `vote-${++n}`) {
   const body = JSON.stringify({
@@ -92,7 +117,12 @@ beforeAll(async () => {
       const path = (req.url ?? "").split("?")[0]!;
       calls.push({ method: req.method ?? "", path, auth: String(req.headers.authorization ?? ""), body: raw ? (JSON.parse(raw) as Record<string, unknown>) : {} });
       if (req.method === "POST" && path.endsWith("/messages") && refuseSends) {
-        return res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ success: false, error: { status: 403, code: 2024, message: "Recipient opted out" } }));
+        return res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ success: false, error: { status: 403, code: refuseCode, message: "Refused" } }));
+      }
+      if (req.method === "POST" && path === "/v3/messages") return res.writeHead(202, { "content-type": "application/json" }).end(JSON.stringify({ chat_id: CHAT, created_new_chat: false, from: LINE, from_selection: { reason: "reused_active_chat" } }));
+      if (req.method === "GET" && path === `/v3/chats/${CHAT}`) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: CHAT, health_status: { status: chatHealth } }));
+      if (req.method === "GET" && path === "/v3/phone_numbers") {
+        return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ phone_numbers: [{ id: "n1", phone_number: LINE, line_status: lineStatus, line_type: "iMessage", reputation: { state: lineReputation === "CRITICAL" ? "DELIVERY_LIMITED" : "HEALTHY", status: lineReputation, reason_codes: [] } }] }));
       }
       if (req.method === "POST" && (path.endsWith("/typing") || path.endsWith("/read"))) return res.writeHead(204).end();
       if (req.method === "POST" && path.endsWith("/polls")) {
@@ -340,6 +370,117 @@ describe("a decision on iMessage is a poll", () => {
     } finally {
       refusePolls = false;
     }
+  });
+});
+
+describe("Linq's rules: stop means stop, and Amb doesn't keep texting into silence", () => {
+  it("knows a stop when it reads one, and an answer when it isn't", () => {
+    for (const yes of ["STOP", "stop", "Stop.", "UNSUBSCRIBE", "opt out", "OPT-OUT", "optout", "CANCEL", "QUIT", "END", "please stop texting me", "Stop messaging me", "don't text me again", "Do not message me anymore.", "leave me alone", "Schreib mir nicht mehr", "keine Nachrichten mehr bitte"]) {
+      expect(isOptOut(yes), yes).toBe(true);
+    }
+    for (const no of ["cancel", "end", "quit", "Stop the Chatty bot", "Please stop Bloggy from posting on Thursday", "Don't text Lena about it", "2", "Not now", "", "The end of the week works"]) {
+      expect(isOptOut(no), no).toBe(false);
+    }
+  });
+
+  it("what Amb writes first goes to the person, so Linq picks the line", async () => {
+    await inbound(LENA, "ok, back to work");
+    askLinqAgain();
+    const before = firsts().length;
+    expect(await tell("One thing needs you.")).toBe("imessage");
+    const sent = firsts().slice(before);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body).toMatchObject({ to: [LENA], message: { parts: [{ type: "text", value: "One thing needs you." }] } });
+    expect(sent[0]!.body).not.toHaveProperty("from");
+    // The chat's health and the line's state were asked first.
+    expect(calls.some((c) => c.method === "GET" && c.path === `/v3/chats/${CHAT}`)).toBe(true);
+    expect(calls.some((c) => c.method === "GET" && c.path === "/v3/phone_numbers")).toBe(true);
+  });
+
+  it("after two that went unanswered it waits, and the push goes; a reply starts it again", async () => {
+    pushes.length = 0;
+    expect(await tell("A second thing.")).toBe("imessage");
+    const before = texts().length;
+    expect(await tell("A third thing.")).toBe("app");
+    expect(texts().length).toBe(before);
+    expect(pushes).toHaveLength(1);
+    await inbound(LENA, "got them, thanks");
+    expect(await tell("A fourth thing.")).toBe("imessage");
+  });
+
+  it("a critical chat or a flagged line gets nothing first, until Linq says otherwise", async () => {
+    await inbound(LENA, "still here");
+    chatHealth = "CRITICAL";
+    askLinqAgain();
+    expect(await tell("Held back by the chat.")).toBe("app");
+    chatHealth = "HEALTHY";
+    lineStatus = "FLAGGED";
+    askLinqAgain();
+    expect(await tell("Held back by the line.")).toBe("app");
+    // Linq says the line is back: asked again at once, not after the 15 minutes.
+    lineStatus = "ACTIVE";
+    expect(await event({ event_type: "phone_number.status_updated", data: { phone_number: LINE, previous_status: "FLAGGED", new_status: "ACTIVE", previous_reputation: "CRITICAL", new_reputation: "HEALTHY" } })).toBe(200);
+    (s.folders.imessage as unknown as { healths: Map<string, unknown> }).healths.clear();
+    expect(await tell("The line is back.")).toBe("imessage");
+    // An answer to what they wrote isn't held back by any of it.
+    lineStatus = "FLAGGED";
+    askLinqAgain();
+    const before = texts().length;
+    await inbound(LENA, "and now?");
+    expect(texts().length).toBe(before + 1);
+    lineStatus = "ACTIVE";
+    askLinqAgain();
+  });
+
+  it("STOP: no answer from Amb, one line with the override, and nothing more by text", async () => {
+    await call("PUT", "/v1/app/ambient/settings", { reach: "imessage" });
+    const chatBefore = (await chat()).length;
+    const before = calls.length;
+    await inbound(LENA, "STOP");
+    const after = calls.slice(before).filter((c) => c.path.endsWith("/messages"));
+    expect(after).toHaveLength(1);
+    expect(after[0]!.body).toMatchObject({ override_optout: true, message: { parts: [{ value: "Okay, I won't text you here anymore. Write to me here any time and I'll answer again." }] } });
+    // Not a message to Amb: no turn, nothing in the chat.
+    expect((await chat()).length).toBe(chatBefore);
+    expect((await call("GET", "/v1/app/imessage")).json).toMatchObject({ connected: true, optedOut: true });
+    expect((await call("GET", "/v1/app/ambient/settings")).json).toMatchObject({ reach: "app" });
+    // A second STOP isn't confirmed again, and Amb writes first as a push even when asked for iMessage.
+    await inbound(LENA, "stop texting me");
+    expect(calls.slice(before).filter((c) => c.path.endsWith("/messages"))).toHaveLength(1);
+    await call("PUT", "/v1/app/ambient/settings", { reach: "imessage" });
+    pushes.length = 0;
+    expect(await tell("You should know this.")).toBe("app");
+    expect(pushes).toHaveLength(1);
+    expect(calls.slice(before).filter((c) => c.path.endsWith("/messages"))).toHaveLength(1);
+  });
+
+  it("writing again ends it", async () => {
+    const before = texts().length;
+    await inbound(LENA, "ok, text me again");
+    expect(texts().length).toBe(before + 1);
+    expect((await call("GET", "/v1/app/imessage")).json).toMatchObject({ optedOut: false });
+    expect(await tell("Back on iMessage.")).toBe("imessage");
+  });
+
+  it("a send Linq refuses because they opted out there is remembered, not tried again", async () => {
+    await inbound(LENA, "one more question");
+    refuseSends = true;
+    refuseCode = 2024;
+    try {
+      expect(await tell("Refused by Linq.")).toBe("app");
+    } finally {
+      refuseSends = false;
+      refuseCode = 2027;
+    }
+    expect((await call("GET", "/v1/app/imessage")).json).toMatchObject({ optedOut: true });
+    const before = calls.length;
+    await call("PUT", "/v1/app/ambient/settings", { reach: "imessage" });
+    expect(await tell("Not even tried.")).toBe("app");
+    expect(calls.slice(before).filter((c) => c.path.endsWith("/messages"))).toEqual([]);
+    // They write again: over, and the next tests start from iMessage.
+    await inbound(LENA, "hello again");
+    await call("PUT", "/v1/app/ambient/settings", { reach: "imessage" });
+    expect((await call("GET", "/v1/app/imessage")).json).toMatchObject({ optedOut: false });
   });
 });
 

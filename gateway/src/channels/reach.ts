@@ -6,8 +6,9 @@
 //   what Amb says first (the heartbeat, a decision, an automation) goes to the one place the
 //   person chose ("reach" in Amb's settings): that channel, or the app's push. Never both.
 //
-// When the chosen channel can't take it (not connected anymore, the provider refuses), the push
-// goes out instead, so nothing is lost. While the person has Amb's chat open in the app, they see
+// When the chosen channel can't or shouldn't take it (not connected anymore, the provider refuses,
+// the person asked it to stop or hasn't answered the last few), the push goes out instead, so
+// nothing is lost. While the person has Amb's chat open in the app, they see
 // it there and the channel stays quiet.
 import type { Notifier, PushMessage } from "../push.ts";
 
@@ -16,13 +17,17 @@ export interface AmbChannel {
   readonly kind: string;
   /** Whether this person connected it. */
   linked(uid: string): Promise<boolean>;
-  /** Sends Amb's text there (in the channel's own form). Throws when it can't. */
-  send(uid: string, text: string): Promise<void>;
+  /**
+   * Sends Amb's text there (in the channel's own form). Throws when it can't, or, with `first`
+   * (Amb writes first, it isn't an answer), when it shouldn't right now: the person asked it to
+   * stop, hasn't answered the last ones, or the provider says the chat or line needs a rest.
+   */
+  send(uid: string, text: string, opts?: { first?: boolean }): Promise<void>;
   /**
    * Sends a question with its answers to pick from in the channel's own way (iMessage: a poll),
    * when it has one; a pick comes back as the decision's answer. Throws when it can't.
    */
-  ask?(uid: string, text: string, question: Question): Promise<void>;
+  ask?(uid: string, text: string, question: Question, opts?: { first?: boolean }): Promise<void>;
 }
 
 /** A decision as a channel asks it: the answers to pick from, and which decision a pick settles. */
@@ -96,8 +101,8 @@ export class AmbReach {
     const channel = want !== "app" && !this.inApp(uid) ? this.channels.get(want) : undefined;
     if (channel && (await channel.linked(uid).catch(() => false))) {
       try {
-        if (question && question.choices.length >= 2 && channel.ask) await channel.ask(uid, text, question);
-        else await channel.send(uid, `${text}${question ? numbered(question.choices) : ""}`);
+        if (question && question.choices.length >= 2 && channel.ask) await channel.ask(uid, text, question, { first: true });
+        else await channel.send(uid, `${text}${question ? numbered(question.choices) : ""}`, { first: true });
         return channel.kind;
       } catch (err) {
         console.warn(`[reach] ${want} didn't take it, sent as a push: ${(err as Error).message}`);

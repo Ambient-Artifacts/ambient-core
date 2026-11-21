@@ -1299,8 +1299,9 @@ export function linqHookRouter(imessage: () => IMessageChannel | undefined): Rou
     const header = (n: string) => (typeof req.headers[n] === "string" ? (req.headers[n] as string) : undefined);
     const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const out = await im.receive({ id: header("webhook-id"), timestamp: header("webhook-timestamp"), signature: header("webhook-signature") }, body).catch((err: Error) => {
+      // Not taken: Linq sends it again (it retries on a 5xx for half an hour).
       console.warn(`[imessage] an event wasn't handled: ${err.message}`);
-      return { status: 200, body: { ok: false } };
+      return { status: 500, body: { error: "server_error" } };
     });
     res.status(out.status).json(out.body);
   });

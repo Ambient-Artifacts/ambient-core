@@ -1237,20 +1237,37 @@ Amb writes first, reach "imessage" ──▶ a text
 - **Kept in the sealed records**: the person's link (their number, the Linq chat) under their own
   key. Finding the account for a number or a code needs a lookup that isn't under one owner: those
   rows hold only ids, keyed by an HMAC of the number, never the number itself.
-- Opting out (STOP) is Linq's: it refuses Amb's texts to that number, and what Amb says first goes
-  out as a push instead.
+- **Stop means stop.** A text that is one of Linq's opt-out keywords (STOP, UNSUBSCRIBE, OPT OUT in
+  any casing; CANCEL, END, QUIT in capitals, as Linq matches them), or says the same in words
+  ("please stop texting me", "schreib mir nicht mehr"), is not a message to Amb: no turn, nothing in
+  the chat. The link is marked opted out, `reach` goes back to `"app"`, and one line goes out saying
+  so and how to come back (the only send with `override_optout`). From then on nothing is sent by
+  text, not even tried. A send Linq refuses with 403 code 2024 does the same. It ends when the
+  person texts again, as it does at Linq; `reach` stays where it is until they choose iMessage again.
+- **Amb doesn't text into silence.** Before it writes first (never before an answer), it asks Linq
+  for the chat's health and the line's state (each at most every 15 minutes) and holds back when
+  the chat is `CRITICAL` or `OPTED_OUT`, when the line is flagged or not delivering, and when its
+  own messages went unanswered: two may go unanswered, the third waits a day, the fourth three
+  days, then nothing until the person writes. On an `AT_RISK` chat or line it's one a day. What's
+  held back goes out as a push instead. A text or a tap on a poll starts it afresh.
+  `phone_number.status_updated` makes it ask for the line's state again at once.
+- **What Amb writes first goes to the person, not to a chat** (`POST /v3/messages` with `to`, no
+  `from`): Linq picks the line, reuses their chat while its line is healthy and moves off a flagged
+  one by itself; the chat it lands in is kept. Answers go into the chat they were asked in.
+- **The contact card is shared again about once a day**, with the first text of the day: there's no
+  telling whether it was saved.
 
 The app's API:
 
-- `GET /v1/app/imessage` → `{ "connected", "handle", "number", "code", "expiresAt", "link" }`:
+- `GET /v1/app/imessage` → `{ "connected", "handle", "number", "code", "expiresAt", "link", "optedOut" }`:
   `handle` is their number mostly hidden; `code`, `expiresAt` and `link` (opens Messages with the
-  code filled in) while a code waits.
+  code filled in) while a code waits; `optedOut` while they've asked Amb to stop texting.
 - `POST /v1/app/imessage` → the same, with a code to text (the one still waiting, when it has more
   than ten minutes left).
 - `DELETE /v1/app/imessage` → forgets the number; `reach` goes back to `"app"`.
 
 MCP tool `connect_imessage` (`{ disconnect? }`): the same three, for the person's AI and for Amb
-itself. Linq's part, once per server: a webhook subscription for `message.received` and `poll.vote.added` at
+itself. Linq's part, once per server: a webhook subscription for `message.received`, `poll.vote.added` and `phone_number.status_updated` at
 `<origin>/v1/hooks/linq?version=2026-02-03`, whose signing secret is `BRAIN_LINQ_WEBHOOK_SECRET`.
 
 ## Bot templates

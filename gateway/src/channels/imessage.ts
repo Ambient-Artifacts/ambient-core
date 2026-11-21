@@ -38,6 +38,17 @@ const TYPING_MAX_MS = 10 * 60_000;
 /** Wrong codes from one number, per hour, before it's ignored. */
 const TRIES_MAX = 5;
 const API = "https://api.linqapp.com/api/partner";
+/** Linq's answer to a send to someone who asked it to stop (403). */
+const OPTED_OUT_CODE = 2024;
+/** A line's state and a chat's health are asked from Linq at most this often. */
+const HEALTH_TTL_MS = 15 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
+/**
+ * How long Amb waits before it writes first again to someone who hasn't answered what it sent
+ * (Linq's back-off: one follow-up after a day, one more after a few days, then nothing until
+ * they write). Indexed by how many went unanswered; past the end, it stays quiet.
+ */
+const WAIT_AFTER_UNANSWERED_MS = [0, 0, DAY_MS, 3 * DAY_MS];
 
 export interface LinqConfig {
   apiKey: string;
@@ -63,6 +74,19 @@ interface Link {
   /** The Linq chat between them and the line. */
   chatId: string;
   linkedAt: number;
+  /** The line the chat is on (E.164), as Linq's webhooks name it. */
+  line?: string;
+  /** They asked Amb to stop texting (when): nothing goes out until they write again. */
+  optedOut?: number;
+  /** The chat's health as Linq last reported it (HEALTHY, AT_RISK, CRITICAL, OPTED_OUT). */
+  health?: string;
+  /** When they last wrote (a text, or a tap on a poll). */
+  heardAt?: number;
+  /** What Amb wrote first since then, and when it last did: its back-off. */
+  unanswered?: number;
+  lastFirstAt?: number;
+  /** When Amb's contact card was last shared in the chat. */
+  cardAt?: number;
 }
 
 interface Pending {
@@ -88,6 +112,8 @@ export interface IMessageStatus {
   expiresAt: number | null;
   /** Opens Messages with the code filled in. */
   link: string | null;
+  /** They asked Amb to stop texting them: it writes in the app until they text it again. */
+  optedOut: boolean;
 }
 
 export class IMessageError extends Error {
@@ -95,9 +121,32 @@ export class IMessageError extends Error {
     public code: string,
     message: string,
     public status = 400,
+    /** Linq's own error code, when it refused. */
+    public linqCode?: number,
   ) {
     super(message);
   }
+}
+
+/**
+ * Whether a text asks Amb to stop texting. Linq's own keywords as the whole message (it then
+ * refuses every send itself, 403 code 2024), and the same wish said in words, which Linq leaves
+ * to us. STOP, UNSUBSCRIBE and OPT OUT count in any casing; CANCEL, END and QUIT only in
+ * capitals, as Linq matches them: in small letters they're more often an answer to Amb.
+ */
+export function isOptOut(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 80) return false;
+  if (/^(stop|stopp|unsubscribe|opt[\s-]?out)[.!]*$/i.test(t)) return true;
+  if (/^(CANCEL|END|QUIT)$/.test(t)) return true;
+  return (
+    /^(please\s+)?(stop|quit)\s+(texting|messaging|writing(\s+to)?|sending)(\s+me)?(\s+(here|messages?|texts?))*(\s+please)?[.!]*$/i.test(t) ||
+    /^(please\s+)?(don'?t|don’t|do not|never)\s+(text|message|write(\s+to)?|contact)\s+me(\s+(again|anymore|any more|here))*(\s+please)?[.!]*$/i.test(t) ||
+    /^(please\s+)?(leave me alone|unsubscribe me|no more (texts?|messages?))(\s+please)?[.!]*$/i.test(t) ||
+    /^(bitte\s+)?(hör|hoer)\s+auf,?(\s+mir)?\s+zu\s+schreiben[.!]*$/i.test(t) ||
+    /^(bitte\s+)?(schreib|schreibe|schreibt)\s+mir\s+(nicht\s+mehr|nie\s+wieder)(\s+bitte)?[.!]*$/i.test(t) ||
+    /^(bitte\s+)?keine\s+(nachrichten|sms|texte)\s+mehr(\s+bitte)?[.!]*$/i.test(t)
+  );
 }
 
 /** What the channel needs of Amb's chat. */
@@ -116,7 +165,12 @@ interface LinqEvent {
   data?: {
     id?: string;
     direction?: string;
-    chat?: { id?: string; is_group?: boolean; owner_handle?: { handle?: string } };
+    chat?: { id?: string; is_group?: boolean; owner_handle?: { handle?: string } | null; health_status?: { status?: string } };
+    /** phone_number.status_updated: the line and what it changed to. */
+    phone_number?: string;
+    new_status?: string;
+    new_state?: string;
+    new_reputation?: string;
     sender_handle?: { handle?: string; is_me?: boolean };
     parts?: { type?: string; value?: string }[];
     /** A poll vote: the poll's message and the option picked. */
@@ -160,6 +214,9 @@ export class IMessageChannel implements AmbChannel {
   private seen = new Map<string, number>();
   private tries = new Map<string, { n: number; at: number }>();
   private line: { number: string; at: number } | undefined;
+  /** The lines' states and the chats' health, as Linq last said (asked again after 15 minutes). */
+  private lines: { at: number; list: { number: string; paused: boolean; slow: boolean }[] } | undefined;
+  private healths = new Map<string, { status: string; at: number }>();
   private pending = new Set<Promise<unknown>>();
 
   constructor(
@@ -171,6 +228,8 @@ export class IMessageChannel implements AmbChannel {
       inbox: AmbInbox;
       /** Files a pick in a poll as the decision's answer. Without it, polls aren't sent. */
       answer?: AnswerDecision;
+      /** They asked Amb to stop texting: where it writes first goes back to the app. */
+      onOptOut?: (uid: string) => Promise<void> | void;
       fetchImpl?: typeof fetch;
       /** Linq's API (tests: a stand-in). */
       apiBase?: string;
@@ -258,6 +317,7 @@ export class IMessageChannel implements AmbChannel {
       code: code?.code ?? null,
       expiresAt: code?.exp ?? null,
       link: code && number ? `sms:${number}&body=${encodeURIComponent(code.code)}` : null,
+      optedOut: !!link?.optedOut,
     };
   }
 
@@ -304,22 +364,135 @@ export class IMessageChannel implements AmbChannel {
     } catch {
       // Not JSON: the status says enough.
     }
-    if (!res.ok) throw new IMessageError("linq_refused", `Linq answered ${res.status}${json.error?.code ? ` (${json.error.code})` : ""}${json.error?.message ? `: ${json.error.message}` : ""}`, 502);
+    if (!res.ok) throw new IMessageError("linq_refused", `Linq answered ${res.status}${json.error?.code ? ` (${json.error.code})` : ""}${json.error?.message ? `: ${json.error.message}` : ""}`, 502, json.error?.code);
     return { status: res.status, json };
   }
 
-  private async text(chatId: string, text: string): Promise<void> {
+  private static parts(text: string): { type: "text"; value: string }[] {
     const plain = toPlainText(text);
     const value = plain.length > TEXT_MAX ? `${plain.slice(0, TEXT_MAX).trimEnd()}…\n\n(The rest is in the Ambient app.)` : plain;
-    if (!value) return;
-    await this.call("POST", `/v3/chats/${encodeURIComponent(chatId)}/messages`, { message: { parts: [{ type: "text", value }] } });
+    return value ? [{ type: "text", value }] : [];
   }
 
-  /** Amb's text to a person who connected iMessage. */
-  async send(uid: string, text: string): Promise<void> {
+  /** A text into a chat. `overrideOptout`: the one confirmation after someone asked Amb to stop. */
+  private async text(chatId: string, text: string, opts: { overrideOptout?: boolean } = {}): Promise<void> {
+    const parts = IMessageChannel.parts(text);
+    if (!parts.length) return;
+    await this.call("POST", `/v3/chats/${encodeURIComponent(chatId)}/messages`, { message: { parts }, ...(opts.overrideOptout ? { override_optout: true } : {}) });
+  }
+
+  // ---- when Amb may text (Linq's best practices: opt-out, chat health, line reputation, back-off) ----
+
+  /** The lines as Linq sees them now: one that's flagged or not delivering is paused, one with warning signs slow. */
+  private async lineStates(): Promise<{ number: string; paused: boolean; slow: boolean }[]> {
+    if (this.lines && this.now() - this.lines.at < HEALTH_TTL_MS) return this.lines.list;
+    const out = await this.call<{ phone_numbers?: { phone_number?: string; line_status?: string; status?: string; reputation?: { state?: string; status?: string } }[] }>("GET", "/v3/phone_numbers").catch(() => null);
+    // Not known right now: what was known stays, and nothing is held back for it.
+    if (!out) return this.lines?.list ?? [];
+    const list = (out.json.phone_numbers ?? []).flatMap((n) => {
+      if (!n.phone_number) return [];
+      const flagged = (n.line_status ?? n.status) === "FLAGGED";
+      const paused = flagged || n.reputation?.state === "DELIVERY_LIMITED" || n.reputation?.status === "CRITICAL";
+      const slow = n.reputation?.state === "NEEDS_ATTENTION" || n.reputation?.status === "AT_RISK";
+      return [{ number: n.phone_number, paused, slow }];
+    });
+    this.lines = { at: this.now(), list };
+    return list;
+  }
+
+  /** The state of the line a chat is on (the only line's, when the chat's isn't known). */
+  private async lineOf(link: Link): Promise<{ paused: boolean; slow: boolean }> {
+    const list = await this.lineStates();
+    const own = list.find((l) => l.number === link.line) ?? (list.length === 1 ? list[0] : undefined);
+    return own ?? { paused: false, slow: false };
+  }
+
+  /** The chat's health as Linq has it now (every chat read carries it), else as last heard. */
+  private async healthOf(link: Link): Promise<string | undefined> {
+    const known = this.healths.get(link.chatId);
+    if (known && this.now() - known.at < HEALTH_TTL_MS) return known.status;
+    const out = await this.call<{ health_status?: { status?: string }; chat?: { health_status?: { status?: string } } }>("GET", `/v3/chats/${encodeURIComponent(link.chatId)}`).catch(() => null);
+    const status = out?.json.health_status?.status ?? out?.json.chat?.health_status?.status;
+    if (!status) return link.health;
+    this.healths.set(link.chatId, { status, at: this.now() });
+    return status;
+  }
+
+  /**
+   * Whether Amb may write first to this person now; throws with the reason when it may not (the
+   * push goes instead: channels/reach.ts). An answer to what they just wrote isn't held back by
+   * any of this, only by an opt-out.
+   */
+  private async mayWriteFirst(uid: string, link: Link): Promise<void> {
+    const held = (why: string) => new IMessageError("held_back", why, 409);
+    const line = await this.lineOf(link);
+    if (line.paused) throw held("the line is flagged or not delivering");
+    const health = await this.healthOf(link);
+    if (health === "OPTED_OUT") {
+      await this.optOut(uid, link);
+      throw new IMessageError("opted_out", "they asked not to be texted", 403);
+    }
+    if (health === "CRITICAL") throw held("the chat's health is critical");
+    const unanswered = link.unanswered ?? 0;
+    const since = this.now() - (link.lastFirstAt ?? 0);
+    const wait = WAIT_AFTER_UNANSWERED_MS[unanswered];
+    if (wait === undefined) throw held(`${unanswered} messages went unanswered`);
+    if (since < wait) throw held(`${unanswered} messages went unanswered; waiting before the next`);
+    // Warning signs on the chat or its line: one message a day at most until they write.
+    if ((health === "AT_RISK" || line.slow) && unanswered >= 1 && since < DAY_MS) throw held("the chat or its line is at risk; one a day");
+  }
+
+  /** They asked Amb to stop: remembered, and where it writes first goes back to the app. */
+  private async optOut(uid: string, link: Link): Promise<void> {
+    if (!link.optedOut) await this.put(uid, LINK, { ...link, optedOut: this.now(), health: "OPTED_OUT" } satisfies Link);
+    this.healths.delete(link.chatId);
+    await Promise.resolve(this.d.onOptOut?.(uid)).catch(() => undefined);
+  }
+
+  /** The link, when Amb may text there: connected, and not asked to stop. */
+  private async sendable(uid: string, first: boolean): Promise<Link> {
     const link = await this.get<Link>(uid, LINK);
     if (!link) throw new IMessageError("not_connected", "iMessage isn't connected.", 400);
-    await this.text(link.chatId, text);
+    if (link.optedOut) throw new IMessageError("opted_out", "they asked not to be texted", 403);
+    if (first) await this.mayWriteFirst(uid, link);
+    return link;
+  }
+
+  /**
+   * Sends Amb's text. What it writes first goes to the person, not to a chat (POST /v3/messages
+   * with `to` and no `from`): Linq picks the line, reuses their chat while its line is healthy and
+   * moves off a flagged one by itself. An answer goes into the chat they wrote in. A send Linq
+   * refuses because they opted out (2024) is remembered and never tried again.
+   */
+  private async out(uid: string, link: Link, text: string, first: boolean): Promise<Link> {
+    let next = link;
+    try {
+      const parts = IMessageChannel.parts(text);
+      if (parts.length && first) {
+        const out = await this.call<{ chat_id?: string }>("POST", "/v3/messages", { to: [link.handle], message: { parts } });
+        if (out.json.chat_id && out.json.chat_id !== link.chatId) next = { ...next, chatId: out.json.chat_id };
+      } else if (parts.length) {
+        await this.call("POST", `/v3/chats/${encodeURIComponent(link.chatId)}/messages`, { message: { parts } });
+      }
+    } catch (err) {
+      if (err instanceof IMessageError && err.linqCode === OPTED_OUT_CODE) await this.optOut(uid, link);
+      throw err;
+    }
+    const now = this.now();
+    if (first) next = { ...next, unanswered: (link.unanswered ?? 0) + 1, lastFirstAt: now };
+    // Its contact card again, about once a day: there's no telling whether they saved it.
+    if (now - (link.cardAt ?? 0) > DAY_MS) {
+      await this.call("POST", `/v3/chats/${encodeURIComponent(next.chatId)}/share_contact_card`).catch(() => undefined);
+      next = { ...next, cardAt: now };
+    }
+    if (next !== link) await this.put(uid, LINK, next satisfies Link);
+    return next;
+  }
+
+  /** Amb's text to a person who connected iMessage. `first`: Amb writes first (not an answer). */
+  async send(uid: string, text: string, opts: { first?: boolean } = {}): Promise<void> {
+    const first = opts.first === true;
+    await this.out(uid, await this.sendable(uid, first), text, first);
   }
 
   /**
@@ -327,11 +500,14 @@ export class IMessageChannel implements AmbChannel {
    * one settles the decision (onVote). When the poll can't be sent (the chat fell back to SMS, the
    * line doesn't do polls), the answers go as numbered text instead, so the question is never lost.
    */
-  async ask(uid: string, text: string, question: Question): Promise<void> {
-    const link = await this.get<Link>(uid, LINK);
-    if (!link) throw new IMessageError("not_connected", "iMessage isn't connected.", 400);
-    if (!this.d.answer) return this.text(link.chatId, `${text}${numbered(question.choices)}`);
-    await this.text(link.chatId, text);
+  async ask(uid: string, text: string, question: Question, opts: { first?: boolean } = {}): Promise<void> {
+    const first = opts.first === true;
+    const before = await this.sendable(uid, first);
+    if (!this.d.answer) {
+      await this.out(uid, before, `${text}${numbered(question.choices)}`, first);
+      return;
+    }
+    const link = await this.out(uid, before, text, first);
     try {
       const out = await this.call<{ message_id?: string; poll?: { options?: { option_id?: string; text?: string }[] } }>("POST", `/v3/chats/${encodeURIComponent(link.chatId)}/polls`, {
         poll: { options: question.choices.map((c) => ({ text: c.slice(0, 200) })), idempotency_key: `decision-${question.decisionId}` },
@@ -345,13 +521,23 @@ export class IMessageChannel implements AmbChannel {
     }
   }
 
+  /** They wrote (a text, or a tap): what Amb sent is answered, an opt-out is over, the chat's health is as Linq says. */
+  private async heard(uid: string, link: Link, seen: { chatId: string; health?: string; line?: string }): Promise<Link> {
+    const { optedOut: _over, ...rest } = link;
+    const next: Link = { ...rest, chatId: seen.chatId, heardAt: this.now(), unanswered: 0, ...(seen.health ? { health: seen.health } : {}), ...(seen.line ? { line: seen.line } : {}) };
+    if (seen.health) this.healths.set(seen.chatId, { status: seen.health, at: this.now() });
+    await this.put(uid, LINK, next satisfies Link);
+    return next;
+  }
+
   /** A tap on a poll's option: the decision's answer, when it's the person's own poll and still open. */
-  private async onVote(handle: string, chatId: string, messageId: string, optionId: string): Promise<void> {
+  private async onVote(handle: string, chatId: string, messageId: string, optionId: string, seen: { health?: string; line?: string } = {}): Promise<void> {
     const known = await this.index(HANDLE, this.indexKey("handle", handle));
     if (!known || !this.d.answer) return;
     const uid = known.u;
     const link = await this.get<Link>(uid, LINK);
     if (!link || link.handle !== handle) return;
+    await this.heard(uid, link, { chatId, ...seen });
     const poll = await this.get<PollRecord>(uid, POLL, messageId);
     const option = poll?.options.find((o) => o.id === optionId);
     if (!poll || !option || this.now() - poll.at > POLL_TTL_MS) return;
@@ -390,15 +576,22 @@ export class IMessageChannel implements AmbChannel {
       return { status: 400, body: { error: "bad_request" } };
     }
     const m = event.data;
+    // A line's state changed (flagged, at risk, recovered): asked afresh before Amb next writes first.
+    if (event.event_type === "phone_number.status_updated") {
+      this.lines = undefined;
+      console.warn(`[imessage] line ${m?.phone_number ?? "?"} is now ${m?.new_status ?? "?"}, ${m?.new_state ?? m?.new_reputation ?? "?"}`);
+      return { status: 200, body: { ok: true } };
+    }
     const handle = m?.sender_handle?.handle;
     const chatId = m?.chat?.id;
+    const seen = { ...(m?.chat?.health_status?.status ? { health: m.chat.health_status.status } : {}), ...(m?.chat?.owner_handle?.handle ? { line: m.chat.owner_handle.handle } : {}) };
     // A tap on a poll Amb sent: the decision's answer.
     if (event.event_type === "poll.vote.added") {
       if (!m || !handle || !chatId || !m.message_id || !m.option_id || m.sender_handle?.is_me || m.chat?.is_group) return { status: 200, body: { ok: true } };
       const voteId = event.event_id ?? headers.id!;
       if (this.seen.has(voteId)) return { status: 200, body: { ok: true } };
       this.seen.set(voteId, this.now());
-      this.track(this.onVote(normalizeHandle(handle), chatId, m.message_id, m.option_id));
+      this.track(this.onVote(normalizeHandle(handle), chatId, m.message_id, m.option_id, seen));
       return { status: 200, body: { ok: true } };
     }
     // Only a person's own text in a chat with the line: no groups, nothing the line sent itself.
@@ -416,24 +609,32 @@ export class IMessageChannel implements AmbChannel {
       .join("\n");
     const from = normalizeHandle(handle);
     if (this.struckOut(from)) return { status: 200, body: { ok: true } };
-    this.track(this.onText(from, chatId, text, parts.some((p) => p.type !== "text")));
+    this.track(this.onText(from, chatId, text, parts.some((p) => p.type !== "text"), seen));
     return { status: 200, body: { ok: true } };
   }
 
-  private async onText(handle: string, chatId: string, text: string, files: boolean): Promise<void> {
+  private async onText(handle: string, chatId: string, text: string, files: boolean, seen: { health?: string; line?: string } = {}): Promise<void> {
     const known = await this.index(HANDLE, this.indexKey("handle", handle));
     // A code someone is waiting with: the number becomes theirs (and stops being anyone else's).
     const claim = await this.claim(text);
     if (claim && claim.uid !== known?.u) {
       if (known) await this.disconnect(known.u);
-      return this.link(claim.uid, claim.code, handle, chatId);
+      return this.link(claim.uid, claim.code, handle, chatId, seen.line);
     }
     if (!known) return this.strike(handle);
     const uid = known.u;
     const link = await this.get<Link>(uid, LINK);
     // The lookup outlived the link (disconnected in between): not theirs anymore.
     if (!link || link.handle !== handle) return;
-    if (link.chatId !== chatId) await this.put(uid, LINK, { ...link, chatId } satisfies Link);
+    // "Stop": no turn for Amb and nothing more by text. One line says so and how to come back
+    // (Linq refuses everything else to them from here; this one send carries the override).
+    if (isOptOut(text)) {
+      const already = !!link.optedOut;
+      await this.optOut(uid, { ...link, chatId });
+      if (!already) await this.text(chatId, "Okay, I won't text you here anymore. Write to me here any time and I'll answer again.", { overrideOptout: true }).catch(() => undefined);
+      return;
+    }
+    await this.heard(uid, link, { chatId, ...seen });
     if (!text) {
       if (files) await this.text(chatId, "I can only read text here so far. Send it to me in the Ambient app and I'll look at it.");
       return;
@@ -483,8 +684,10 @@ export class IMessageChannel implements AmbChannel {
     return !!t && this.now() - t.at < 60 * 60_000 && t.n >= TRIES_MAX;
   }
 
-  private async link(uid: string, code: string, handle: string, chatId: string): Promise<void> {
-    await this.put(uid, LINK, { handle, chatId, linkedAt: this.now() } satisfies Link);
+  private async link(uid: string, code: string, handle: string, chatId: string, line?: string): Promise<void> {
+    const now = this.now();
+    // They wrote first, and the card is shared right below (after Amb's first text, as Linq asks).
+    await this.put(uid, LINK, { handle, chatId, linkedAt: now, heardAt: now, unanswered: 0, cardAt: now, ...(line ? { line } : {}) } satisfies Link);
     await this.setIndex(HANDLE, this.indexKey("handle", handle), { u: uid });
     await this.setIndex(CODE, this.indexKey("code", code), null);
     await this.put(uid, CODE, {}, true);

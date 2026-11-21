@@ -314,6 +314,8 @@ export function createApp(deps: AppDeps) {
   // Where Amb's own words go besides the app's chat (channels/reach.ts): an answer back through
   // the channel it was asked in; what Amb says first to the one place the person chose.
   let reachOf: (uid: string) => Promise<string> = async () => "app";
+  // Someone asked Amb to stop texting: it writes first in the app again (set with Amb's settings, below).
+  let reachBackToApp: (uid: string) => Promise<void> = async () => undefined;
   // A pick in a poll files the decision's answer (set once the decisions are up, just below).
   let answerDecision: (uid: string, id: string, answer: string) => Promise<void> = async () => {
     throw new Error("Decisions aren't up yet.");
@@ -322,7 +324,7 @@ export function createApp(deps: AppDeps) {
   folders.reach = reach;
   ambient.onReply = (uid, via, text) => reach.reply(uid, via, text);
   if (config.linq) {
-    const imessage = new IMessageChannel({ control, keys: routineKeys, master: config.masterKey, config: config.linq, inbox: ambient, answer: (uid, id, answer) => answerDecision(uid, id, answer), fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl, apiBase: deps.linq?.apiBase });
+    const imessage = new IMessageChannel({ control, keys: routineKeys, master: config.masterKey, config: config.linq, inbox: ambient, answer: (uid, id, answer) => answerDecision(uid, id, answer), onOptOut: (uid) => reachBackToApp(uid), fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl, apiBase: deps.linq?.apiBase });
     folders.imessage = imessage;
     reach.add(imessage);
   }
@@ -341,6 +343,9 @@ export function createApp(deps: AppDeps) {
   // Watching the bots is part of Amb (its settings), not an automation.
   const ambSettings = new AmbSettings({ control, keys: routineKeys, legacyOff: (uid) => automations.legacyWatchOff(uid), canReach: (uid, kind) => reach.linked(uid, kind) });
   reachOf = (uid) => ambSettings.reach(uid);
+  reachBackToApp = async (uid) => {
+    if ((await ambSettings.reach(uid)) !== "app") await ambSettings.set(uid, { reach: "app" });
+  };
   folders.ambSettings = ambSettings;
   heartbeat.watching = (uid) => ambSettings.notifies(uid);
   // Every bot learns on its own (docs/bots.md, "How bots learn").

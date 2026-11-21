@@ -1212,6 +1212,7 @@ function registerLearningTools(
             return result("iMessage is disconnected: their number is forgotten, and Ambient writes to them in the app.", { connected: false });
           }
           const st = await imessage.start(actor.uid);
+          if (st.connected && st.optedOut) return result(`iMessage is connected (${st.handle}), but they asked Ambient to stop texting them, so it writes in the app. It starts again as soon as they text Ambient${st.number ? ` at ${st.number}` : ""}.`, { ...st });
           if (st.connected) return result(`iMessage is connected (${st.handle}). They text Ambient${st.number ? ` at ${st.number}` : ""}; it answers there.`, { ...st });
           if (!st.number) return result("iMessage can't be connected right now: the line's number isn't known. Try again in a minute.", { ...st });
           return result(`Not connected yet. They text ${st.code} to ${st.number} from their phone (within the hour); Ambient answers there once it arrives.`, { ...st });
