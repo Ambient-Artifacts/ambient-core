@@ -133,7 +133,7 @@ describe("when an automation is due", () => {
 describe("the app's API", () => {
   it("lists the templates for the person only: watching and improving bots aren't automations", async () => {
     const l = await list();
-    expect(l.templates.map((t) => t.id)).toEqual(["morning_brief", "waiting_on_me", "after_meeting", "weekly_review", "new_in_brain"]);
+    expect(l.templates.map((t) => t.id)).toEqual(["morning_brief", "waiting_on_me", "after_meeting", "weekly_review", "new_in_brain", "nightly_idea"]);
     expect(l.automations).toEqual([]);
     const retired = await call("POST", "/v1/app/automations", { template: "improve_bots" });
     expect(retired.json.error).toBe("no_such_template");

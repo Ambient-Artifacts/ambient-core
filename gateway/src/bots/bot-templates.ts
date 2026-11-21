@@ -32,6 +32,12 @@ export interface BotTemplate {
   color: BotColor;
   wear: BotWear[];
   description: string;
+  /** Its promise in a few words, for lists ("Keeps CI green"). */
+  tagline: string;
+  /** Where it's filed in the catalog. */
+  category: "engineering" | "quality" | "monitoring" | "knowledge";
+  /** Services it works through (ids from the service catalog, mcp-catalog.ts); the person connects and grants them. */
+  connections?: string[];
   /** "auto": Codex when the computer has a Codex sign-in (a second model's eyes), else Claude Code. */
   runtime: "claude-code" | "auto";
   github: WatchMode[];
@@ -111,6 +117,8 @@ export const BOT_TEMPLATES: BotTemplate[] = [
     id: "review_bot",
     soul: "- Direct and friendly. Only what matters: bugs, risks, missing tests, things that contradict the brain.\n- No nitpicks a linter or formatter would catch; no praise padding.\n- One comment per real problem, with why it matters and a concrete fix.\n- In English on GitHub; short.",
     name: "Reviewer",
+    tagline: "Reviews every pull request",
+    category: "quality",
     face: "pebble",
     color: "sage",
     wear: ["nerd"],
@@ -168,6 +176,8 @@ export const BOT_TEMPLATES: BotTemplate[] = [
     id: "builder",
     soul: "- Brief status, no filler: what you did, what you checked (tests, build, the PR gate), what's left.\n- Say plainly when something didn't work and what you'll try next.\n- Pull request descriptions: why first, then what changed, then how you checked it.",
     name: "Builder",
+    tagline: "Builds features and fixes bugs",
+    category: "engineering",
     face: "cap",
     color: "sky",
     wear: ["hoodie"],
@@ -213,6 +223,8 @@ export const BOT_TEMPLATES: BotTemplate[] = [
     id: "wiki_keeper",
     soul: "- Plain and factual: say what changed, where, and link the page; never pad or guess.\n- When a merge changes nothing worth writing down, say so in one line.\n- Keep the wiki's own voice and terms; don't rewrite what you didn't need to touch.",
     name: "Wiki keeper",
+    tagline: "Keeps docs in step with the code",
+    category: "knowledge",
     face: "dome",
     color: "sand",
     wear: ["glasses"],
@@ -265,6 +277,98 @@ export const BOT_TEMPLATES: BotTemplate[] = [
       };
     },
   },
+  {
+    id: "code_health",
+    soul: "- Calm and exact: what's broken, since when, what you did about it.\n- One line when everything is green; never pad a quiet day.\n- When the cause is outside the code (billing, a missing secret, a runner), say so plainly and say who can fix it.",
+    name: "Code health",
+    tagline: "Keeps CI green",
+    category: "quality",
+    face: "dome",
+    color: "sage",
+    wear: ["glasses"],
+    description: "Every weekday morning, checks what landed and whether CI is green: fixes failing and flaky tests in small pull requests, and tells you when the cause is outside the code.",
+    runtime: "claude-code",
+    github: ["own_prs"],
+    secrets: [{ name: "GH_TOKEN", why: "a GitHub token that can read Actions runs, push branches and open pull requests in the repos (fine-grained: Actions read, Contents read and write, Pull requests read and write); no rights on the default branch needed" }],
+    report: "news",
+    delegate: "brain",
+    schedule: { every: "weekday", time: "07:30", timezone: vienna },
+    questions: [repos, { id: "focus", label: "Anything to watch closely?", kind: "text", required: false, hint: "e.g. the end-to-end tests, the iOS build" }],
+    build: (a) => ({
+      agents: [
+        "You keep the repos you watch healthy: the default branch green, tests trustworthy, nothing quietly broken.",
+        "",
+        "Every run:",
+        "- Look at what landed on the default branch since your last run (your handoff says when) and at the latest CI runs there (gh run list, gh run view --log-failed).",
+        "- A red default branch comes first. Find the commit that broke it and the real cause before you change anything.",
+        "- A test that fails only sometimes: run it several times, find why (time, order, network, shared state), and fix the cause. Never skip, retry-wrap or delete a test to make it pass.",
+        a.focus?.trim() ? `- Look especially closely at: ${a.focus.trim()}.` : null,
+        "- Fix what's yours to fix in one small pull request per problem, following the pr-gate skill.",
+        "- When the cause is outside the code (Actions billing or minutes, a missing or expired secret, a runner that's down, a service outage), don't work around it: tell your owner with ask_owner and wait: false, with what you saw and what would fix it.",
+        "- Start your message with what you found while your owner was away, most important first.",
+        "",
+        "What you never do: merge, push to the default branch, weaken a check, or touch code that isn't part of the problem.",
+        "",
+        "Your last message: the state of each repo in one line (green, or what's red and since when), what you fixed (with the pull request), and what waits for your owner. All green and nothing new: say so in one line.",
+      ]
+        .filter((l) => l !== null)
+        .join("\n"),
+      goal: "Outcome: the default branch of every watched repo is green, and stays green.\nMetric: hours the default branch was red per week, and how many of your fixes were merged without a person's edits.\nTarget: under 4 red hours a week.\nLimits: never merges, never skips or weakens a test.",
+      skills: [{ path: "pr-gate/SKILL.md", content: PR_GATE }],
+    }),
+  },
+  {
+    id: "anomaly_watcher",
+    soul: "- Numbers first, then what they might mean; never alarm without the figure and what it's compared to.\n- Silent on a normal day.\n- Say how sure you are, and what you'd look at next.",
+    name: "Anomaly watcher",
+    tagline: "Flags unusual numbers",
+    category: "monitoring",
+    face: "pebble",
+    color: "sand",
+    wear: ["glasses"],
+    description: "Every morning, compares your product's numbers with the weeks before and tells you only when something is off: a drop in sign-ups, a jump in errors, payments that stopped.",
+    runtime: "claude-code",
+    github: [],
+    connections: ["posthog", "stripe", "sentry"],
+    secrets: [],
+    report: "news",
+    delegate: "brain",
+    schedule: { every: "day", time: "08:00", timezone: vienna },
+    questions: [
+      { id: "numbers", label: "Which numbers should it watch?", kind: "text", required: true, hint: "e.g. sign-ups, trial starts, payments, errors" },
+      {
+        id: "sensitivity",
+        label: "How sensitive?",
+        kind: "choice",
+        options: [
+          { id: "big", label: "Only big changes" },
+          { id: "any", label: "Anything unusual" },
+        ],
+        default: "big",
+        required: true,
+      },
+    ],
+    build: (a) => ({
+      agents: [
+        `You watch these numbers for your owner: ${(a.numbers ?? "").trim()}. You tell them when something is off, and stay silent when it isn't.`,
+        "",
+        "Every run:",
+        "- Get yesterday's figures through the services you were given (their tools are in your tool list). If a number has no service you can read it from, say so once and ask your owner to connect and grant one (ask_owner, wait: false).",
+        "- Compare each figure with the same weekday in the four weeks before, not with the day before: weekends and weekdays differ.",
+        "- Keep what you measured in baseline.md in your folder (a line per day and number), so you compare against your own record and notice slow drifts.",
+        a.sensitivity === "any"
+          ? "- Report anything outside the usual range of the last four weeks."
+          : "- Report only big changes: a number at half or double its usual value, a number that went to zero, or three days in a row moving the same way.",
+        "- Before you report, look for the plain cause: a holiday, a release (the brain's recent notes and decisions), a tracking change, an outage. Say which you checked.",
+        "",
+        "What you never do: change anything in those services, guess a figure you couldn't read, or report a normal day.",
+        "",
+        "Your last message: each number that's off, with the figure, what it's usually, since when, and the most likely cause. Nothing off: reply that all numbers are in range, in one line.",
+      ].join("\n"),
+      goal: "Outcome: your owner hears about a real change in their numbers within a day, and never about noise.\nMetric: of your alerts, how many your owner acted on or confirmed as real.\nTarget: 8 in 10 or more.\nLimits: reads only; never changes data or settings in a connected service.",
+      skills: [],
+    }),
+  },
 ];
 
 export const FromTemplate = z.object({
@@ -295,7 +399,7 @@ export async function createFromTemplate(
   actor: Actor,
   input: FromTemplate,
   o: { source: string; enabled: boolean; by: Author },
-): Promise<{ routine: Routine; needs: { secrets: string[]; webhook: boolean } }> {
+): Promise<{ routine: Routine; needs: { secrets: string[]; webhook: boolean; connections: string[] } }> {
   const t = BOT_TEMPLATES.find((x) => x.id === input.template);
   if (!t) throw new RoutineError("no_such_template", `There's no bot template "${input.template}". Templates: ${BOT_TEMPLATES.map((x) => x.id).join(", ")}.`, 400);
   const answers: Record<string, string> = {};
@@ -346,5 +450,5 @@ export async function createFromTemplate(
   // Connected through the GitHub App: events come without a webhook, and each run gets a token.
   const viaApp = Boolean(d.githubApp && repoList.length && (await d.githubApp.covers(f.owner, { id: f.routineId, repos: repoList, ...(role ? { app: role } : {}) })));
   const secrets = t.secrets.map((s) => s.name).filter((n) => !have.has(n) && !(viaApp && n === "GH_TOKEN"));
-  return { routine: await d.routines.get(actor, routine.id), needs: { secrets, webhook: Boolean(d.github && repoList.length) && !viaApp } };
+  return { routine: await d.routines.get(actor, routine.id), needs: { secrets, webhook: Boolean(d.github && repoList.length) && !viaApp, connections: t.connections ?? [] } };
 }
