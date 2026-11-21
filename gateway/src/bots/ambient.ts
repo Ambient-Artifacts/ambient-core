@@ -337,7 +337,7 @@ export class AmbientChat {
    * Amb's answer to a message is stored: where it goes besides the app's chat (channels/reach.ts
    * sends it back through the channel the message came in by).
    */
-  onReply?: (uid: string, via: string, text: string) => Promise<void> | void;
+  onReply?: (uid: string, via: string, text: string, files: FileRef[]) => Promise<void> | void;
 
   /** Each person's answer in the making, and their messages from channels waiting behind it. */
   private answering = new Map<string, Promise<void>>();
@@ -349,12 +349,12 @@ export class AmbientChat {
    * gets its own. Resolves once that answer is stored and sent back. One conversation, whichever
    * way it's written.
    */
-  async sendQueued(uid: string, name: string, text: string, via: string): Promise<ChatMessage> {
+  async sendQueued(uid: string, name: string, text: string, via: string, attachments: ChatAttachment[] = []): Promise<ChatMessage> {
     const turn = (this.queued.get(uid) ?? Promise.resolve())
       .catch(() => undefined)
       .then(async () => {
         for (let i = 0; i < 20 && this.isPending(uid); i++) await (this.answering.get(uid) ?? new Promise((r) => setTimeout(r, 250))).catch(() => undefined);
-        const out = await this.send(uid, name, text, [], via);
+        const out = await this.send(uid, name, text, attachments, via);
         await out.done.catch(() => undefined);
         return out.message;
       });
@@ -471,7 +471,7 @@ export class AmbientChat {
     const kept = made.length && this.d.attachments ? await this.d.attachments.save({ kind: "user", uid }, {}, made).catch((err: Error) => (console.warn(`[ambient] couldn't keep the files: ${err.message}`), [])) : [];
     await this.add(uid, "ambient", text, undefined, kept, via).catch((err: Error) => console.warn(`[ambient] couldn't store the reply: ${err.message}`));
     // Asked in a channel, answered there (the app's chat has it either way).
-    if (via !== "app") await Promise.resolve(this.onReply?.(uid, via, text || (kept.length ? "I made you a file: it's in the Ambient app." : ""))).catch(() => undefined);
+    if (via !== "app") await Promise.resolve(this.onReply?.(uid, via, text, kept)).catch(() => undefined);
   }
 
   /**

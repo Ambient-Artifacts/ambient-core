@@ -1228,9 +1228,13 @@ Amb writes first, reach "imessage" ──▶ a text
   own number settles that decision and gets "Got it: …" back. A tap on one that's already
   answered gets one line saying so. When Linq won't send the poll (the chat fell back to SMS),
   the answers go as numbered text. Polls need iOS 26 on the phone to show as polls.
-- **Text only, so far.** A photo or file without words gets a short note to send it in the app.
-  An answer over 3,000 characters is cut, with a line that the rest is in the app; what Amb made
-  as a file stays in the app.
+- **Photos and files, both ways.** What a text brings is fetched from Linq's links and goes into
+  Amb's chat with the message, as files sent in the app do: pictures as JPEG, PNG, GIF or WebP,
+  PDFs and text files, up to 4 and 10 MB together. Anything else (an iPhone's HEIC photo, a video,
+  a voice memo) isn't opened: a line says so and that the app takes it, and the rest of the message
+  still goes through. What Amb makes with its answer (a picture, a PDF) is uploaded to Linq and
+  sent in the same message; a file that can't be sent is named, with "in the Ambient app".
+- An answer over 3,000 characters is cut, with a line that the rest is in the app.
 - While Amb works on a text the chat is marked read and shows "typing" (best effort).
 - After linking, Amb shares the line's contact card (its name and picture, set up once in Linq's
   dashboard), so the thread shows "Ambient" instead of a number. Without a card nothing is sent.

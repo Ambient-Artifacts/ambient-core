@@ -35,6 +35,9 @@ const pushes: PushMessage[] = [];
 let refuseSends = false;
 /** Linq's error code for a refused send (2024: they opted out). */
 let refuseCode = 2027;
+let uploads = 0;
+/** A 1×1 PNG. */
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 let chatHealth = "HEALTHY";
 let lineStatus = "ACTIVE";
 let lineReputation = "HEALTHY";
@@ -50,7 +53,7 @@ const texts = () => calls.filter((c) => c.method === "POST" && c.path.endsWith("
 const chat = async () => (await call("GET", "/v1/app/ambient/chat?seen=0")).json.messages as { role: string; text: string; via: string }[];
 
 /** A text arriving at the line, as Linq posts it (Standard Webhooks signature). */
-async function inbound(from: string, value: string | null, opts: { secret?: Buffer; ts?: number; id?: string; group?: boolean; media?: boolean } = {}) {
+async function inbound(from: string, value: string | null, opts: { secret?: Buffer; ts?: number; id?: string; group?: boolean; media?: boolean; files?: { url: string; filename: string; mime_type: string; size_bytes: number }[] } = {}) {
   const id = opts.id ?? `msg-${++n}`;
   const body = JSON.stringify({
     api_version: "v3",
@@ -62,7 +65,7 @@ async function inbound(from: string, value: string | null, opts: { secret?: Buff
       direction: "inbound",
       chat: { id: CHAT, is_group: opts.group ?? false, owner_handle: { handle: LINE, is_me: true } },
       sender_handle: { handle: from, is_me: false, service: "iMessage" },
-      parts: [...(value !== null ? [{ type: "text", value }] : []), ...(opts.media ? [{ type: "media", url: "https://example.com/a.jpg" }] : [])],
+      parts: [...(value !== null ? [{ type: "text", value }] : []), ...(opts.media ? [{ type: "media", id: "m0", url: "https://example.com/IMG_0001.HEIC", filename: "IMG_0001.HEIC", mime_type: "image/heic", size_bytes: 2_000_000 }] : []), ...(opts.files ?? []).map((f, i) => ({ type: "media", id: `m${i + 1}`, ...f }))],
     },
   });
   const ts = String(opts.ts ?? Math.floor(Date.now() / 1000));
@@ -113,9 +116,23 @@ beforeAll(async () => {
     const chunks: Buffer[] = [];
     req.on("data", (d: Buffer) => chunks.push(d));
     req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8");
+      const bytes = Buffer.concat(chunks);
+      const raw = bytes.toString("utf8");
       const path = (req.url ?? "").split("?")[0]!;
-      calls.push({ method: req.method ?? "", path, auth: String(req.headers.authorization ?? ""), body: raw ? (JSON.parse(raw) as Record<string, unknown>) : {} });
+      let parsed: Record<string, unknown> = {};
+      try {
+        if (raw) parsed = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        parsed = { bytes: bytes.length }; // an upload's raw bytes
+      }
+      calls.push({ method: req.method ?? "", path, auth: String(req.headers.authorization ?? ""), body: parsed });
+      // Files: a photo someone texted (Linq's download link), and what Amb sends (upload URL, then the bytes).
+      if (req.method === "GET" && path === "/files/shot.png") return res.writeHead(200, { "content-type": "image/png" }).end(PNG);
+      if (req.method === "POST" && path === "/v3/attachments") {
+        const id = `att-${++uploads}`;
+        return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ attachment_id: id, upload_url: `http://127.0.0.1:${(linq.address() as AddressInfo).port}/upload/${id}`, download_url: "https://cdn.example.com/x", http_method: "PUT", expires_at: "2026-11-21T13:00:00Z", required_headers: { "content-type": String(parsed.content_type) } }));
+      }
+      if (req.method === "PUT" && path.startsWith("/upload/")) return res.writeHead(200).end();
       if (req.method === "POST" && path.endsWith("/messages") && refuseSends) {
         return res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ success: false, error: { status: 403, code: refuseCode, message: "Refused" } }));
       }
@@ -250,11 +267,36 @@ describe("one conversation, answered where it was asked", () => {
     expect(asked.at(-1)).not.toContain("wrote this on iMessage");
   });
 
-  it("a photo without words gets a short note, not a turn", async () => {
+  it("a photo Amb can't read (an iPhone's HEIC) gets a short note, not a turn", async () => {
     const before = (await chat()).length;
     await inbound(LENA, null, { media: true });
-    expect(texts().at(-1)).toContain("only read text here");
+    expect(texts().at(-1)).toContain("can't open that here");
     expect((await chat()).length).toBe(before);
+  });
+
+  it("a screenshot comes along: Amb sees it, and it's in the app's chat", async () => {
+    const shot = { url: `http://127.0.0.1:${(linq.address() as AddressInfo).port}/files/shot.png`, filename: "shot.png", mime_type: "image/png", size_bytes: PNG.length };
+    await inbound(LENA, "What's wrong here?", { files: [shot] });
+    // The model got the picture itself, with the question.
+    expect(asked.at(-1)).toContain('"type":"image"');
+    expect(asked.at(-1)).toContain("What's wrong here?");
+    const all = (await call("GET", "/v1/app/ambient/chat?seen=0")).json.messages as { role: string; text: string; via: string; files: { name: string; type: string }[] }[];
+    expect(all.at(-2)).toMatchObject({ role: "user", text: "What's wrong here?", via: "imessage", files: [{ name: "shot.png", type: "image/png" }] });
+    // A picture alone is a message too; one Amb can't read beside one it can is said, and the rest goes through.
+    const before = texts().length;
+    await inbound(LENA, null, { files: [shot], media: true });
+    expect(texts().slice(before)[0]).toContain("I can't open IMG_0001.HEIC here");
+    expect(((await call("GET", "/v1/app/ambient/chat?seen=0")).json.messages as { files: unknown[] }[]).at(-2)!.files).toHaveLength(1);
+  });
+
+  it("what Amb made goes back with its answer", async () => {
+    const before = calls.length;
+    await s.folders.reach!.reply(lena.user.uid, "imessage", "Here's the chart.", [{ name: "chart.png", type: "image/png", bytes: PNG }]);
+    const since = calls.slice(before);
+    expect(since.find((c) => c.path === "/v3/attachments")!.body).toMatchObject({ filename: "chart.png", content_type: "image/png", size_bytes: PNG.length });
+    expect(since.find((c) => c.method === "PUT")!.body).toMatchObject({ bytes: PNG.length });
+    expect(since.find((c) => c.path.endsWith("/messages"))!.body).toMatchObject({ message: { parts: [{ type: "text", value: "Here's the chart." }, { type: "media", attachment_id: `att-${uploads}` }] } });
+    // In the app's chat the answer isn't written twice: this only sends.
   });
 });
 

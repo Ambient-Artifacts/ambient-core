@@ -322,7 +322,11 @@ export function createApp(deps: AppDeps) {
   };
   const reach = new AmbReach({ notifier, reachOf: (uid) => reachOf(uid) });
   folders.reach = reach;
-  ambient.onReply = (uid, via, text) => reach.reply(uid, via, text);
+  // What Amb made with its answer (a picture, a PDF) goes back with it.
+  ambient.onReply = async (uid, via, text, files) => {
+    const made = await Promise.all(files.map((f) => ambient.file(uid, f.id).catch(() => null)));
+    await reach.reply(uid, via, text, made.filter((f): f is NonNullable<typeof f> => f !== null));
+  };
   if (config.linq) {
     const imessage = new IMessageChannel({ control, keys: routineKeys, master: config.masterKey, config: config.linq, inbox: ambient, answer: (uid, id, answer) => answerDecision(uid, id, answer), onOptOut: (uid) => reachBackToApp(uid), fetchImpl: deps.linq?.fetchImpl ?? deps.fetchImpl, apiBase: deps.linq?.apiBase });
     folders.imessage = imessage;

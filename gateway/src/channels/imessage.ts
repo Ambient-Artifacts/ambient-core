@@ -19,7 +19,7 @@ import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { api, type Control } from "../control.ts";
 import type { MasterKey } from "../crypto.ts";
 import type { RoutineKeys } from "../routines/keys.ts";
-import { numbered, type AmbChannel, type Question } from "./reach.ts";
+import { numbered, type AmbChannel, type OutFile, type Question } from "./reach.ts";
 
 const LINK = "imessage:link";
 const HANDLE = "imessage:handle";
@@ -43,6 +43,11 @@ const OPTED_OUT_CODE = 2024;
 /** A line's state and a chat's health are asked from Linq at most this often. */
 const HEALTH_TTL_MS = 15 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
+/** What a text may bring Amb, as its chat takes it: up to 4 files, 10 MB together. */
+const FILES_MAX = 4;
+const FILES_BYTES_MAX = 10 * 1024 * 1024;
+/** The kinds Amb can read: pictures Claude takes, PDFs and text. iPhone's HEIC photos aren't among them yet. */
+const READABLE = /^(image\/(jpeg|png|gif|webp)|application\/pdf|application\/json|text\/.+)$/;
 /**
  * How long Amb waits before it writes first again to someone who hasn't answered what it sent
  * (Linq's back-off: one follow-up after a day, one more after a few days, then nothing until
@@ -151,8 +156,8 @@ export function isOptOut(text: string): boolean {
 
 /** What the channel needs of Amb's chat. */
 export interface AmbInbox {
-  /** Takes the message into Amb's chat; resolves once the answer is stored and sent back. */
-  sendQueued(uid: string, name: string, text: string, via: string): Promise<unknown>;
+  /** Takes the message (and the files sent with it) into Amb's chat; resolves once the answer is stored and sent back. */
+  sendQueued(uid: string, name: string, text: string, via: string, attachments?: { name: string; type: string; data: string }[]): Promise<unknown>;
   nameOf(uid: string): Promise<string>;
 }
 
@@ -172,7 +177,7 @@ interface LinqEvent {
     new_state?: string;
     new_reputation?: string;
     sender_handle?: { handle?: string; is_me?: boolean };
-    parts?: { type?: string; value?: string }[];
+    parts?: { type?: string; value?: string; url?: string; filename?: string; mime_type?: string; size_bytes?: number }[];
     /** A poll vote: the poll's message and the option picked. */
     message_id?: string;
     option_id?: string;
@@ -464,10 +469,23 @@ export class IMessageChannel implements AmbChannel {
    * moves off a flagged one by itself. An answer goes into the chat they wrote in. A send Linq
    * refuses because they opted out (2024) is remembered and never tried again.
    */
-  private async out(uid: string, link: Link, text: string, first: boolean): Promise<Link> {
+  private async out(uid: string, link: Link, text: string, first: boolean, files: OutFile[] = []): Promise<Link> {
     let next = link;
     try {
-      const parts = IMessageChannel.parts(text);
+      const parts: Record<string, unknown>[] = IMessageChannel.parts(text);
+      // What Amb made goes with its words, as iMessage shows files; one that can't be sent is named instead.
+      const missed: string[] = [];
+      for (const file of files.slice(0, FILES_MAX)) {
+        const id = await this.upload(file).catch((err: Error) => (console.warn(`[imessage] ${file.name} wasn't sent: ${err.message}`), null));
+        if (id) parts.push({ type: "media", attachment_id: id });
+        else missed.push(file.name);
+      }
+      if (missed.length) {
+        const note = `(${missed.join(", ")}: in the Ambient app.)`;
+        const first = parts[0];
+        if (first && first.type === "text") first.value = `${String(first.value)}\n\n${note}`;
+        else parts.unshift({ type: "text", value: note });
+      }
       if (parts.length && first) {
         const out = await this.call<{ chat_id?: string }>("POST", "/v3/messages", { to: [link.handle], message: { parts } });
         if (out.json.chat_id && out.json.chat_id !== link.chatId) next = { ...next, chatId: out.json.chat_id };
@@ -490,9 +508,60 @@ export class IMessageChannel implements AmbChannel {
   }
 
   /** Amb's text to a person who connected iMessage. `first`: Amb writes first (not an answer). */
-  async send(uid: string, text: string, opts: { first?: boolean } = {}): Promise<void> {
+  async send(uid: string, text: string, opts: { first?: boolean; files?: OutFile[] } = {}): Promise<void> {
     const first = opts.first === true;
-    await this.out(uid, await this.sendable(uid, first), text, first);
+    await this.out(uid, await this.sendable(uid, first), text, first, opts.files ?? []);
+  }
+
+  /** A file to Linq (its upload URL, then the bytes), for a media part: the id to send it by. */
+  private async upload(file: OutFile): Promise<string> {
+    const out = await this.call<{ attachment_id?: string; upload_url?: string; http_method?: string; required_headers?: Record<string, string> }>("POST", "/v3/attachments", {
+      filename: file.name.slice(0, 255),
+      content_type: file.type,
+      size_bytes: file.bytes.length,
+    });
+    if (!out.json.attachment_id || !out.json.upload_url) throw new Error("Linq gave no upload URL");
+    const res = await (this.d.fetchImpl ?? fetch)(out.json.upload_url, {
+      method: out.json.http_method ?? "PUT",
+      headers: out.json.required_headers ?? { "content-type": file.type },
+      body: new Uint8Array(file.bytes),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error(`the upload answered ${res.status}`);
+    return out.json.attachment_id;
+  }
+
+  /**
+   * The files a text brought, as Amb's chat takes them: fetched from Linq's links (they're good
+   * for an hour), the kinds Amb can read, up to 4 and 10 MB together. `skipped` names the rest.
+   */
+  private async fetchFiles(media: { url?: string; filename?: string; mime_type?: string; size_bytes?: number }[]): Promise<{ files: { name: string; type: string; data: string }[]; skipped: string[] }> {
+    const files: { name: string; type: string; data: string }[] = [];
+    const skipped: string[] = [];
+    let bytes = 0;
+    for (const m of media) {
+      const name = (m.filename ?? "file").replace(/[\/\\\0\r\n]/g, "_").slice(0, 200);
+      const type = (m.mime_type ?? "").toLowerCase().split(";")[0]!.trim();
+      const declared = m.size_bytes ?? 0;
+      // Linq's links are https (tests: the stand-in's own address).
+      const fetchable = !!m.url && (m.url.startsWith("https://") || (!!this.d.apiBase && m.url.startsWith(this.d.apiBase)));
+      if (!fetchable || !m.url || !READABLE.test(type) || files.length >= FILES_MAX || bytes + declared > FILES_BYTES_MAX) {
+        skipped.push(name);
+        continue;
+      }
+      try {
+        const res = await (this.d.fetchImpl ?? fetch)(m.url, { signal: AbortSignal.timeout(30_000) });
+        if (!res.ok) throw new Error(`answered ${res.status}`);
+        const body = Buffer.from(await res.arrayBuffer());
+        if (!body.length || bytes + body.length > FILES_BYTES_MAX) throw new Error("too large");
+        bytes += body.length;
+        files.push({ name, type, data: body.toString("base64") });
+      } catch (err) {
+        console.warn(`[imessage] a file wasn't fetched: ${(err as Error).message}`);
+        skipped.push(name);
+      }
+    }
+    return { files, skipped };
   }
 
   /**
@@ -609,11 +678,11 @@ export class IMessageChannel implements AmbChannel {
       .join("\n");
     const from = normalizeHandle(handle);
     if (this.struckOut(from)) return { status: 200, body: { ok: true } };
-    this.track(this.onText(from, chatId, text, parts.some((p) => p.type !== "text"), seen));
+    this.track(this.onText(from, chatId, text, parts.filter((p) => p.type === "media"), seen));
     return { status: 200, body: { ok: true } };
   }
 
-  private async onText(handle: string, chatId: string, text: string, files: boolean, seen: { health?: string; line?: string } = {}): Promise<void> {
+  private async onText(handle: string, chatId: string, text: string, media: { url?: string; filename?: string; mime_type?: string; size_bytes?: number }[], seen: { health?: string; line?: string } = {}): Promise<void> {
     const known = await this.index(HANDLE, this.indexKey("handle", handle));
     // A code someone is waiting with: the number becomes theirs (and stops being anyone else's).
     const claim = await this.claim(text);
@@ -635,14 +704,18 @@ export class IMessageChannel implements AmbChannel {
       return;
     }
     await this.heard(uid, link, { chatId, ...seen });
-    if (!text) {
-      if (files) await this.text(chatId, "I can only read text here so far. Send it to me in the Ambient app and I'll look at it.");
+    // Photos, PDFs and text files come along; what Amb can't read here is said, not dropped silently.
+    const { files, skipped } = media.length ? await this.fetchFiles(media) : { files: [], skipped: [] };
+    if (!text && !files.length) {
+      if (skipped.length) await this.text(chatId, "I can't open that here. I read photos (JPEG, PNG), PDFs and text files; for anything else, send it to me in the Ambient app.");
       return;
     }
     void this.call("POST", `/v3/chats/${encodeURIComponent(chatId)}/read`).catch(() => undefined);
     const stopTyping = this.typing(chatId);
+    // Some came through and some didn't: said at once, so they know what Amb is answering about.
+    if (skipped.length) await this.text(chatId, `I can't open ${skipped.join(", ")} here (I read photos as JPEG or PNG, PDFs and text files). The Ambient app takes it.`).catch(() => undefined);
     try {
-      await this.d.inbox.sendQueued(uid, await this.d.inbox.nameOf(uid), text, this.kind);
+      await this.d.inbox.sendQueued(uid, await this.d.inbox.nameOf(uid), text, this.kind, files);
     } finally {
       stopTyping();
     }
