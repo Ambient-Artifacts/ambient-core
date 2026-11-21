@@ -72,6 +72,8 @@ export const AMBIENT_TOOLS = new Set([
   "message_bot",
   "open_decisions",
   "answer_decision",
+  "needs_you",
+  "set_aside_decision",
   "search_history",
   "read_amb_file",
   "write_amb_file",

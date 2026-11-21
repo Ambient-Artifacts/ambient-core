@@ -114,7 +114,7 @@ export const TEMPLATES: Template[] = [
     description: "Weekday mornings: today's meetings with who's in them, what waits for you, and what your bots did overnight.",
     trigger: { kind: "time", schedule: { every: "weekday", time: "08:00", timezone: vienna } },
     instructions:
-      "Write the morning brief. Open with what happened while they were away, when something did (a bot found or fixed something, a decision came in). Then: today's meetings and who's in them (brief each person or project that matters, from the brain), decisions and bots waiting for them (open_decisions, list_routines), and what their bots did since yesterday (bot_files handoffs, bot_thread). Five short lines at most, the most important first. NOTHING only when there's truly nothing.",
+      "Write the morning brief. Open with what happened while they were away, when something did (a bot found or fixed something, a decision came in). Then: today's meetings and who's in them (brief each person or project that matters, from the brain), decisions and bots waiting for them (needs_you, list_routines; leave out what they set aside), and what their bots did since yesterday (bot_files handoffs, bot_thread). Five short lines at most, the most important first. NOTHING only when there's truly nothing.",
     delivery: "chat",
   },
   {
@@ -123,7 +123,7 @@ export const TEMPLATES: Template[] = [
     description: "Weekdays at noon: every open loop that needs you — decisions, bots asking, action items, approvals.",
     trigger: { kind: "time", schedule: { every: "weekday", time: "12:30", timezone: vienna } },
     instructions:
-      "List what waits on them, oldest first: decisions (open_decisions), bots that asked and weren't answered (list_routines, bot_thread), their open action items in the brain (list_action_items), root commands waiting for approval. One line each with what you'd suggest. NOTHING when nothing waits.",
+      "List what waits on them, oldest first: decisions (needs_you: only what waits now, not what they set aside), bots that asked and weren't answered (list_routines, bot_thread), their open action items in the brain (list_action_items), root commands waiting for approval. One line each with what you'd suggest. NOTHING when nothing waits.",
     delivery: "chat",
   },
   {

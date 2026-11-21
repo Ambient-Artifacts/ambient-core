@@ -2,7 +2,7 @@
 // later (it stays open) or dismissed (the bot hears "Not now."). New bot templates and the
 // nightly idea (an automation that starts a bot) ride along.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { appCall, signIn, startStack, type AppSession, type Stack } from "./helpers.ts";
+import { appCall, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
 
 const daily = { every: "day", time: "09:00", timezone: "Europe/Vienna" };
 const info = { hostname: "srv", os: "Linux 6.8", runner: "0.7.6", claude: "2.1.326 (Claude Code)" };
@@ -102,6 +102,30 @@ describe("needs you", () => {
     const thread = (await appCall(s, lena.access_token, "GET", `/v1/app/routines/${b}/thread`)).json.messages as { role: string; text: string }[];
     expect(thread.at(-1)).toMatchObject({ role: "user", text: "Not now." });
     expect((await appCall(s, lena.access_token, "POST", `/v1/app/decisions/${d.id}/dismiss`)).status).toBe(409);
+  });
+});
+
+describe("needs you, from an AI app", () => {
+  it("lists what waits, sets one aside, brings it back and dismisses it", async () => {
+    const id = await botAsks("Wiki keeper", "Update the pricing page?");
+    const pat = String((await appCall(s, lena.access_token, "POST", "/v1/app/pats", { label: "Codex" })).json.token);
+    const client = await mcpClient(`${s.origin}/mcp`, pat);
+    const waiting = await until(needs, (v) => v.items.some((x) => x.from.id === id));
+    const d = waiting.items.find((x) => x.from.id === id)!;
+    expect(text(await client.callTool({ name: "needs_you", arguments: {} }))).toContain("Update the pricing page?");
+    const snoozed = text(await client.callTool({ name: "set_aside_decision", arguments: { id: d.id, action: "snooze", hours: 4 } }));
+    expect(snoozed).toContain("Set aside until");
+    const listed = text(await client.callTool({ name: "needs_you", arguments: {} }));
+    expect(listed).toContain("Set aside for later:");
+    expect(listed.split("Set aside for later:")[0]).not.toContain("Update the pricing page?");
+    expect((await needs()).counts[id]).toBeUndefined();
+    expect(text(await client.callTool({ name: "set_aside_decision", arguments: { id: d.id, action: "unsnooze" } }))).toContain("It waits again.");
+    expect((await needs()).counts[id]).toBe(1);
+    const refused = await client.callTool({ name: "set_aside_decision", arguments: { id: d.id, action: "snooze" } });
+    expect(refused.isError).toBe(true);
+    expect(text(await client.callTool({ name: "set_aside_decision", arguments: { id: d.id, action: "dismiss" } }))).toContain('Wiki keeper was told "Not now."');
+    expect((await needs()).items.some((x) => x.id === d.id)).toBe(false);
+    await client.close();
   });
 });
 

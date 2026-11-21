@@ -527,6 +527,57 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     );
   }
 
+  if (hasBots && decisions && principal.personal) {
+    const snoozedLine = (d: Decision & { snoozedUntil: number }) => `${decisionLine(d)} Set aside until ${new Date(d.snoozedUntil).toISOString().slice(0, 16).replace("T", " ")} UTC.`;
+    const needsText = (n: Awaited<ReturnType<DecisionService["needsYou"]>>) =>
+      [n.items.length ? `Waiting now:\n${n.items.map(decisionLine).join("\n")}` : "Nothing waits for them now.", n.snoozed.length ? `Set aside for later:\n${n.snoozed.map(snoozedLine).join("\n")}` : ""].filter(Boolean).join("\n\n");
+
+    server.registerTool(
+      "needs_you",
+      {
+        title: "What needs the user now",
+        description: "What waits for the user now (open decisions that aren't set aside), what they set aside for later with when it comes back, and how many wait per bot. Use this instead of open_decisions when telling them what's waiting: what they snoozed isn't brought up again.",
+        inputSchema: {},
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async () =>
+        guard(async () => {
+          const n = await decisions.needsYou(actor.uid);
+          return result(needsText(n), { ...n });
+        }),
+    );
+
+    server.registerTool(
+      "set_aside_decision",
+      {
+        title: "Snooze or dismiss a decision",
+        description: "Set a waiting decision aside, only when the user asked: snooze (it stays open and comes back after `hours`, or at `until` in milliseconds; five minutes to thirty days), unsnooze (bring it back now), or dismiss (settle it with Not now; the bot hears that, and a proposed change is not applied).",
+        inputSchema: {
+          id: z.string().max(64),
+          action: z.enum(["snooze", "unsnooze", "dismiss"]),
+          hours: z.number().positive().max(720).optional().describe("snooze: for how many hours."),
+          until: z.number().int().positive().optional().describe("snooze: until this time (milliseconds since 1970), instead of hours."),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ id, action, hours, until }) =>
+        guard(async () => {
+          if (action === "dismiss") {
+            const d = await decisions.dismiss(actor, id);
+            return result(`Dismissed${d.from.kind === "bot" ? `: ${d.from.name} was told "Not now."` : "."}`, { decision: d });
+          }
+          if (action === "unsnooze") {
+            const n = await decisions.unsnooze(actor.uid, id);
+            return result(`It waits again.\n\n${needsText(n)}`, { ...n });
+          }
+          if (hours === undefined && until === undefined) throw new RoutineError("bad_request", "Say for how long: hours, or until.", 400);
+          const n = await decisions.snooze(actor.uid, id, { hours, until });
+          const at = n.snoozed.find((d) => d.id === id)?.snoozedUntil;
+          return result(`Set aside${at ? ` until ${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}. It comes back by itself.`, { ...n });
+        }),
+    );
+  }
+
   if (hasBots && folders) registerFolderTools(server, principal, actor, folders, source, guard);
   if (hasBots && folders?.github) registerGitHubTools(server, principal, actor, routines, folders.github, guard, folders.githubApp);
   if (hasBots && folders?.slack) registerSlackTools(server, principal, actor, routines, folders.slack, guard);
