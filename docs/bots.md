@@ -1470,3 +1470,14 @@ A proposal is a decision like a bot's question, with `change` set:
 `Apply` (or "yes", "ja", "ok", "do it", in the app or in words) makes the change as the person and
 the answer records what came of it (`"Apply → AGENTS.md changed (version 4)."`); anything else
 leaves the bot as it is.
+
+## Needs you
+
+What waits for a person is their open decisions (above), shown per bot. `GET /v1/app/needs-you` returns what waits now (`items`), what's set aside (`snoozed`, each with `snoozedUntil`) and a count per bot (`counts`, Ambient's own under `ambient`).
+
+- **Snooze** (`POST /v1/app/decisions/:id/snooze` with `hours` or `until`, five minutes to thirty days; `DELETE` brings it back): the decision stays open and leaves the list and the count until then. Snoozes are one sealed record per person, no table.
+- **Dismiss** (`POST /v1/app/decisions/:id/dismiss`): settles it with "Not now." A bot hears that in its thread; a proposed change isn't applied.
+
+## Nightly idea
+
+An automation with delivery `bot` starts one of the person's bots at a time, with its instructions as a message from Ambient (no turn of Amb's). The `nightly_idea` template uses it: once a night the bot may build a small first version of an idea of its own and hand it over with `ask_owner` ("My idea: …", Keep going / Drop it), so it lands in Needs you.

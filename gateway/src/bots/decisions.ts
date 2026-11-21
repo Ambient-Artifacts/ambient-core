@@ -20,6 +20,13 @@ const PURPOSE = "decision";
 const ANSWER_PURPOSE = "decision:answer";
 /** How long Ambient may think about a bot's question before it goes to the person as it is. */
 const TRIAGE_MS = 75_000;
+/** Snoozed decisions (docs/bots.md, "Needs you"): one sealed record per person, id → until. */
+const SNOOZE_KIND = "needs-you";
+const SNOOZE_KEY = "snoozed";
+const SNOOZE_MIN_MS = 5 * 60_000;
+const SNOOZE_MAX_MS = 30 * 24 * 3600_000;
+/** What a bot hears when its owner sets its question aside. */
+export const DISMISSED = "Not now.";
 
 /**
  * A change to a bot Amb proposes instead of making (docs/bots.md, "Automations"): its
@@ -55,6 +62,14 @@ export interface Decision {
   createdAt: number;
   /** A change Amb proposes (applied on "Apply"); null for questions. */
   change: Omit<ProposedChange, "why"> | null;
+}
+
+/** What waits for the person: what to show now, what's set aside for later, and how many per bot. */
+export interface NeedsYou {
+  items: Decision[];
+  snoozed: (Decision & { snoozedUntil: number })[];
+  /** Waiting now, per bot (its id). Ambient's own are under "ambient". */
+  counts: Record<string, number>;
 }
 
 export interface DecisionRow {
@@ -181,6 +196,77 @@ export class DecisionService {
   async list(uid: string): Promise<Decision[]> {
     const rows = (await this.d.control.q(api.bots.openDecisions, { uid: uid as never })) as unknown as DecisionRow[];
     return Promise.all(rows.map((r) => this.view(uid, r)));
+  }
+
+  // ---- needs you: the stack per bot, set aside for later, or dismissed ----
+
+  private async snoozes(uid: string): Promise<Record<string, number>> {
+    const r = (await this.d.control.q(api.records.get, { ownerKind: "user", ownerId: uid, kind: SNOOZE_KIND, key: SNOOZE_KEY })) as { iv: string; ct: string; deleted: boolean } | null;
+    if (!r || r.deleted) return {};
+    const raw = await this.d.keys.open(this.owner(uid), `record:${SNOOZE_KIND}`, r.iv, r.ct).catch(() => null);
+    if (raw === null) return {};
+    try {
+      const j = JSON.parse(raw) as Record<string, unknown>;
+      return Object.fromEntries(Object.entries(j).filter((e): e is [string, number] => typeof e[1] === "number"));
+    } catch {
+      return {};
+    }
+  }
+
+  private async saveSnoozes(uid: string, map: Record<string, number>): Promise<void> {
+    const sealed = await this.d.keys.seal(this.owner(uid), `record:${SNOOZE_KIND}`, JSON.stringify(map));
+    await this.d.control.m(api.records.put, { ownerKind: "user", ownerId: uid, kind: SNOOZE_KIND, key: SNOOZE_KEY, iv: sealed.iv, ct: sealed.ciphertext, size: sealed.ciphertext.length, byKind: "user", keep: 1, now: this.now() });
+  }
+
+  /** The open decisions, split into what waits now and what's snoozed, with a count per bot. */
+  async needsYou(uid: string): Promise<NeedsYou> {
+    const [all, snoozes] = await Promise.all([this.list(uid), this.snoozes(uid)]);
+    const now = this.now();
+    const out: NeedsYou = { items: [], snoozed: [], counts: {} };
+    for (const d of all) {
+      const until = snoozes[d.id];
+      if (until !== undefined && until > now) {
+        out.snoozed.push({ ...d, snoozedUntil: until });
+        continue;
+      }
+      out.items.push(d);
+      const key = d.from.kind === "bot" ? d.from.id : "ambient";
+      out.counts[key] = (out.counts[key] ?? 0) + 1;
+    }
+    return out;
+  }
+
+  /** Sets an open decision aside until `until` (five minutes to thirty days from now). It stays open. */
+  async snooze(uid: string, id: string, when: { hours?: number; until?: number }): Promise<NeedsYou> {
+    const row = (await this.d.control.q(api.bots.decision, { uid: uid as never, id })) as unknown as DecisionRow | null;
+    if (!row) throw new RoutineError("no_such_decision", "There's no such decision.", 404);
+    if (row.status !== "open") throw new RoutineError("already_answered", "It's already answered.", 409);
+    const now = this.now();
+    const until = when.until ?? now + (when.hours ?? 0) * 3600_000;
+    if (!Number.isFinite(until) || until < now + SNOOZE_MIN_MS || until > now + SNOOZE_MAX_MS) throw new RoutineError("bad_request", "Snooze it for between five minutes and thirty days.", 400);
+    await this.keepSnoozes(uid, (map) => ({ ...map, [String(row.id)]: Math.round(until) }));
+    return this.needsYou(uid);
+  }
+
+  /** Brings a snoozed decision back now. */
+  async unsnooze(uid: string, id: string): Promise<NeedsYou> {
+    await this.keepSnoozes(uid, (map) => Object.fromEntries(Object.entries(map).filter(([k]) => k !== id)));
+    return this.needsYou(uid);
+  }
+
+  /** Rewrites the snoozes, dropping the ones that are over or whose decision is settled. */
+  private async keepSnoozes(uid: string, change: (map: Record<string, number>) => Record<string, number>): Promise<void> {
+    const open = new Set(((await this.d.control.q(api.bots.openDecisions, { uid: uid as never })) as unknown as DecisionRow[]).map((r) => String(r.id)));
+    const now = this.now();
+    const next = Object.fromEntries(Object.entries(change(await this.snoozes(uid))).filter(([k, until]) => open.has(k) && until > now));
+    await this.saveSnoozes(uid, next);
+  }
+
+  /** "Not now": settles it without acting. A bot hears it in its thread; a proposed change isn't applied. */
+  async dismiss(actor: Actor, id: string): Promise<Decision> {
+    const d = await this.answer(actor, id, DISMISSED, "dismissed");
+    await this.keepSnoozes(actor.uid, (map) => map).catch(() => undefined);
+    return d;
   }
 
   /**

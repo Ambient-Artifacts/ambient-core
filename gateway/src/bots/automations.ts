@@ -29,7 +29,8 @@ import { openMessage } from "./messages.ts";
 
 export const EVENT_KINDS = ["bot_failed", "bot_corrected", "bot_asked_twice", "decision_waiting", "meeting_note", "github_ci_failed"] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
-export const DELIVERIES = ["chat", "chat_silent", "thread"] as const;
+/** "bot": the instructions go to one bot as a message, which starts it (no turn of Amb's). */
+export const DELIVERIES = ["chat", "chat_silent", "thread", "bot"] as const;
 export type Delivery = (typeof DELIVERIES)[number];
 
 export const Trigger = z.discriminatedUnion("kind", [
@@ -54,6 +55,8 @@ export interface Automation {
   trigger: Trigger;
   instructions: string;
   delivery: Delivery;
+  /** The bot a "bot" automation starts (its id). */
+  bot?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -96,6 +99,14 @@ export interface Template {
 
 const vienna = "Europe/Vienna";
 
+/** What a bot is told on a night it may bring an idea of its own (the "nightly_idea" template). */
+export const NIGHTLY_IDEA = [
+  "[From Ambient, on your owner's schedule: tonight you may bring one idea of your own.]",
+  "Look at what you worked on lately, what your owner asked for, and what you noticed along the way. If one small improvement would clearly help them, and nobody asked for it yet, build a first version of it now: small enough to judge in two minutes, in a draft pull request or a file, never merged or published.",
+  'Then hand it to your owner with ask_owner and wait: false. Start the question with "My idea:" and say in one sentence what it is and why it helps; put what you built and how to look at it in the details; offer "Keep going" and "Drop it".',
+  "One idea a night at most. No idea worth their two minutes tonight: do nothing and say so in one line. Never repeat an idea they dropped (your memory says which).",
+].join("\n");
+
 export const TEMPLATES: Template[] = [
   {
     id: "morning_brief",
@@ -103,7 +114,7 @@ export const TEMPLATES: Template[] = [
     description: "Weekday mornings: today's meetings with who's in them, what waits for you, and what your bots did overnight.",
     trigger: { kind: "time", schedule: { every: "weekday", time: "08:00", timezone: vienna } },
     instructions:
-      "Write the morning brief: today's meetings and who's in them (brief each person or project that matters, from the brain), decisions and bots waiting for them (open_decisions, list_routines), and what their bots did since yesterday (bot_files handoffs, bot_thread). Five short lines at most, the most important first. NOTHING only when there's truly nothing.",
+      "Write the morning brief. Open with what happened while they were away, when something did (a bot found or fixed something, a decision came in). Then: today's meetings and who's in them (brief each person or project that matters, from the brain), decisions and bots waiting for them (open_decisions, list_routines), and what their bots did since yesterday (bot_files handoffs, bot_thread). Five short lines at most, the most important first. NOTHING only when there's truly nothing.",
     delivery: "chat",
   },
   {
@@ -130,7 +141,7 @@ export const TEMPLATES: Template[] = [
     description: "Friday afternoon: what moved this week, what's stuck, and three things for next week.",
     trigger: { kind: "time", schedule: { every: "week", days: ["fri"], time: "16:00", timezone: vienna } },
     instructions:
-      "Write their weekly review from the brain and their bots: what moved this week (decisions, notes, projects), what's stuck or overdue, what their bots shipped and where they struggled, and three suggestions for next week. Ten short lines at most.",
+      "Write their weekly review from the brain and their bots: what moved this week (decisions, notes, projects), what's stuck or overdue, what their bots shipped, where each bot got stuck (bot_learning, bot_thread) with the one change that would fix it (a note, a skill, a setting), and three suggestions for next week. Ten short lines at most.",
     delivery: "chat",
   },
   {
@@ -140,6 +151,14 @@ export const TEMPLATES: Template[] = [
     trigger: { kind: "time", schedule: { every: "day", time: "18:00", timezone: vienna } },
     instructions: "Go through what was added to their brain and their teams' brains today (list_recent) and tell them in a few lines what's worth knowing, with the page names. NOTHING when nothing new matters.",
     delivery: "chat_silent",
+  },
+  {
+    id: "nightly_idea",
+    name: "Nightly idea",
+    description: "Once a night, one of your bots builds a small first version of an idea of its own and asks you in the morning whether to keep going.",
+    trigger: { kind: "time", schedule: { every: "day", time: "02:00", timezone: vienna } },
+    instructions: NIGHTLY_IDEA,
+    delivery: "bot",
   },
 ];
 
@@ -154,6 +173,8 @@ export const AutomationInput = z.object({
   trigger: Trigger.optional(),
   instructions: z.string().trim().min(1).max(4_000).optional(),
   delivery: z.enum(DELIVERIES).optional(),
+  /** The bot a "bot" automation starts (its id). */
+  bot: z.string().max(64).optional(),
 });
 export type AutomationInput = z.infer<typeof AutomationInput>;
 
@@ -250,6 +271,8 @@ export class Automations {
       people?: () => Promise<string[]>;
       actorFor: (uid: string) => Promise<Actor>;
       now?: () => number;
+      /** Sends a bot a message from Amb, which starts it ("bot" automations). */
+      tellBot?: (actor: Actor, routineId: string, text: string) => Promise<unknown>;
       /** Tests: how long Amb may take. */
       turnMs?: number;
     },
@@ -366,6 +389,7 @@ export class Automations {
       a = { id: `a${randomBytes(6).toString("hex")}`, template: null, name: input.name, enabled: true, trigger: input.trigger, instructions: input.instructions, delivery: "chat", createdAt: now, updatedAt: now };
     }
     a = this.merge(a, input, now);
+    await this.checkBot(uid, a);
     await this.put(uid, KIND, a.id, a, { keep: 10 });
     // A new time automation starts from now: no run for a time that's already past.
     if (a.trigger.kind === "time") await this.saveState(uid, a.id, { lastDueAt: now, runs: [], seen: [], day: "", eventRuns: 0 });
@@ -380,15 +404,27 @@ export class Automations {
       ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
       ...(input.instructions ? { instructions: input.instructions } : {}),
       ...(input.delivery ? { delivery: input.delivery } : {}),
+      ...(input.bot ? { bot: input.bot } : {}),
       trigger,
       updatedAt: now,
     };
+  }
+
+  /** A "bot" automation names one of the person's bots, and runs at a time. */
+  private async checkBot(uid: string, a: Automation): Promise<void> {
+    if (a.delivery !== "bot") return;
+    if (!this.d.tellBot) throw new RoutineError("bad_request", "Bots can't be started by automations here.", 400);
+    if (a.trigger.kind !== "time") throw new RoutineError("bad_request", "An automation that starts a bot runs at a time.", 400);
+    if (!a.bot) throw new RoutineError("bad_request", "Say which bot it starts (bot: its id).", 400);
+    // Throws when it isn't theirs.
+    await this.d.routines.get(await this.d.actorFor(uid), a.bot);
   }
 
   async update(uid: string, id: string, input: AutomationInput): Promise<AutomationView> {
     const now = this.now();
     const before = await this.get(uid, id);
     const a = this.merge(before, input, now);
+    await this.checkBot(uid, a);
     await this.put(uid, KIND, id, a, { keep: 10 });
     // Switched on again, or a new time: from now on, not for what was missed meanwhile.
     if (a.trigger.kind === "time" && (input.trigger || (input.enabled && !before.enabled))) {
@@ -460,6 +496,15 @@ export class Automations {
     const name = await this.d.ambient.nameOf(uid);
     let run: AutomationRun;
     try {
+      if (a.delivery === "bot") {
+        // No turn of Amb's: the bot gets the instructions as they are, and its run does the work.
+        if (!a.bot || !this.d.tellBot) throw new Error("it has no bot to start");
+        await this.d.tellBot(await this.d.actorFor(uid), a.bot, a.instructions);
+        run = { at: this.now(), by: o.by, event: o.event, result: "sent", text: "" };
+        const st = await this.state(uid, a.id);
+        await this.saveState(uid, a.id, { ...st, runs: [...st.runs, run] });
+        return run;
+      }
       const reply = (await this.withTimeout(this.d.ambient.internalTurn(uid, name, this.prompt(name, a, o)), this.d.turnMs ?? TURN_MS)).trim();
       const silent = !reply || reply.replace(/[.\s]/g, "").toUpperCase() === NOTHING;
       if (!silent) await this.deliver(uid, a, reply, o.routineId);

@@ -352,7 +352,7 @@ export function createApp(deps: AppDeps) {
   const withBots = async () => ((await control.q(api.bots.people, {})) as { users: string[] }).users.map(String);
   const heartbeat = new Heartbeat({ control, ambient, people: withBots, notifier, reach });
   // What Amb does on its own: templates on a schedule or an event (docs/bots.md, "Automations").
-  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, notifier, reach, people: withBots, actorFor, turnMs: deps.ambient?.turnMs });
+  const automations = new Automations({ control, keys: routineKeys, routines, ambient, files: folders.files, decisions, notifier, reach, people: withBots, actorFor, tellBot: (actor, id, text) => bots.postAsAmbient(actor, id, text), turnMs: deps.ambient?.turnMs });
   folders.automations = automations;
   // Watching the bots is part of Amb (its settings), not an automation.
   const ambSettings = new AmbSettings({ control, keys: routineKeys, legacyOff: (uid) => automations.legacyWatchOff(uid), canReach: (uid, kind) => reach.linked(uid, kind) });

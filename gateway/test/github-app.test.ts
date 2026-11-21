@@ -163,7 +163,7 @@ describe("a bot from a template", () => {
   it("asks for no webhook and no GH_TOKEN when the App reaches its repos, and for both when it doesn't", async () => {
     const covered = await call("POST", "/v1/app/bots/from-template", { template: "builder", answers: { repos: ["Acme-Org/web"] } });
     expect(covered.status, JSON.stringify(covered.json)).toBe(200);
-    expect(covered.json.needs).toEqual({ secrets: [], webhook: false });
+    expect(covered.json.needs).toEqual({ secrets: [], webhook: false, connections: [] });
     const elsewhere = await call("POST", "/v1/app/bots/from-template", { template: "builder", answers: { repos: ["Other-Org/site"] } });
     expect(elsewhere.json.needs).toMatchObject({ webhook: true });
     expect((elsewhere.json.needs as { secrets: string[] }).secrets).toContain("GH_TOKEN");

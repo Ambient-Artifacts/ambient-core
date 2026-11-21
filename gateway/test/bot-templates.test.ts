@@ -74,16 +74,19 @@ beforeAll(async () => {
 afterAll(() => s.close());
 
 describe("the catalog", () => {
-  it("has the Reviewer, the Builder and the Wiki keeper, with their questions", async () => {
+  it("has the Reviewer, the Builder, the Wiki keeper, Code health and the Anomaly watcher, with their questions", async () => {
     const t = (await call("GET", "/v1/app/bot-templates")).json.templates as { id: string; name: string; github: string[]; questions: { id: string; kind: string; options?: { id: string }[] }[]; secrets: { name: string }[] }[];
     expect(t.map((x) => [x.id, x.name, x.github])).toEqual([
       ["review_bot", "Reviewer", ["all_prs"]],
       ["builder", "Builder", ["own_prs"]],
       ["wiki_keeper", "Wiki keeper", ["merges", "own_prs"]],
+      ["code_health", "Code health", ["own_prs"]],
+      ["anomaly_watcher", "Anomaly watcher", []],
     ]);
     expect(t[0]!.questions.map((q) => q.id)).toEqual(["repos", "strictness", "focus"]);
     expect(t[0]!.questions[1]!.options!.map((o) => o.id)).toEqual(["blockers_only", "everything"]);
-    expect(t.every((x) => x.secrets.some((sec) => sec.name === "GH_TOKEN"))).toBe(true);
+    // The ones that work on GitHub need a token; the Anomaly watcher works through connected services.
+    expect(t.filter((x) => x.github.length > 0).every((x) => x.secrets.some((sec) => sec.name === "GH_TOKEN"))).toBe(true);
     // Everyone has bots: the catalog is everyone's.
     expect((await call("GET", "/v1/app/bot-templates", undefined, ben)).status).toBe(200);
   });
@@ -99,7 +102,7 @@ describe("a bot from a template", () => {
     expect(out.routine).toMatchObject({ name: "Reviewer", enabled: true, bot: { runtime: "claude-code", face: "pebble", color: "sage", wear: ["nerd"], secrets: ["GH_TOKEN"] } });
     expect(out.routine.prompt).toContain("Comment only on what must change");
     expect(out.routine.prompt).toContain("Look especially closely at: migrations.");
-    expect(out.needs).toEqual({ secrets: ["GH_TOKEN"], webhook: true });
+    expect(out.needs).toEqual({ secrets: ["GH_TOKEN"], webhook: true, connections: [] });
     const files = ((await call("GET", `/v1/app/routines/${reviewer}/files`)).json.files as { path: string; version: number }[]).map((f) => f.path);
     expect(files).toEqual(["SOUL.md", "AGENTS.md", "GOAL.md", "memory.md", "skills/brain-check/SKILL.md", "skills/review-checklist/SKILL.md"]);
     expect((await call("GET", `/v1/app/routines/${reviewer}/github`)).json).toMatchObject({ repos: [REPO], on: ["all_prs"], branchPrefix: "ambient/reviewer/" });

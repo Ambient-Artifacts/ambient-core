@@ -150,6 +150,49 @@ export function botAppRoutes(
     res.json({ decisions: await d.decisions.list(a.uid) });
   });
 
+  // Needs you (docs/bots.md, "Needs you"): what waits now, what's snoozed, and a count per bot.
+  r.get("/v1/app/needs-you", d.auth, async (_req, res) => {
+    const a = await actor(res);
+    if (!d.decisions) return res.json({ items: [], snoozed: [], counts: {} });
+    try {
+      res.json(await d.decisions.needsYou(a.uid));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/decisions/:id/snooze", d.auth, d.json, async (req, res) => {
+    const body = z.object({ hours: z.number().positive().max(720).optional(), until: z.number().int().positive().optional() }).safeParse(req.body);
+    if (!body.success || !d.decisions || (body.data.hours === undefined && body.data.until === undefined)) {
+      res.status(400).json({ error: "bad_request", message: "Say for how long: hours, or until (a time in milliseconds)." });
+      return;
+    }
+    try {
+      const a = await actor(res);
+      res.json(await d.decisions.snooze(a.uid, id(req), body.data));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.delete("/v1/app/decisions/:id/snooze", d.auth, async (req, res) => {
+    if (!d.decisions) return res.json({ items: [], snoozed: [], counts: {} });
+    try {
+      res.json(await d.decisions.unsnooze((await actor(res)).uid, id(req)));
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
+  r.post("/v1/app/decisions/:id/dismiss", d.auth, async (req, res) => {
+    if (!d.decisions) return res.status(404).json({ error: "not_found", message: "There's no such decision." });
+    try {
+      res.json({ decision: await d.decisions.dismiss(await actor(res), id(req)) });
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
   r.post("/v1/app/decisions/:id", d.auth, d.json, async (req, res) => {
     const body = z.object({ option: z.string().min(1).max(4000).optional(), text: z.string().min(1).max(4000).optional() }).safeParse(req.body);
     const answer = body.success ? (body.data.option ?? body.data.text) : undefined;
