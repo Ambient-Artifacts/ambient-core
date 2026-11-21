@@ -1075,6 +1075,61 @@ the app; the person taps Allow once (`gateway/src/bots/slack-apps.ts`).
   but that scope isn't open to developers. Team members other than the installer, and a shared
   "Ambient" app for bots without their own, come later.
 
+## MCP connections
+
+A person or a team connects a service's MCP server once and gives it to individual bots, or to
+Amb (`gateway/src/bots/mcp-connections.ts`). A bot starts with none. This is how a bot gets a
+service Ambient has no integration of its own for: anything with an MCP server.
+
+```
+the app or an AI app ──▶ POST /v1/app/mcp-connections { name, url, key }
+     ──▶ the gateway checks the address, asks the server for its tools, keeps it sealed
+PUT /v1/app/mcp-connections/:id/grants { bot, on } ──▶ that bot's next run gets it
+a bot's run ──▶ POST /v1/bot/mcp/:id (its run token) ──▶ the gateway checks the grant
+     ──▶ calls the service with the key ──▶ the answer goes back to the run
+```
+
+- **The key never leaves the gateway.** A run is given an address at Ambient (`/v1/bot/mcp/<id>`)
+  and reaches it with its own run token, good while it runs; the gateway (`bots/mcp-relay.ts`)
+  makes the call to the service. Nothing the runner receives holds the key or the service's
+  address. A bot is a model running commands on a machine: it shouldn't hold a token for someone's
+  Notion.
+- **The grant is checked on every call.** Taking a connection away, or removing it, holds from the
+  bot's next tool call, also in a run that's still going. Another bot's run, a run that's over and
+  a made-up token all get 404 or 401, the same answer whether the connection exists or not.
+- **A person's connection goes to their own bots and to Amb; a team's to the team's bots**, added
+  and given by its owners and admins. Amb uses the person's own connections only.
+- **In a run** the connection is one more MCP server next to `ambient` and `ambient-bot`, named by
+  the connection's slug ("Notion (Miora)" → `notion-miora`), so its tools are
+  `mcp__notion-miora__…`. Runner 0.16.0 adds them for Claude Code and for Codex; it takes only
+  names that can't shadow the run's own servers and only addresses at the gateway's relay.
+- **Amb** gets its connections in its session on a computer, with that session's own token; a
+  change takes effect with the person's next message (the session starts again and carries on).
+  Without a computer (the server's key), Amb doesn't have them.
+- **Addresses** must be https and public: nothing inside our own network (private, loopback and
+  link-local ranges), no credentials in the address, and no redirects, so a key only ever goes to
+  the host it was given for. The address is checked again before every request.
+- **Tools only**, over Streamable HTTP: no resources or prompts, no server that only speaks the
+  older SSE transport. Up to 200 tools per connection; a tool's description and schema are cut to
+  what a model should have to read. The key goes as `Authorization: Bearer`, or in another header
+  when the service wants one (`header`). Sign-in on the service's own page (OAuth) isn't built yet.
+- **Kept in the sealed records** under the owner's key: one record per connection, with its
+  address, key, tools and grants.
+
+The app's API (with `?team=<slug>` for a team's):
+
+- `GET /v1/app/mcp-connections` → `{ "connections": [Connection] }`. A Connection is
+  `{ id, name, slug, host, hasKey, tools: [{ name, description }], bots: [routine id], amb, addedAt }`;
+  never its key or its whole address.
+- `POST /v1/app/mcp-connections` with `{ name, url, key?, header? }` → 201 `{ "connection" }`; 400
+  `bad_url`, `refused` (the key), `unreachable`, `redirected`.
+- `POST /v1/app/mcp-connections/:id/refresh` → asks for the tools again.
+- `DELETE /v1/app/mcp-connections/:id` → 204.
+- `PUT /v1/app/mcp-connections/:id/grants` with `{ bot, on }` or `{ amb: true, on }` → `{ "connection" }`.
+
+MCP tools: `mcp_connections` (the list; `add`, `remove`, `refresh`) and `grant_mcp_connection`
+(`connection`, `bot` or `amb`, `on`), for the person's AI and for Amb, only when they ask.
+
 ## Automations
 
 Things Amb does **for the person** without being asked each time. The rule: templates are for

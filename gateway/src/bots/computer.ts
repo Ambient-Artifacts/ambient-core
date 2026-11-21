@@ -58,6 +58,11 @@ export interface ComputerJob {
   history: Turn[];
   /** Amb's skills (docs/bots.md, "One folder for every bot"): the runner puts them in the session's folder. */
   skills?: { path: string; content: string }[];
+  /**
+   * The MCP servers the person gave Amb (docs/bots.md, "MCP connections"): each by the name its
+   * tools carry and its address at the gateway, reached with the session's own token (runner 0.16.0).
+   */
+  mcp?: { name: string; path: string }[];
   /** Files sent with the message (base64); the computer saves them in the person's folder. */
   attachments?: { name: string; type: string; data: string }[];
   /** The person's token for Ambient's MCP (the same until it's renewed). */
@@ -120,6 +125,14 @@ export class AmbientComputers {
     const made = await this.d.pats.create({ uid, scopes: this.d.scopes, resource: { kind: "personal" }, label: `Ambient on ${computer}`, expiresAt });
     this.tokens.set(key, { token: made.token, expiresAt });
     return made.token;
+  }
+
+  /** Whose token this is, when it's one handed to Amb's session on a computer and still good (the relay's check). */
+  uidOfToken(token: string): string | null {
+    for (const [key, t] of this.tokens) {
+      if (t.token === token && t.expiresAt > this.now()) return key.slice(key.indexOf(":") + 1);
+    }
+    return null;
   }
 
   /** Hand a message to the computer and wait for Ambient's reply there. */

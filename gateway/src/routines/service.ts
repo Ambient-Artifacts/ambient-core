@@ -418,6 +418,8 @@ export class RoutineService {
   githubToken?: (owner: Owner, routineId: string) => Promise<string | null>;
   /** A bot's own Slack app's token, for its run as SLACK_BOT_TOKEN (bots/slack-apps.ts). */
   slackToken?: (owner: Owner, routineId: string) => Promise<string | null>;
+  /** The MCP servers a bot was given (bots/mcp-connections.ts): the name its tools carry and its address at the gateway. */
+  mcpFor?: (owner: Owner, routineId: string) => Promise<{ name: string; path: string }[]>;
   /** A bot said something at the end of a run (its result): Slack answers the thread that asked. */
   onBotSaid?: (owner: Owner, routineId: string, text: string, final: boolean, runId: string) => void;
   /** A bot's run starts (its id and its token's hash): the Slack messages waiting are its to answer. */
@@ -1124,6 +1126,8 @@ export class RoutineService {
     resume: { sessionId: string | null; message: string; files?: FileRef[] } | null;
     /** A bot's run: its token for asking the owner (POST /v1/bot/ask), valid while it runs. */
     runToken: string | null;
+    /** A bot's run (runner 0.16.0): the MCP servers it was given, reached at the gateway with the run's token. */
+    mcp?: { name: string; path: string }[];
     /** A bot's run (runner 0.8.0): its instructions, skills and memory (docs/bots.md, "A bot's folder"). */
     workspace?: { system: string; skills: { path: string; content: string }[]; memory: string };
   }> {
@@ -1191,6 +1195,7 @@ export class RoutineService {
       resume = woken.resume;
       workspace = woken.workspace;
     }
+    const mcp = r.bot && this.mcpFor ? await this.mcpFor(owner, r.id).catch((err: Error) => (console.warn(`[mcp] a run's connections weren't read: ${err.message}`), [])) : [];
     return {
       run: { id: String(out.runId), trigger: out.trigger },
       routine: { id: r.id, name: r.name, prompt, folder: r.folder },
@@ -1198,6 +1203,7 @@ export class RoutineService {
       bot: r.bot,
       resume,
       runToken: r.bot ? runToken : null,
+      ...(mcp.length ? { mcp } : {}),
       ...(workspace ? { workspace } : {}),
     };
   }

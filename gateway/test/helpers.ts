@@ -58,6 +58,8 @@ export async function startStack(
     githubApp?: import("../src/bots/github-app.ts").GitHubAppConfig;
     /** Bots' Slack apps against a stand-in Slack Web API. */
     slackApi?: string;
+    /** MCP connections may point at a stand-in server on 127.0.0.1. */
+    mcpLocal?: boolean;
     /** Amb's iMessage line against a stand-in Linq API. */
     linq?: { api: string; webhookSecret: string; number?: string; transcribeUrl?: string };
     /** How long after a signal Amb looks at a bot (learning.ts). */
@@ -184,6 +186,7 @@ export async function startStack(
     mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
     githubBatchMs: opts.githubBatchMs ?? 60_000,
     ...(opts.slackApi ? { slack: { apiBase: opts.slackApi } } : {}),
+    ...(opts.mcpLocal ? { mcpConnections: { allowLocal: true } } : {}),
     ...(opts.linq ? { linq: { apiBase: opts.linq.api } } : {}),
     learning: { reviewAfterMs: opts.learningAfterMs ?? 60_000 },
     teamBundle: opts.teamBundle,

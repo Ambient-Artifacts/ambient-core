@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.15.0";
+const VERSION = "0.16.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -795,18 +795,21 @@ async function ambientService() {
     own(managed);
   };
   /** Ambient's tools for the person: an MCP config with their token, readable by the session only. */
-  const mcpConfig = (name, token) => {
+  const mcpConfig = (name, token, granted = []) => {
     const file = join(confDir, `${name}.json`);
-    writeFileSync(file, JSON.stringify({ mcpServers: { ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${token}` } } } }), { mode: 0o600 });
+    const servers = { ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${token}` } } };
+    // The services the person gave Ambient, through the gateway with the same token.
+    for (const c of granted) servers[c.name] = { type: "http", url: `${cfg.server}${c.path}`, headers: { Authorization: `Bearer ${token}` } };
+    writeFileSync(file, JSON.stringify({ mcpServers: servers }), { mode: 0o600 });
     own(file);
     return file;
   };
   /** What every Ambient session gets: the computer's model, Ambient's tools, and its instructions. */
-  const sessionArgs = (mcpFile, instructions) => [
+  const sessionArgs = (mcpFile, instructions, granted = []) => [
     ...withModel(cfg.claudeArgs, readState().model),
     ...settingArgs(cfg),
-    // Only Ambient's tools from MCP: never the MCP servers the user set up for their own Claude Code.
-    "--mcp-config", mcpFile, "--strict-mcp-config", "--allowedTools", "mcp__ambient",
+    // Only Ambient's tools and the services given to it: never the MCP servers the user set up for their own Claude Code.
+    "--mcp-config", mcpFile, "--strict-mcp-config", "--allowedTools", ["mcp__ambient", ...granted.map((c) => `mcp__${c.name}`)].join(","),
     // Secrets go in through the app, never through a chat.
     "--disallowedTools", "mcp__ambient__set_routine_secret",
     "--append-system-prompt", instructions,
@@ -829,7 +832,7 @@ async function ambientService() {
     }
     const args = [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-      ...sessionArgs(mcpConfig(safe(uid), p.token), instructions),
+      ...sessionArgs(mcpConfig(safe(uid), p.token, p.mcp ?? []), instructions, p.mcp ?? []),
       ...(p.session ? ["--resume", p.session] : []),
     ];
     const proc = claudeProc(args, dir);
@@ -876,6 +879,12 @@ async function ambientService() {
       p.token = job.token;
       stop();
     }
+    // Given another service, or one taken away: the session starts again with them (and carries on where it was).
+    const granted = grantedMcp(job.mcp);
+    if (JSON.stringify(granted) !== JSON.stringify(p.mcp ?? [])) {
+      p.mcp = granted;
+      stop();
+    }
     if (!p.child) {
       placeSkills(folderOf(uid), job.skills);
       start(uid, p, job.instructions);
@@ -919,7 +928,7 @@ async function ambientService() {
   const internal = async (job) => {
     const dir = folderOf(job.uid);
     placeSkills(dir, job.skills);
-    const args = ["-p", "--output-format", "stream-json", "--verbose", ...sessionArgs(mcpConfig(`${safe(job.uid)}-internal`, job.token), job.instructions)];
+    const args = ["-p", "--output-format", "stream-json", "--verbose", ...sessionArgs(mcpConfig(`${safe(job.uid)}-internal`, job.token, grantedMcp(job.mcp)), job.instructions, grantedMcp(job.mcp))];
     const proc = claudeProc(args, dir);
     let result = null;
     let stderr = "";
@@ -1384,7 +1393,7 @@ const ADAPTERS = {
       // --include-partial-messages: the text as it's written (stream_event deltas), for the live
       // text in the app (docs/bots.md, "Live text").
       const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--include-partial-messages", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
-      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", "mcp__ambient-bot__ask_owner,mcp__ambient-bot__send_file,mcp__ambient-bot__search_history,mcp__ambient-bot__wake_me,mcp__ambient-bot__cancel_wake_up,mcp__ambient");
+      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", ["mcp__ambient-bot__ask_owner", "mcp__ambient-bot__send_file", "mcp__ambient-bot__search_history", "mcp__ambient-bot__wake_me", "mcp__ambient-bot__cancel_wake_up", "mcp__ambient", ...(opts.granted ?? []).map((c) => `mcp__${c.name}`)].join(","));
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
       return { args, stdin };
@@ -1475,6 +1484,10 @@ const ADAPTERS = {
           "-c", `mcp_servers.ambient.url=${toml(`${cfg.server}/mcp`)}`,
           "-c", 'mcp_servers.ambient.bearer_token_env_var="AMBIENT_RUN_TOKEN"',
         );
+        // The services this bot was given, at the gateway, with the run's token as well.
+        for (const c of opts.granted ?? []) {
+          flags.push("-c", `mcp_servers.${c.name}.url=${toml(c.url)}`, "-c", `mcp_servers.${c.name}.bearer_token_env_var="AMBIENT_RUN_TOKEN"`, "-c", `mcp_servers.${c.name}.tool_timeout_sec=180`);
+        }
       }
       if (resume?.sessionId) return { args: ["exec", "resume", ...flags, resume.sessionId, "-"], stdin: resume.message };
       return { args: ["exec", ...flags, "-"], stdin: resume ? `${routine.prompt}\n\n${resume.message}` : routine.prompt };
@@ -1540,6 +1553,18 @@ function journalLine(e) {
 // Containerfile, once per image version.
 
 const IMAGE_VERSION = "3";
+
+/**
+ * The MCP servers a bot or Ambient was given (docs/bots.md, "MCP connections"), as the gateway
+ * names them: only names that can't shadow the run's own servers, and only addresses at the
+ * gateway's relay. The service's key stays at the gateway; a run reaches it with its own token.
+ */
+function grantedMcp(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((c) => c && typeof c.name === "string" && /^[a-z0-9][a-z0-9-]{0,39}$/.test(c.name) && c.name !== "ambient" && c.name !== "ambient-bot" && typeof c.path === "string" && /^\/v1\/bot\/mcp\/[0-9a-f]{16}$/.test(c.path))
+    .slice(0, 50)
+    .map((c) => ({ name: c.name, path: c.path }));
+}
 const IMAGE = `localhost/ambient-bot:${IMAGE_VERSION}`;
 const CONTAINERFILE = `FROM docker.io/library/node:24-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gh jq ripgrep python3 python3-pil webp openssh-client less procps \\
@@ -1925,6 +1950,8 @@ async function run(id) {
   }
   // `env`: the owner's secrets (a bot: only those granted to it). They go to the run only.
   const { run: runInfo, routine, env: secrets = {}, bot = null, resume = null, runToken = null, workspace = null } = start;
+  // The services this bot was given (gateway with MCP connections on): reached at the gateway with the run's token.
+  const granted = bot && runToken ? grantedMcp(start.mcp) : [];
   // A bot's folder for this run (gateways from runner 0.8.0 on); without it, runs go as before.
   const ws = bot && workspace && typeof workspace === "object" ? workspace : null;
   const user = cfg.user;
@@ -1985,6 +2012,7 @@ async function run(id) {
           "ambient-bot": { command: node, args: [runnerPath, "bot-mcp"], env: { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } },
           // The brain, with the run's token: what an employee's AI app may do there, while the run goes.
           ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${runToken}` } },
+          ...Object.fromEntries(granted.map((c) => [c.name, { type: "http", url: `${cfg.server}${c.path}`, headers: { Authorization: `Bearer ${runToken}` } }])),
         },
       }),
       { mode: 0o600 },
@@ -2092,7 +2120,7 @@ async function run(id) {
   const mcpArg = codex ? mcpServer : mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile);
   // A bot's Claude Code run stays open for messages that come in while it works (stream-json in).
   const streaming = Boolean(adapter.streams && bot && runToken);
-  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, carryOn, mcpArg, system, { contained, outDir: contained ? null : outDir, streaming });
+  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, carryOn, mcpArg, system, { contained, outDir: contained ? null : outDir, streaming, granted: granted.map((c) => ({ name: c.name, url: `${cfg.server}${c.path}` })) });
   const codexEnv = codex ? { ...openaiKey, ...(mcpServer ? { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } : {}) } : {};
   let child;
   let containerName = null;
