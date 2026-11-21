@@ -1204,9 +1204,12 @@ function registerLearningTools(
       {
         title: "MCP connections",
         description:
-          "The MCP servers the user (or a team) connected for their bots and Ambient: services reached with a key or a sign-in the gateway keeps, never the bot. Without arguments: the list, with each one's tools and who has it. add: connects a server by its https address and a name, with its key when it needs one (only a key the user gave you to store; it's kept sealed and never shown again); a server that wants a sign-in instead returns a link for the user to open. Nobody has it until it's given with grant_mcp_connection. remove: an id to disconnect. refresh: an id, to ask the server for its tools again. sign_in: an id, for a new sign-in link when a connection's sign-in ran out. Only when the user asked.",
+          "The MCP servers the user (or a team) connected for their bots and Ambient: services reached with a key or a sign-in the gateway keeps, never the bot. Without arguments: the list, with each one's tools and who has it. services: true lists the services Ambient offers by name (Notion, Linear, Jira, Stripe and more), with which are connected. add: connects one of those by its id (add with service: its id), or any other server by its https address and a name, with its key when it needs one (only a key the user gave you to store; it's kept sealed and never shown again); a server that wants a sign-in instead returns a link for the user to open. Nobody has it until it's given with grant_mcp_connection. remove: an id to disconnect. refresh: an id, to ask the server for its tools again. sign_in: an id, for a new sign-in link when a connection's sign-in ran out. Only when the user asked.",
         inputSchema: {
-          add: z.object({ name: z.string().min(1).max(60), url: z.string().min(4).max(2000), key: z.string().max(4000).optional(), header: z.string().max(64).optional().describe("The header the key goes in, when it isn't Authorization: Bearer.") }).optional(),
+          services: z.boolean().optional(),
+          add: z
+            .object({ service: z.string().max(40).optional().describe("A service's id from services: true."), name: z.string().min(1).max(60).optional(), url: z.string().min(4).max(2000).optional(), key: z.string().max(4000).optional(), header: z.string().max(64).optional().describe("The header the key goes in, when it isn't Authorization: Bearer.") })
+            .optional(),
           remove: z.string().max(32).optional(),
           refresh: z.string().max(32).optional(),
           sign_in: z.string().max(32).optional(),
@@ -1223,10 +1226,18 @@ function registerLearningTools(
             return result(`Give the user this link as a Markdown link, [Sign in again](${out.url}); it's good for half an hour.`, { signIn: out });
           }
           const owner = ownerOf((args as { team?: string }).team);
+          if ((args as { services?: boolean }).services) {
+            const cat = await mcp.catalog(owner);
+            const lines = cat.categories.map((c) => `${c.name}: ${cat.services.filter((x) => x.category === c.id).map((x) => `${x.name} (${x.id}${x.connection ? ", connected" : ""})`).join(", ")}`);
+            return result(`${lines.join("\n")}\nConnect one with add: { service: "<id>" }. Anything else connects by its address.`, cat);
+          }
           if (add) {
-            const out = await mcp.add(owner, add as { name: string; url: string; key?: string; header?: string });
+            const a = add as { service?: string; name?: string; url?: string; key?: string; header?: string };
+            if (!a.service && !(a.name && a.url)) return error("Say which: service (an id from services: true), or a name and the server's address.");
+            const out = await mcp.add(owner, { ...(a.service ? { catalog: a.service } : {}), ...(a.name ? { name: a.name } : {}), ...(a.url ? { url: a.url } : {}), ...(a.key ? { key: a.key } : {}), ...(a.header ? { header: a.header } : {}) });
+            const called = a.name ?? a.service ?? "It";
             if ("signIn" in out) {
-              return result(`${(add as { name: string }).name} wants a sign-in at its own page. Give the user this link as a Markdown link, [Sign in to ${(add as { name: string }).name}](${out.signIn.url}): once they allowed it there (within half an hour), it shows in mcp_connections.`, out);
+              return result(`${called} wants a sign-in at its own page. Give the user this link as a Markdown link, [Sign in to ${called}](${out.signIn.url}): once they allowed it there (within half an hour), it shows in mcp_connections.`, out);
             }
             const c = out.connection;
             return result(`Connected ${c.name} (${c.tools.length} tools). Nobody has it yet: give it to a bot or to Ambient with grant_mcp_connection.`, { connection: c });

@@ -604,11 +604,25 @@ export function botAppRoutes(
     }
   });
 
+  // The services Ambient offers by name, with the owner's connection to each when there is one.
+  r.get("/v1/app/mcp-catalog", d.auth, async (req, res) => {
+    const mcp = d.mcp?.();
+    if (!mcp) return notEnabled(res);
+    try {
+      res.json(await mcp.catalog(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      mcpFail(res, err);
+    }
+  });
+
   r.post("/v1/app/mcp-connections", d.auth, d.json, async (req, res) => {
     const mcp = d.mcp?.();
     if (!mcp) return notEnabled(res);
-    const body = z.object({ name: z.string().trim().min(1).max(60), url: z.string().trim().min(4).max(2000), key: z.string().max(4000).optional(), header: z.string().max(64).optional() }).safeParse(req.body);
-    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send a name and the server's address (and its key, when it needs one)." });
+    const body = z
+      .object({ catalog: z.string().max(40).optional(), name: z.string().trim().min(1).max(60).optional(), url: z.string().trim().min(4).max(2000).optional(), key: z.string().max(4000).optional(), header: z.string().max(64).optional() })
+      .refine((b) => !!b.catalog || (!!b.name && !!b.url))
+      .safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send catalog (a service's id), or a name and the server's address (and its key, when it needs one)." });
     try {
       const out = await mcp.add(d.routines.botOwner(await actor(res), teamOf(req)), body.data);
       // A server that wants a sign-in: the link to the service's page; the connection appears once it's allowed there.

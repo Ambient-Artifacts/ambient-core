@@ -10,6 +10,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { slugOf } from "../src/bots/mcp-connections.ts";
+import { CATALOG, CATEGORIES } from "../src/bots/mcp-catalog.ts";
 import { appCall, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
 
 const KEY = "svc-key-123";
@@ -55,6 +56,9 @@ const valid = new Set<string>();
 let issued = 0;
 let renewals = 0;
 let renewable = true;
+/** The sign-in server only takes clients with a secret (as Figma's or GitLab's does). */
+let secretOnly = false;
+const tokenRequests: URLSearchParams[] = [];
 const registered: Record<string, unknown>[] = [];
 
 async function signInService(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, raw: string): Promise<boolean> {
@@ -65,16 +69,18 @@ async function signInService(req: import("node:http").IncomingMessage, res: impo
     return json(200, { resource: `${base}/oauth`, authorization_servers: [base] });
   }
   if (url.pathname === "/.well-known/oauth-authorization-server") {
-    return json(200, { issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, registration_endpoint: `${base}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] });
+    return json(200, { issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, registration_endpoint: `${base}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: secretOnly ? ["client_secret_post", "client_secret_basic"] : ["none"] });
   }
   if (url.pathname.startsWith("/.well-known/")) return json(404, { error: "not_found" });
   if (url.pathname === "/register" && req.method === "POST") {
     const body = JSON.parse(raw) as Record<string, unknown>;
     registered.push(body);
-    return json(201, { ...body, client_id: `client-${registered.length}` });
+    return json(201, { ...body, client_id: `client-${registered.length}`, ...(body.token_endpoint_auth_method === "none" ? {} : { client_secret: "s3cret-from-service" }) });
   }
   if (url.pathname === "/token" && req.method === "POST") {
     const form = new URLSearchParams(raw);
+    tokenRequests.push(form);
+    if (secretOnly && form.get("client_secret") !== "s3cret-from-service") return json(401, { error: "invalid_client" });
     if (form.get("grant_type") === "authorization_code") {
       if (form.get("code") !== "good-code" || !form.get("code_verifier")) return json(400, { error: "invalid_grant" });
     } else if (form.get("grant_type") === "refresh_token") {
@@ -84,6 +90,19 @@ async function signInService(req: import("node:http").IncomingMessage, res: impo
     issued++;
     valid.add(`at-${issued}`);
     return json(200, { access_token: `at-${issued}`, refresh_token: `rt-${issued}`, token_type: "Bearer", expires_in: 3600 });
+  }
+  // An open server, as a docs service has: no key, no sign-in.
+  if (url.pathname === "/open" && req.method === "POST") {
+    const open = new McpServer({ name: "docs", version: "1.0.0" });
+    open.registerTool("look_up", { description: "Looks something up.", inputSchema: {} }, async () => ({ content: [{ type: "text", text: "Here it is." }] }));
+    const t = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => {
+      void t.close();
+      void open.close();
+    });
+    await open.connect(t);
+    await t.handleRequest(req, res, JSON.parse(raw) as unknown);
+    return true;
   }
   if (url.pathname !== "/oauth") return false;
   if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
@@ -405,5 +424,93 @@ describe("a service that wants a sign-in instead of a key", () => {
     // A key-connected server has no sign-in to start again.
     const keyed = (await connections()).find((x) => x.signIn === "key")!;
     expect((await call("POST", `/v1/app/mcp-connections/${keyed.id}/sign-in`)).status).toBe(400);
+  });
+});
+
+describe("services by name: the catalogue", () => {
+  const base = () => serviceUrl.replace("/mcp", "");
+  const back = (state: string) => fetch(`${s.origin}/v1/mcp/connected?code=good-code&state=${encodeURIComponent(state)}`);
+  type Service = { id: string; name: string; host: string; category: string; signIn: string; connection: { id: string; needsSignIn: boolean } | null };
+  const catalog = async () => (await call("GET", "/v1/app/mcp-catalog")).json as { categories: { id: string; name: string }[]; services: Service[] };
+
+  beforeAll(() => {
+    (s.folders.mcp as unknown as { d: { catalog?: unknown } }).d.catalog = [
+      { id: "docs", name: "Docs", url: `${base()}/open`, about: "Looks things up", category: "look-up", signIn: "none" },
+      { id: "issues", name: "Issues", url: `${base()}/oauth?for=issues`, about: "Issues and projects", category: "work", signIn: "oauth" },
+      { id: "designs", name: "Designs", url: `${base()}/oauth?for=designs`, about: "Designs and comments", category: "work", signIn: "oauth" },
+    ];
+  });
+
+  it("the real catalogue is well formed: one entry per id and address, https, a known category", () => {
+    expect(new Set(CATALOG.map((x) => x.id)).size).toBe(CATALOG.length);
+    expect(new Set(CATALOG.map((x) => x.url)).size).toBe(CATALOG.length);
+    for (const x of CATALOG) {
+      expect(x.id, x.id).toMatch(/^[a-z0-9]+$/);
+      expect(x.url.startsWith("https://"), x.id).toBe(true);
+      expect(CATEGORIES.some((c) => c.id === x.category), x.id).toBe(true);
+      expect(x.name.length > 0 && x.about.length > 0 && x.about.length <= 60, x.id).toBe(true);
+    }
+  });
+
+  it("lists the services in their categories, each with the owner's connection when there is one", async () => {
+    const cat = await catalog();
+    expect(cat.categories.map((c) => c.id)).toEqual(["work", "look-up"]);
+    expect(cat.services.map((x) => [x.id, x.signIn, x.connection])).toEqual([["docs", "none", null], ["issues", "oauth", null], ["designs", "oauth", null]]);
+    expect(cat.services[0]!.host).toBe(new URL(serviceUrl).host);
+  });
+
+  it("an open service connects at once, by its id alone; asking again gives the same connection", async () => {
+    const out = await call("POST", "/v1/app/mcp-connections", { catalog: "docs" });
+    expect(out.status).toBe(201);
+    const c = out.json.connection as Connection & { catalog: string; signIn: string };
+    expect(c).toMatchObject({ name: "Docs", slug: "docs", catalog: "docs", signIn: "none" });
+    expect(c.tools.map((t) => t.name)).toEqual(["look_up"]);
+    const again = await call("POST", "/v1/app/mcp-connections", { catalog: "docs" });
+    expect((again.json.connection as Connection).id).toBe(c.id);
+    expect((await catalog()).services[0]!.connection).toEqual({ id: c.id, needsSignIn: false });
+    expect((await call("POST", "/v1/app/mcp-connections", { catalog: "nope" })).status).toBe(404);
+    expect((await call("POST", "/v1/app/mcp-connections", {})).status).toBe(400);
+  });
+
+  it("a service with a sign-in connects by its id and one visit to its page", async () => {
+    const out = await call("POST", "/v1/app/mcp-connections", { catalog: "issues" });
+    expect(out.status).toBe(200);
+    const state = new URL(String((out.json.signIn as { url: string }).url)).searchParams.get("state")!;
+    const done = await back(state);
+    expect(await done.text()).toContain("Issues is connected");
+    const mine = (await catalog()).services.find((x) => x.id === "issues")!;
+    expect(mine.connection).toMatchObject({ needsSignIn: false });
+    const list = (await call("GET", "/v1/app/mcp-connections")).json.connections as (Connection & { catalog: string | null })[];
+    expect(list.find((x) => x.id === mine.connection!.id)).toMatchObject({ name: "Issues", catalog: "issues" });
+    // One added by its address has no catalogue entry.
+    expect(list.some((x) => x.catalog === null)).toBe(true);
+  });
+
+  it("a service that only takes clients with a secret gets one, kept with the sign-in and never shown", async () => {
+    secretOnly = true;
+    try {
+      const out = await call("POST", "/v1/app/mcp-connections", { catalog: "designs" });
+      expect(out.status, JSON.stringify(out.json)).toBe(200);
+      expect(registered.at(-1)).toMatchObject({ token_endpoint_auth_method: "client_secret_post" });
+      const state = new URL(String((out.json.signIn as { url: string }).url)).searchParams.get("state")!;
+      expect((await back(state)).status).toBe(200);
+      // The secret went to the token endpoint, and to nobody else.
+      expect(tokenRequests.at(-1)!.get("client_secret")).toBe("s3cret-from-service");
+      expect(JSON.stringify((await call("GET", "/v1/app/mcp-connections")).json)).not.toContain("s3cret");
+      expect((await catalog()).services.find((x) => x.id === "designs")!.connection).not.toBeNull();
+    } finally {
+      secretOnly = false;
+    }
+  });
+
+  it("the same from an AI app: the services, and connecting one by its id", async () => {
+    const pat = String((await call("POST", "/v1/app/pats", { label: "Claude 2" })).json.token);
+    const mcp = await mcpClient(`${s.origin}/mcp`, pat);
+    const listed = text(await mcp.callTool({ name: "mcp_connections", arguments: { services: true } }));
+    expect(listed).toContain("Work and docs: Issues (issues, connected), Designs (designs, connected)");
+    expect(listed).toContain("Looking things up: Docs (docs, connected)");
+    expect(text(await mcp.callTool({ name: "mcp_connections", arguments: { add: { service: "docs" } } }))).toContain("Connected Docs");
+    expect(text(await mcp.callTool({ name: "mcp_connections", arguments: { add: {} } }))).toContain("Say which");
+    await mcp.close();
   });
 });

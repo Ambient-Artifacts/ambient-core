@@ -1127,15 +1127,30 @@ a bot's run ──▶ POST /v1/bot/mcp/:id (its run token) ──▶ the gateway
   sign-in (never shown, never sent to a run), renews it when it ran out and keeps the new one. When
   it can't be renewed, the bot's call says so, the connection reads `needsSignIn: true`, and
   `POST …/:id/sign-in` gives a new link that mends the same connection, grants included.
+- **Services by name.** `gateway/src/bots/mcp-catalog.ts` lists the services Ambient offers by
+  name (Notion, Linear, Jira and Confluence, Stripe, Sentry and about forty more), each with its
+  own MCP server's address, what a bot can do with it, a category and how it's signed in to.
+  Connecting one takes its id alone (`{ "catalog": "notion" }`): no address to find. An entry is
+  there when its server answers over Streamable HTTP and either needs no sign-in or offers MCP's
+  OAuth with dynamic client registration and PKCE; services that want an app registered by hand
+  first (Asana, HubSpot, Slack, Box, GitHub) aren't. A connection remembers its entry (`catalog`),
+  which is how the app finds its logo; the app holds the logos, by id. Asking for a service that's
+  connected gives that connection back, never a second one.
+- **Clients with a secret.** Most services take Ambient as a client without a secret. Where the
+  sign-in server only takes clients with one (Figma, GitLab, Supabase), Ambient registers as such,
+  and the secret the service gives stays sealed with the sign-in.
 - **Kept in the sealed records** under the owner's key: one record per connection, with its
   address, key, tools and grants.
 
 The app's API (with `?team=<slug>` for a team's):
 
 - `GET /v1/app/mcp-connections` → `{ "connections": [Connection] }`. A Connection is
-  `{ id, name, slug, host, hasKey, signIn: "key" | "oauth" | "none", needsSignIn, tools: [{ name, description }], bots: [routine id], amb, addedAt }`;
+  `{ id, name, slug, host, hasKey, signIn: "key" | "oauth" | "none", needsSignIn, catalog, tools: [{ name, description }], bots: [routine id], amb, addedAt }`;
   never its key, its sign-in or its whole address.
-- `POST /v1/app/mcp-connections` with `{ name, url, key?, header? }` → 201 `{ "connection" }`, or
+- `GET /v1/app/mcp-catalog` → `{ "categories": [{ id, name }], "services": [{ id, name, url, host,
+  about, category, signIn: "oauth" | "none", connection: { id, needsSignIn } | null }] }`.
+- `POST /v1/app/mcp-connections` with `{ catalog }` (a service's id), or `{ name, url, key?, header? }`
+  for any other server → 201 `{ "connection" }`, or
   200 `{ "signIn": { "url" } }` when the server wants a sign-in (open the link; the connection is
   in the list once it's allowed there); 400 `bad_url`, `refused` (the key), `unreachable`,
   `redirected`.
@@ -1147,7 +1162,8 @@ The app's API (with `?team=<slug>` for a team's):
 - `DELETE /v1/app/mcp-connections/:id` → 204.
 - `PUT /v1/app/mcp-connections/:id/grants` with `{ bot, on }` or `{ amb: true, on }` → `{ "connection" }`.
 
-MCP tools: `mcp_connections` (the list; `add`, `remove`, `refresh`, `sign_in`) and `grant_mcp_connection`
+MCP tools: `mcp_connections` (the list; `services`, `add` by `service` or by address, `remove`,
+`refresh`, `sign_in`) and `grant_mcp_connection`
 (`connection`, `bot` or `amb`, `on`), for the person's AI and for Amb, only when they ask.
 
 ## Automations
