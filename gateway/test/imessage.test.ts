@@ -6,6 +6,7 @@ import { createHmac } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { splitReaction } from "../src/bots/ambient.ts";
 import { isOptOut, normalizeHandle, toPlainText } from "../src/channels/imessage.ts";
 import type { PushMessage } from "../src/push.ts";
 import { appCall, mcpClient, signIn, startStack, text, type AppSession, type Stack } from "./helpers.ts";
@@ -26,7 +27,15 @@ const fakeAnthropic: typeof fetch = async (input, init) => {
   const last = body.messages[body.messages.length - 1]!;
   const said = typeof last.content === "string" ? last.content : JSON.stringify(last.content);
   asked.push(said);
-  const reply = said.includes("[Heartbeat") ? beatReply : `**Sure.** See [the page](https://example.com/page).`;
+  // What Amb answers: a reaction alone, a reaction with words, a slow answer, or Markdown.
+  const reply = said.includes("[Heartbeat")
+    ? beatReply
+    : said.includes("thanks, that's all")
+      ? "[react: 👍]"
+      : said.includes("please look into the invoice")
+        ? "[react: 🙏] On it. I'll text you when it's done."
+        : `**Sure.** See [the page](https://example.com/page).`;
+  if (said.includes("take your time")) await new Promise((r) => setTimeout(r, 400));
   return new Response(JSON.stringify({ content: [{ type: "text", text: reply }], stop_reason: "end_turn" }), { status: 200, headers: { "content-type": "application/json" } });
 };
 
@@ -184,6 +193,16 @@ describe("text helpers", () => {
   });
 });
 
+describe("a reaction at the start of an answer", () => {
+  it("is one emoji in brackets; anything else stays text", () => {
+    expect(splitReaction("[react: 👍]")).toEqual({ react: "👍", text: "" });
+    expect(splitReaction("  [react: ❤️]  Thanks!")).toEqual({ react: "❤️", text: "Thanks!" });
+    expect(splitReaction("[react: ok] Sure")).toEqual({ react: null, text: "[react: ok] Sure" });
+    expect(splitReaction("Sure. [react: 👍]")).toEqual({ react: null, text: "Sure. [react: 👍]" });
+    expect(splitReaction("[react: 👍👍👍👍👍👍👍👍👍] hi").react).toBe(null);
+  });
+});
+
 describe("connecting", () => {
   let code = "";
 
@@ -336,6 +355,50 @@ describe("one conversation, answered where it was asked", () => {
     expect(since.find((c) => c.method === "PUT")!.body).toMatchObject({ bytes: PNG.length });
     expect(since.find((c) => c.path.endsWith("/messages"))!.body).toMatchObject({ message: { parts: [{ type: "text", value: "Here's the chart." }, { type: "media", attachment_id: `att-${uploads}` }] } });
     // In the app's chat the answer isn't written twice: this only sends.
+  });
+});
+
+describe("reactions", () => {
+  const reactions = () => calls.filter((c) => c.method === "POST" && c.path.endsWith("/reactions"));
+
+  it("a reaction alone answers: a tapback on their text, no words, and the chat shows the emoji", async () => {
+    calls.length = 0;
+    expect(await inbound(LENA, "thanks, that's all", { id: "thanks-1" })).toBe(200);
+    expect(reactions()).toHaveLength(1);
+    expect(reactions()[0]).toMatchObject({ path: "/v3/messages/thanks-1/reactions", body: { operation: "add", type: "like" } });
+    expect(texts()).toHaveLength(0);
+    expect((await chat()).at(-1)).toMatchObject({ role: "ambient", text: "👍", via: "imessage" });
+  });
+
+  it("any emoji goes as a custom reaction, and the words follow without the brackets", async () => {
+    calls.length = 0;
+    await inbound(LENA, "please look into the invoice", { id: "invoice-1" });
+    expect(reactions()[0]).toMatchObject({ path: "/v3/messages/invoice-1/reactions", body: { operation: "add", type: "custom", custom_emoji: "🙏" } });
+    expect(texts()).toEqual(["On it. I'll text you when it's done."]);
+    expect((await chat()).at(-1)!.text).toBe("On it. I'll text you when it's done.");
+  });
+
+  it("an answer that takes a while gets 👀 at once, and loses it when the answer is there", async () => {
+    calls.length = 0;
+    (s.folders.imessage as unknown as { eyesAfterMs: number }).eyesAfterMs = 50;
+    await inbound(LENA, "take your time with this one", { id: "slow-1" });
+    (s.folders.imessage as unknown as { eyesAfterMs: number }).eyesAfterMs = 2_500;
+    expect(reactions().map((c) => c.body)).toEqual([
+      { operation: "add", type: "custom", custom_emoji: "👀" },
+      { operation: "remove", type: "custom" },
+    ]);
+    expect(reactions().every((c) => c.path === "/v3/messages/slow-1/reactions")).toBe(true);
+    expect(texts()).toHaveLength(1);
+  });
+
+  it("a quick answer gets no 👀, and a message written in the app shows no brackets", async () => {
+    calls.length = 0;
+    await inbound(LENA, "quick one", { id: "quick-1" });
+    expect(reactions()).toHaveLength(0);
+    await call("POST", "/v1/app/ambient/chat", { text: "thanks, that's all" });
+    const last = (await chat()).at(-1)!;
+    expect(last).toMatchObject({ role: "ambient", text: "👍", via: "app" });
+    expect(reactions()).toHaveLength(0);
   });
 });
 

@@ -22,7 +22,8 @@ export interface AmbChannel {
    * (Amb writes first, it isn't an answer), when it shouldn't right now: the person asked it to
    * stop, hasn't answered the last ones, or the provider says the chat or line needs a rest.
    */
-  send(uid: string, text: string, opts?: { first?: boolean; files?: OutFile[] }): Promise<void>;
+  /** `react`: one emoji put on the person's last message there, where the channel has reactions. */
+  send(uid: string, text: string, opts?: { first?: boolean; files?: OutFile[]; react?: string }): Promise<void>;
   /**
    * Sends a question with its answers to pick from in the channel's own way (iMessage: a poll),
    * when it has one; a pick comes back as the decision's answer. Throws when it can't.
@@ -92,10 +93,10 @@ export class AmbReach {
   }
 
   /** Amb's answer to a message written in a channel: back there. Never throws. */
-  async reply(uid: string, via: string, text: string, files: OutFile[] = []): Promise<void> {
+  async reply(uid: string, via: string, text: string, files: OutFile[] = [], react?: string): Promise<void> {
     const channel = this.channels.get(via);
-    if (!channel || (!text.trim() && !files.length)) return;
-    await channel.send(uid, text, files.length ? { files } : {}).catch((err: Error) => console.warn(`[reach] an answer didn't go out on ${via}: ${err.message}`));
+    if (!channel || (!text.trim() && !files.length && !react)) return;
+    await channel.send(uid, text, { ...(files.length ? { files } : {}), ...(react ? { react } : {}) }).catch((err: Error) => console.warn(`[reach] an answer didn't go out on ${via}: ${err.message}`));
   }
 
   /**

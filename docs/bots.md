@@ -1487,3 +1487,9 @@ An automation with delivery `bot` starts one of the person's bots at a time, wit
 ## Chats are live
 
 Every message in Amb's chat goes through one function (`AmbientChat.add`), whichever door it came by (the app, iMessage, Amb writing first). It tells the person's open apps on their event stream (`GET /v1/app/events`, `event: chat`, `{"chat":"ambient","at":…}`), and the app fetches the chat. The event says only that it changed: the message stays sealed and is read through the chat's own route. Clearing or deleting the chat announces itself the same way. The app still asks now and then on its own, for when the stream is down.
+
+## Reactions on iMessage
+
+Amb reacts to a person's text as people do. It starts its answer with `[react: 👍]` (exactly one emoji; `splitReaction` in `bots/ambient.ts`), and the channel puts that emoji on their last message (Linq `POST /v3/messages/{id}/reactions`): one of Messages' six tapbacks where it is one (❤️ 👍 👎 😂 ‼️ ❓), a custom emoji otherwise. A reaction alone is a whole answer; with words after it, the words follow as a text. The chat keeps the words, or the emoji when that was all. In the app there are no reactions: the brackets are taken off the same way.
+
+Code, not the model, shows that a text was taken: when the answer takes longer than 2.5 seconds, their message gets 👀, and it comes off once Amb has answered, unless Amb put a reaction of its own there (a person has one tapback per message, so Amb's replaces it). A person's own tapbacks on Amb's messages aren't read yet.
