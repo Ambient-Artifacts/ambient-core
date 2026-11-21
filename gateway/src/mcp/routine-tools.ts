@@ -7,6 +7,7 @@ import { z } from "zod";
 import { BOT_COLORS, BOT_FACES, BOT_ISOLATIONS, BOT_LOOKS, BOT_REPORTS, BOT_SHAPES, BOT_WEAR, WEEKDAYS } from "@brain/spec";
 import type { BotService, ThreadMessage } from "../bots/service.ts";
 import type { AdminService, CommandResult } from "../bots/admin.ts";
+import { splitReaction } from "../bots/ambient.ts";
 import type { Decision, DecisionService } from "../bots/decisions.ts";
 import type { Folders } from "../bots/files.ts";
 import { FolderError, type Author } from "../bots/folder.ts";
@@ -1356,6 +1357,24 @@ function registerLearningTools(
           if (st.connected) return result(`iMessage is connected (${st.handle}). They text Ambient${st.number ? ` at ${st.number}` : ""}; it answers there.`, { ...st });
           if (!st.number) return result("iMessage can't be connected right now: the line's number isn't known. Try again in a minute.", { ...st });
           return result(`Not connected yet. They text ${st.code} to ${st.number} from their phone (within the hour); Ambient answers there once it arrives.`, { ...st });
+        }),
+    );
+
+    server.registerTool(
+      "react_on_imessage",
+      {
+        title: "React to the user's text on iMessage",
+        description:
+          "Puts one emoji on the user's last text on iMessage, as a tapback (👍 ❤️ 😂 👀 🙏 🎉 🔥 …), right away. For Ambient while it answers a text: 👀 before work that takes a while, so they see it was taken; or any reaction that says it better than words. Only on a message they sent on iMessage in this conversation, and only when a person would react there.",
+        inputSchema: { emoji: z.string().min(1).max(16).describe("Exactly one emoji.") },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      },
+      async ({ emoji }) =>
+        guard(async () => {
+          const one = splitReaction(`[react: ${emoji.trim()}]`).react;
+          if (!one) throw new RoutineError("bad_request", "Give exactly one emoji.", 400);
+          const done = await imessage.react(actor.uid, one);
+          return result(done ? `Reacted with ${one}.` : "There's no text of theirs on iMessage to react to right now.", { reacted: done, emoji: one });
         }),
     );
   }

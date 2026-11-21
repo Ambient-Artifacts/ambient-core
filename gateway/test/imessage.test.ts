@@ -378,20 +378,26 @@ describe("reactions", () => {
     expect((await chat()).at(-1)!.text).toBe("On it. I'll text you when it's done.");
   });
 
-  it("an answer that takes a while gets 👀 at once, and loses it when the answer is there", async () => {
+  it("nothing reacts by itself: a slow answer gets no reaction unless Amb chose one", async () => {
     calls.length = 0;
-    (s.folders.imessage as unknown as { eyesAfterMs: number }).eyesAfterMs = 50;
     await inbound(LENA, "take your time with this one", { id: "slow-1" });
-    (s.folders.imessage as unknown as { eyesAfterMs: number }).eyesAfterMs = 2_500;
-    expect(reactions().map((c) => c.body)).toEqual([
-      { operation: "add", type: "custom", custom_emoji: "👀" },
-      { operation: "remove", type: "custom" },
-    ]);
-    expect(reactions().every((c) => c.path === "/v3/messages/slow-1/reactions")).toBe(true);
+    expect(reactions()).toHaveLength(0);
     expect(texts()).toHaveLength(1);
   });
 
-  it("a quick answer gets no 👀, and a message written in the app shows no brackets", async () => {
+  it("Amb's tool reacts at once, on their last text, with one emoji", async () => {
+    calls.length = 0;
+    await inbound(LENA, "one more thing", { id: "tool-1" });
+    const pat = String((await call("POST", "/v1/app/pats", { label: "Codex" })).json.token);
+    const mcp = await mcpClient(`${s.origin}/mcp`, pat);
+    expect(text(await mcp.callTool({ name: "react_on_imessage", arguments: { emoji: "👀" } }))).toBe("Reacted with 👀.");
+    expect(reactions().at(-1)).toMatchObject({ path: "/v3/messages/tool-1/reactions", body: { operation: "add", type: "custom", custom_emoji: "👀" } });
+    expect((await mcp.callTool({ name: "react_on_imessage", arguments: { emoji: "ok" } })).isError).toBe(true);
+    expect((await mcp.callTool({ name: "react_on_imessage", arguments: { emoji: "👍👍" } })).isError).toBe(true);
+    await mcp.close();
+  });
+
+  it("a message written in the app shows no brackets, and nothing goes to iMessage", async () => {
     calls.length = 0;
     await inbound(LENA, "quick one", { id: "quick-1" });
     expect(reactions()).toHaveLength(0);

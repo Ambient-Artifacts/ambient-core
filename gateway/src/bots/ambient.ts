@@ -42,7 +42,7 @@ export interface ChatMessage {
 /** How Amb is told a message came through a channel, and how to answer there (docs/bots.md, "Channels"). */
 const VIA_NOTES: Record<string, (name: string) => string> = {
   imessage: (name) =>
-    `[${name} wrote this on iMessage, and your answer goes there as a text message: plain text, no Markdown, a few short lines. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision. You can react to their message as a person would: start your answer with [react: 👍] (one emoji, any: 👍 ❤️ 😂 🙏 🎉 🔥 🤝 …). A reaction alone is a whole answer when words would add nothing ("thanks", "ok", "sounds good"); write words after it when there's something to say. Not on every message.]`,
+    `[${name} wrote this on iMessage, and your answer goes there as a text message: plain text, no Markdown, a few short lines. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision. You can react to their message as a person would, when you'd do so yourself; nothing reacts for you. Two ways: start your answer with [react: 👍] (one emoji, any: 👍 ❤️ 😂 🙏 🎉 🔥 🤝 …), where a reaction alone is a whole answer when words would add nothing ("thanks", "ok", "sounds good") and words after it follow as a text; or call react_on_imessage first when the work will take a while (👀), so they see you're on it before your answer comes. Not on every message.]`,
 };
 
 /**
@@ -107,6 +107,7 @@ export const AMBIENT_TOOLS = new Set([
   "bot_learning",
   "ambient_settings",
   "connect_imessage",
+  "react_on_imessage",
   "mcp_connections",
   "grant_mcp_connection",
 ]);

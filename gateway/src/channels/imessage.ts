@@ -252,22 +252,29 @@ export class IMessageChannel implements AmbChannel {
 
   // ---- reactions (docs/bots.md, "iMessage") ----
 
-  /** How long Amb may work on a text before it gets 👀, so the person sees it was taken. */
-  eyesAfterMs = 2_500;
   /** Each person's last text (Linq's message id): what a reaction goes on. In memory: after a restart the next text sets it again. */
   private lastHeard = new Map<string, string>();
-  /** Messages Amb put a reaction of its own on, so the 👀 isn't taken off afterwards (it replaced it). */
-  private reacted = new Set<string>();
 
   /** The six tapbacks Messages has built in; any other emoji goes as a custom one. */
   private static readonly TAPBACKS: Record<string, string> = { "❤️": "love", "❤": "love", "👍": "like", "👎": "dislike", "😂": "laugh", "‼️": "emphasize", "‼": "emphasize", "❓": "question" };
 
-  /** Puts `emoji` on a message of theirs, or takes Amb's custom one off again. Best effort. */
-  private async reaction(messageId: string, emoji: string | null): Promise<void> {
-    const type = emoji ? (IMessageChannel.TAPBACKS[emoji] ?? "custom") : "custom";
-    await this.call("POST", `/v3/messages/${encodeURIComponent(messageId)}/reactions`, { operation: emoji ? "add" : "remove", type, ...(emoji && type === "custom" ? { custom_emoji: emoji } : {}) }).catch((err: Error) =>
-      console.warn(`[imessage] a reaction didn't go out: ${err.message}`),
-    );
+  /**
+   * Amb's reaction to the person's last text: `emoji` on that message, as a tapback. Only ever
+   * Amb's own choice (its answer's `[react: …]`, or its react_on_imessage tool while it's still
+   * working): nothing reacts by itself (Nikolai, 2026-11-21). False when there's no text of
+   * theirs to put it on (none since the last restart) or Linq refused.
+   */
+  async react(uid: string, emoji: string): Promise<boolean> {
+    const on = this.lastHeard.get(uid);
+    if (!on) return false;
+    const type = IMessageChannel.TAPBACKS[emoji] ?? "custom";
+    try {
+      await this.call("POST", `/v3/messages/${encodeURIComponent(on)}/reactions`, { operation: "add", type, ...(type === "custom" ? { custom_emoji: emoji } : {}) });
+      return true;
+    } catch (err) {
+      console.warn(`[imessage] a reaction didn't go out: ${(err as Error).message}`);
+      return false;
+    }
   }
 
   /** Tests: everything a webhook started has finished. */
@@ -535,12 +542,7 @@ export class IMessageChannel implements AmbChannel {
   async send(uid: string, text: string, opts: { first?: boolean; files?: OutFile[]; react?: string } = {}): Promise<void> {
     const first = opts.first === true;
     // Amb's reaction to their last text: on that message, before any words.
-    const on = opts.react && !first ? this.lastHeard.get(uid) : undefined;
-    if (on && opts.react) {
-      this.reacted.add(on);
-      if (this.reacted.size > 500) this.reacted.delete(this.reacted.values().next().value!);
-      await this.reaction(on, opts.react);
-    }
+    if (opts.react && !first) await this.react(uid, opts.react);
     if (!text.trim() && !(opts.files ?? []).length) return;
     await this.out(uid, await this.sendable(uid, first), text, first, opts.files ?? []);
   }
@@ -764,23 +766,12 @@ export class IMessageChannel implements AmbChannel {
     const stopTyping = this.typing(chatId);
     // Some came through and some didn't: said at once, so they know what Amb is answering about.
     if (skipped.length) await this.text(chatId, `I can't open ${skipped.join(", ")} here (I read photos, PDFs, text files and voice memos). The Ambient app takes it.`).catch(() => undefined);
-    // Their text is what a reaction of Amb's goes on. When the answer takes a while, 👀 says it
-    // was taken; it comes off once Amb has answered, unless Amb put a reaction of its own there.
+    // Their text is what a reaction of Amb's goes on.
     if (messageId) this.lastHeard.set(uid, messageId);
-    let eyes = false;
-    const look = messageId
-      ? setTimeout(() => {
-          eyes = true;
-          this.track(this.reaction(messageId, "👀"));
-        }, this.eyesAfterMs)
-      : undefined;
-    look?.unref();
     try {
       await this.d.inbox.sendQueued(uid, await this.d.inbox.nameOf(uid), message, this.kind, files);
     } finally {
       stopTyping();
-      clearTimeout(look);
-      if (eyes && messageId && !this.reacted.has(messageId)) await this.reaction(messageId, null);
     }
   }
 
