@@ -19,6 +19,7 @@
 // connection, with its grants inside.
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { Agent, fetch as pinnedFetch } from "undici";
 import { randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -217,8 +218,10 @@ export class McpConnections {
       /** The gateway's public address: where a service sends the person back after signing in. */
       origin: string;
       fetchImpl?: typeof fetch;
-      /** Tests: a stand-in server on 127.0.0.1 over http. */
+      /** Tests: a stand-in server on 127.0.0.1, and http. */
       allowLocal?: boolean;
+      /** Tests: how a name is looked up (the system's resolver otherwise). */
+      lookup?: (host: string) => Promise<{ address: string; family: number }[]>;
       now?: () => number;
     },
   ) {}
@@ -226,6 +229,37 @@ export class McpConnections {
   private now(): number {
     return this.d.now?.() ?? Date.now();
   }
+
+  private async resolve(host: string): Promise<{ address: string; family: number }[]> {
+    if (this.d.lookup) return this.d.lookup(host);
+    return (await lookup(host, { all: true }).catch(() => [])).map((a) => ({ address: a.address, family: a.family }));
+  }
+
+  /**
+   * The connections to a service are made to an address that was looked up and checked right
+   * here, in the connection's own lookup: a name that answers a public address to one lookup and
+   * a private one to the next (DNS rebinding) can't get a request, or a key, into our own
+   * network. Checking before the request alone wouldn't do: the connection would look the name
+   * up again. As the repo path pins its address (wiki/src/git.ts).
+   */
+  private agent = new Agent({
+    connect: {
+      lookup: (hostname, options, callback) => {
+        void this.resolve(hostname).then(
+          (addrs) => {
+            const ok = addrs.length > 0 && (!addrs.some((a) => isPrivateAddress(a.address)) || (this.d.allowLocal === true && hostname === "127.0.0.1"));
+            if (!ok) {
+              callback(Object.assign(new Error(addrs.length ? "That address isn't reachable from Ambient." : `Can't find ${hostname}.`), { code: "ENOTFOUND" }) as NodeJS.ErrnoException, "", 0);
+              return;
+            }
+            if ((options as { all?: boolean }).all) (callback as unknown as (err: null, list: { address: string; family: number }[]) => void)(null, addrs);
+            else callback(null, addrs[0]!.address, addrs[0]!.family);
+          },
+          (err: Error) => callback(err as NodeJS.ErrnoException, "", 0),
+        );
+      },
+    },
+  });
 
   // ---- records ----
 
@@ -310,20 +344,22 @@ export class McpConnections {
     if (u.username || u.password) throw new McpConnectionError("bad_url", "Put the key in the key field, not in the address.");
     const host = u.hostname.replace(/^\[|\]$/g, "");
     if (this.d.allowLocal && u.protocol === "http:" && host === "127.0.0.1") return u;
-    if (u.protocol !== "https:") throw new McpConnectionError("bad_url", "Use the server's https:// address.");
-    const addrs = isIP(host) ? [host] : (await lookup(host, { all: true }).catch(() => [])).map((a) => a.address);
+    // Tests with their own resolver may use http for a made-up name.
+    if (u.protocol !== "https:" && !(this.d.allowLocal && this.d.lookup && u.protocol === "http:")) throw new McpConnectionError("bad_url", "Use the server's https:// address.");
+    const addrs = isIP(host) ? [host] : (await this.resolve(host)).map((a) => a.address);
     if (!addrs.length) throw new McpConnectionError("bad_url", `Can't find ${host}.`);
     if (addrs.some(isPrivateAddress)) throw new McpConnectionError("bad_url", "That address isn't reachable from Ambient.");
     return u;
   }
 
   /**
-   * Fetch for the service's server: the address is checked again before every request (a name
-   * can change where it points), and a redirect is refused, so the key only ever goes to the
-   * host it was given for.
+   * Fetch for the service's server: the address is checked before every request (for a clear
+   * answer), the connection itself goes only to an address checked in its own lookup (`agent`),
+   * and a redirect is refused, so the key only ever goes to the host it was given for.
    */
   private guarded(): typeof fetch {
-    const inner = this.d.fetchImpl ?? fetch;
+    const pinned = ((input: Parameters<typeof pinnedFetch>[0], init?: Parameters<typeof pinnedFetch>[1]) => pinnedFetch(input, { ...init, dispatcher: this.agent })) as unknown as typeof fetch;
+    const inner = this.d.fetchImpl ?? pinned;
     return async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       await this.checkUrl(url);

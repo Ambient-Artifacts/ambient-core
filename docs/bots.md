@@ -1108,7 +1108,11 @@ a bot's run ──▶ POST /v1/bot/mcp/:id (its run token) ──▶ the gateway
   Without a computer (the server's key), Amb doesn't have them.
 - **Addresses** must be https and public: nothing inside our own network (private, loopback and
   link-local ranges), no credentials in the address, and no redirects, so a key only ever goes to
-  the host it was given for. The address is checked again before every request.
+  the host it was given for. The address is checked before every request, and the connection
+  itself is made only to an address that was looked up and checked in its own lookup (an undici
+  `Agent` with `connect.lookup`), so a name that answers a public address to the check and a
+  private one to the connection (DNS rebinding) reaches nothing. The same holds for the sign-in's
+  calls, whose addresses come from the server's own headers.
 - **Tools only**, over Streamable HTTP: no resources or prompts, no server that only speaks the
   older SSE transport. Up to 200 tools per connection; a tool's description and schema are cut to
   what a model should have to read. The key goes as `Authorization: Bearer`, or in another header

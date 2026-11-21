@@ -417,7 +417,7 @@ export function createApp(deps: AppDeps) {
   routines.githubToken = async (owner, id) => githubApp.tokenFor(owner, { id, ...(await github.watchOf(owner, id)) });
   // MCP servers people connect once and give to bots or to Amb (docs/bots.md, "MCP connections");
   // a run reaches them through the gateway (bots/mcp-relay.ts), never with their key.
-  const mcpConnections = new McpConnections({ control, keys: routineKeys, origin: config.origin, fetchImpl: deps.fetchImpl, allowLocal: deps.mcpConnections?.allowLocal });
+  const mcpConnections = new McpConnections({ control, keys: routineKeys, origin: config.origin, allowLocal: deps.mcpConnections?.allowLocal });
   folders.mcp = mcpConnections;
   routines.mcpFor = async (owner, id) => (await mcpConnections.forBot(owner, id)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id) }));
   ambientMcp = async (uid) => (await mcpConnections.forAmb(uid)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id), title: c.title }));

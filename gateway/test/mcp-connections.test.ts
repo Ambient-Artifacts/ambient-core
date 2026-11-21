@@ -17,6 +17,8 @@ const info = { hostname: "srv-mcp", os: "Linux 6.8", runner: "0.16.0", claude: "
 const daily = { every: "day", time: "09:00", timezone: "Europe/Vienna" };
 /** What reached the stand-in service: the header it was called with, and each tool call. */
 const seen: { auth: string | undefined; tool?: string; args?: unknown }[] = [];
+/** Every request that reached the stand-in service, whatever it was. */
+let hits = 0;
 let service: Server;
 let serviceUrl = "";
 let s: Stack;
@@ -110,6 +112,7 @@ beforeAll(async () => {
     const chunks: Buffer[] = [];
     req.on("data", (d: Buffer) => chunks.push(d));
     req.on("end", () => {
+      hits++;
       void (async () => {
         if (req.url === "/moved") return res.writeHead(302, { location: "/mcp" }).end();
         if (await signInService(req, res, Buffer.concat(chunks).toString("utf8"))) return;
@@ -164,6 +167,37 @@ describe("connecting a server", () => {
     // A server that sends the client elsewhere doesn't get the key carried along.
     const moved = await call("POST", "/v1/app/mcp-connections", { name: "Pages", url: serviceUrl.replace("/mcp", "/moved"), key: KEY });
     expect(moved.status).toBe(400);
+    expect((await call("GET", "/v1/app/mcp-connections")).json.connections).toEqual([]);
+  });
+
+  it("a name that answers a public address first and a private one next (DNS rebinding) never gets a request", async () => {
+    // The check looks the name up and sees a public address; the connection looks it up again and
+    // is told 127.0.0.1, where the stand-in listens. The connection's own lookup must refuse that.
+    const answers: string[] = [];
+    const mcp = s.folders.mcp as unknown as { d: { lookup?: (host: string) => Promise<{ address: string; family: number }[]> } };
+    mcp.d.lookup = async (host) => {
+      answers.push(host);
+      // Public for every check before the request (adding it, opening the client, the request
+      // itself); private for the lookup the connection makes.
+      return [{ address: answers.length <= 3 ? "93.184.216.34" : "127.0.0.1", family: 4 }];
+    };
+    try {
+      const before = hits;
+      const out = await call("POST", "/v1/app/mcp-connections", { name: "Rebind", url: serviceUrl.replace("127.0.0.1", "rebind.test"), key: KEY });
+      expect(out.status).toBe(400);
+      expect(out.json.error).toBe("unreachable");
+      // "unreachable", not "bad_url": every check before the request passed, and the connection's
+      // own lookup (the fourth) is what refused it. Nothing reached the service.
+      expect(answers.length).toBe(4);
+      expect(hits).toBe(before);
+      // A name that points inside our network from the start is refused at the check.
+      mcp.d.lookup = async () => [{ address: "10.0.0.7", family: 4 }];
+      const inside = await call("POST", "/v1/app/mcp-connections", { name: "Inside", url: "https://inside.test/mcp", key: KEY });
+      expect(inside.json.error).toBe("bad_url");
+      expect(hits).toBe(before);
+    } finally {
+      delete mcp.d.lookup;
+    }
     expect((await call("GET", "/v1/app/mcp-connections")).json.connections).toEqual([]);
   });
 
