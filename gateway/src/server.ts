@@ -10,9 +10,9 @@ const config = loadConfig();
 const convex = new ConvexHttpClient(config.convexUrl);
 // One WebSocket to Convex for the apps' live revisions (Node has WebSocket built in).
 const live = new ConvexClient(config.convexUrl);
-const { app, microsoftConnect } = createApp({
+const { app, microsoftConnect, msteamsBots } = createApp({
   config,
-  convex: { query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args) },
+  convex: { query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args), action: (fn, args) => convex.action(fn, args) },
   apple: appleVerifier(config.appleAudiences),
   revisionSource: new ConvexRevisionSource(live, config.serviceSecret),
 });
@@ -50,3 +50,5 @@ if (microsoftConnect) {
   setTimeout(push, 5_000).unref();
   setInterval(push, TOKEN_PUSH_MS).unref();
 }
+
+if (msteamsBots.length) console.log(`[gateway] Microsoft Teams bots: ${config.msteamsBots!.map((b) => b.team).join(", ")}`);

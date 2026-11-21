@@ -386,3 +386,58 @@ describe("team routines and secrets", () => {
     expect(await set()).toEqual({ ok: true, paused: [] });
   });
 });
+
+describe("voice fingerprints", () => {
+  it("keep one per user, refused once the account is going away and deleted with it", async () => {
+    const { t, uid } = await setup();
+    const put = (n: number) => t.mutation(api.voices.put, { secret, uid: uid as never, model: "m1", iv: `iv${n}`, ciphertext: `ct${n}`, now: n });
+    expect(await t.query(api.voices.get, { secret, uid: uid as never })).toBeNull();
+    expect(await put(1)).toEqual({ ok: true });
+    expect(await put(2)).toEqual({ ok: true });
+    expect(await t.query(api.voices.get, { secret, uid: uid as never })).toEqual({ model: "m1", iv: "iv2", ciphertext: "ct2", updatedAt: 2 });
+    expect(await t.mutation(api.voices.remove, { secret, uid: uid as never })).toEqual({ removed: 1 });
+    expect(await t.mutation(api.voices.remove, { secret, uid: uid as never })).toEqual({ removed: 0 });
+
+    await put(3);
+    await t.mutation(api.users.beginDeletion, { secret, uid: uid as never, now: 4 });
+    expect(await put(5)).toEqual({ ok: false });
+    let done = false;
+    while (!done) done = (await t.mutation(api.users.purgeBatch, { secret, uid: uid as never })).done;
+    expect(await t.run(async (ctx) => ctx.db.query("voices").collect())).toEqual([]);
+  });
+
+  it("go to the members of an active team only, with their names and wrapped keys", async () => {
+    const { t, uid: lena } = await setup();
+    const user = async (sub: string, name: string) => (await t.mutation(api.users.upsertApple, { secret, appleSub: sub, name, now: 1 }))!.uid;
+    const tom = await user("apple-tom", "Tom Brandt");
+    const ida = await user("apple-ida", "Ida Kern");
+    const ole = await user("apple-ole", "Ole Sand");
+    const teamId = await t.mutation(internal.teams.create, { slug: "acme", name: "Acme" });
+    for (const [n, u] of [lena, tom, ida, ole].entries()) {
+      // Ole is in no team; Ida is in it without a voice.
+      if (u !== ole) await t.run(async (ctx) => ctx.db.insert("members", { teamId, userId: u as never, role: n === 0 ? "owner" : "member", peopleSlug: `people/p${n}`, joinedAt: n }));
+      await t.mutation(api.personal.putKeyIfAbsent, { secret, uid: u as never, masterKeyId: "mk", wrapped: `wrapped-${n}`, now: 1 });
+      if (u !== ida) await t.mutation(api.voices.put, { secret, uid: u as never, model: "m1", iv: `iv${n}`, ciphertext: `ct${n}`, now: n });
+    }
+    const ofTeam = (uid: string, slug = "acme") => t.query(api.voices.ofTeam, { secret, uid: uid as never, slug });
+
+    const all = await ofTeam(ida);
+    expect(all?.map((v) => v.name)).toEqual(["Lena Vogel", "Tom Brandt"]);
+    expect(all?.[1]).toEqual({ uid: tom, name: "Tom Brandt", model: "m1", iv: "iv1", ciphertext: "ct1", updatedAt: 1, key: { masterKeyId: "mk", wrapped: "wrapped-1" } });
+    expect(await ofTeam(ole)).toBeNull();
+    expect(await ofTeam(lena, "nope")).toBeNull();
+
+    // A team that isn't active hands out nothing.
+    await t.mutation(internal.teams.setStatus, { slug: "acme", status: "suspended" });
+    expect(await ofTeam(lena)).toBeNull();
+    await t.mutation(internal.teams.setStatus, { slug: "acme", status: "active" });
+
+    // A disabled account's voice is left out; a removed member's goes, and they get none.
+    await t.run(async (ctx) => ctx.db.patch(lena as never, { disabled: true }));
+    expect((await ofTeam(tom))?.map((v) => v.name)).toEqual(["Tom Brandt"]);
+    await t.run(async (ctx) => ctx.db.patch(lena as never, { disabled: undefined }));
+    await t.mutation(internal.teams.removeMember, { slug: "acme", uid: tom as never });
+    expect((await ofTeam(lena))?.map((v) => v.name)).toEqual(["Lena Vogel"]);
+    expect(await ofTeam(tom)).toBeNull();
+  });
+});

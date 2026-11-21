@@ -11,6 +11,8 @@ import { appCall, mcpClient, signIn, startStack, text, type Stack } from "./help
 
 const RUNNER = join(import.meta.dirname, "..", "..", "runner", "ambient-runner.mjs");
 const vienna = { every: "week", days: ["wed"], time: "08:52", timezone: "Europe/Vienna" };
+/** Every routine is a bot: these run on the computer itself with all of their owner's keys, as loops did (no Podman here). */
+const HOST = { isolation: "host", secrets: null };
 
 let s: Stack;
 let lena: string;
@@ -44,8 +46,8 @@ describe("computers", () => {
     expect(added.status).toBe(200);
     const code = String(added.json.code);
     expect(code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
-    expect(String(added.json.commands)).toContain(`curl -fsSL ${s.origin}/runner/ambient-runner.mjs`);
-    expect(String(added.json.commands)).toContain(`setup ${code}`);
+    // One line: install.sh installs what's missing, connects with the code and signs Claude in.
+    expect(added.json.commands).toBe(`curl -fsSL ${s.origin}/install.sh | sudo bash -s ${code}`);
     expect((added.json.computer as { ready: boolean }).ready).toBe(false);
 
     const setup = await hostCall("", "POST", "/v1/host/setup", { code: code.toLowerCase(), info });
@@ -74,6 +76,46 @@ describe("computers", () => {
     expect(await res.text()).toContain(`const DEFAULT_SERVER = "${s.origin}";`);
   });
 
+  it("serve install.sh, pointed at this gateway, and valid bash", async () => {
+    const res = await fetch(`${s.origin}/install.sh`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/x-shellscript");
+    const script = await res.text();
+    expect(script).toContain(`DEFAULT_SERVER="${s.origin}"`);
+    expect(script).toContain(`"$SERVER/runner/ambient-runner.mjs"`);
+    const dir = mkdtempSync(join(tmpdir(), "ambient-install-"));
+    writeFileSync(join(dir, "install.sh"), script);
+    const check = spawn("bash", ["-n", join(dir, "install.sh")]);
+    expect(await new Promise((r) => check.on("close", r))).toBe(0);
+  });
+
+  it("say whether Claude can run there, from what the runner reports", async () => {
+    const computer = async () => ((await appCall(s, lena, "GET", "/v1/app/routines")).json.computers as { id: string; claudeSignedIn: boolean | null }[]).find((c) => c.id === computerId)!;
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info: { ...info, claudeSignedIn: false } })).status).toBe(200);
+    expect((await computer()).claudeSignedIn).toBe(false);
+    // Convex keeps the info without it (its validator has no such field).
+    const rows = await s.t.run(async (ctx) => ctx.db.query("routineHosts").collect());
+    expect(JSON.stringify(rows.map((r) => r.info))).not.toContain("claudeSignedIn");
+    expect((await hostCall(host, "POST", "/v1/host/sync", { info: { ...info, claudeSignedIn: true } })).status).toBe(200);
+    expect((await computer()).claudeSignedIn).toBe(true);
+  });
+
+  it("store their own Claude plan (install.sh), sealed, and fetch it back", async () => {
+    const token = `sk-ant-oat01-${"x".repeat(40)}`;
+    expect((await hostCall(host, "POST", "/v1/host/claude", { kind: "plan", token: "not-a-token-at-all-really" })).json.error).toBe("bad_token");
+    expect((await hostCall("ambient_host_nope", "POST", "/v1/host/claude", { kind: "plan", token })).status).toBe(401);
+    expect((await hostCall(host, "POST", "/v1/host/claude", { kind: "plan", token })).status).toBe(204);
+    const rows = await s.t.run(async (ctx) => ctx.db.query("routineHosts").collect());
+    expect(JSON.stringify(rows)).not.toContain(token);
+    const got = await hostCall(host, "GET", "/v1/host/claude");
+    expect(got.json.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: token });
+    const list = await appCall(s, lena, "GET", "/v1/app/routines");
+    const c = (list.json.computers as { id: string; claudeSignedIn: boolean; claudeAccount: { use: string } }[]).find((x) => x.id === computerId)!;
+    expect(c).toMatchObject({ claudeSignedIn: true, claudeAccount: { use: "plan" } });
+    // Back to the computer's own sign-in for the tests after this one.
+    expect((await appCall(s, lena, "POST", `/v1/app/computers/${computerId}/claude/use`, { use: "computer" })).status).toBe(200);
+  });
+
   it("refuse unknown tokens", async () => {
     expect((await hostCall("ambient_host_nope", "POST", "/v1/host/sync", {})).status).toBe(401);
     expect((await hostCall(lena, "POST", "/v1/host/sync", {})).status).toBe(401);
@@ -84,7 +126,7 @@ describe("routines from the app", () => {
   let id: string;
 
   it("are created on the only computer and reach it as a calendar expression", async () => {
-    const made = await appCall(s, lena, "POST", "/v1/app/routines", { name: "Blog draft", prompt: "Draft next Monday's post.", schedule: vienna, folder: "~/git/blog" });
+    const made = await appCall(s, lena, "POST", "/v1/app/routines", { name: "Blog draft", prompt: "Draft next Monday's post.", schedule: vienna, folder: "~/git/blog" , bot: HOST });
     expect(made.status).toBe(200);
     const r = made.json.routine as R;
     id = r.id;
@@ -103,12 +145,12 @@ describe("routines from the app", () => {
   });
 
   it("validate what they're given", async () => {
-    const bad = await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: { ...vienna, days: [] } });
+    const bad = await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: { ...vienna, days: [] } , bot: HOST });
     expect(bad.status).toBe(400);
     expect(String(bad.json.message)).toContain("schedule.days");
-    expect((await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: { ...vienna, timezone: "Nowhere/Land" } })).status).toBe(400);
-    expect((await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, folder: "relative/path" })).status).toBe(400);
-    expect((await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, computer: "nope" })).json.error).toBe("no_such_computer");
+    expect((await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: { ...vienna, timezone: "Nowhere/Land" } , bot: HOST })).status).toBe(400);
+    expect((await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, folder: "relative/path" , bot: HOST })).status).toBe(400);
+    expect((await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, computer: "nope" , bot: HOST })).json.error).toBe("no_such_computer");
   });
 
   it("run now: the computer sees the request, the run is manual, and its summary comes back", async () => {
@@ -116,7 +158,9 @@ describe("routines from the app", () => {
     expect((await hostCall(host, "POST", "/v1/host/sync", {})).json.routines).toMatchObject([{ id, runRequested: true }]);
 
     const start = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
-    expect(start.json).toMatchObject({ run: { trigger: "manual" }, routine: { id, prompt: "Draft next Monday's post.", folder: "~/git/blog" } });
+    expect(start.json).toMatchObject({ run: { trigger: "manual" }, routine: { id, folder: "~/git/blog" } });
+    // A bot's prompt is its AGENTS.md, then its memory and handoffs.
+    expect((start.json.routine as { prompt: string }).prompt).toContain("Draft next Monday's post.");
     const runId = (start.json.run as { id: string }).id;
     expect((await hostCall(host, "POST", "/v1/host/sync", {})).json.routines).toMatchObject([{ id, runRequested: false }]);
 
@@ -146,7 +190,7 @@ describe("routines from the app", () => {
   it("belong to their owner and their computer", async () => {
     expect((await appCall(s, ben, "PATCH", `/v1/app/routines/${id}`, { enabled: false })).status).toBe(404);
     expect((await appCall(s, ben, "GET", `/v1/app/routines/${id}/runs`)).status).toBe(404);
-    expect((await appCall(s, ben, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, computer: computerId })).json.error).toBe("no_such_computer");
+    expect((await appCall(s, ben, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, computer: computerId , bot: HOST })).json.error).toBe("no_such_computer");
     const benCode = String((await appCall(s, ben, "POST", "/v1/app/computers", { name: "Ben's box" })).json.code);
     const benHost = String((await hostCall("", "POST", "/v1/host/setup", { code: benCode, info })).json.token);
     expect((await hostCall(benHost, "POST", `/v1/host/routines/${id}/runs`)).status).toBe(404);
@@ -223,15 +267,15 @@ describe("team routines", () => {
   });
 
   it("owners and admins create them; they run on the team's server", async () => {
-    const made = await appCall(s, lena, "POST", "/v1/app/routines", { name: "Weekly digest", prompt: "Write the weekly digest.", schedule: vienna, team: slug, folder: "~/digest" });
+    const made = await appCall(s, lena, "POST", "/v1/app/routines", { name: "Weekly digest", prompt: "Write the weekly digest.", schedule: vienna, team: slug, folder: "~/digest" , bot: HOST });
     expect(made.status, JSON.stringify(made.json)).toBe(200);
     const r = made.json.routine as R & { team: { slug: string }; canEdit: boolean };
     id = r.id;
     expect(r).toMatchObject({ team: { slug }, canEdit: true, computer: { name: "Team server" } });
     expect(r.nextRunAt).toBeGreaterThan(Date.now());
-    expect((await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, team: slug, computer: computerId })).json.error).toBe("team_routine_computer");
-    expect((await appCall(s, ben, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, team: slug })).json.error).toBe("admins_only");
-    expect((await appCall(s, ben, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, team: "acme" })).json.error).toBe("not_a_member");
+    expect((await appCall(s, lena, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, team: slug, computer: computerId , bot: HOST })).json.error).toBe("team_routine_computer");
+    expect((await appCall(s, ben, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, team: slug , bot: HOST })).json.error).toBe("admins_only");
+    expect((await appCall(s, ben, "POST", "/v1/app/routines", { name: "x", prompt: "y", schedule: vienna, team: "acme" , bot: HOST })).json.error).toBe("not_a_member");
   });
 
   it("members see them and their runs, but can't change them", async () => {
@@ -265,7 +309,8 @@ describe("team routines", () => {
 
     await appCall(s, lena, "POST", `/v1/app/routines/${id}/run`);
     const start = await hostCall(teamHost, "POST", `/v1/host/routines/${id}/runs`);
-    expect(start.json).toMatchObject({ run: { trigger: "manual" }, routine: { prompt: "Write the weekly digest.", folder: "~/digest" }, env: { GH_TOKEN: "ghp_team_secret_1" } });
+    expect(start.json).toMatchObject({ run: { trigger: "manual" }, routine: { folder: "~/digest" }, env: { GH_TOKEN: "ghp_team_secret_1" } });
+    expect((start.json.routine as { prompt: string }).prompt).toContain("Write the weekly digest.");
     await hostCall(teamHost, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Posted the digest.", costUsd: 1.2 });
     expect((await appCall(s, ben, "GET", `/v1/app/routines/${id}/runs`)).json.runs).toMatchObject([{ status: "succeeded", summary: "Posted the digest." }]);
 
@@ -277,7 +322,7 @@ describe("team routines", () => {
   });
 
   it("over MCP: a team connection works on the team's routines only; members get a clear no", async () => {
-    await appCall(s, lena, "POST", "/v1/app/routines", { name: "Lena's own", prompt: "Mine.", schedule: vienna });
+    await appCall(s, lena, "POST", "/v1/app/routines", { name: "Lena's own", prompt: "Mine.", schedule: vienna , bot: HOST });
     const teamPat = String((await appCall(s, lena, "POST", "/v1/app/pats", { label: "Copilot", team: slug })).json.token);
     const client = await mcpClient(`${s.origin}/t/${slug}/mcp`, teamPat);
     const names = (await client.listTools()).tools.map((t) => t.name);
@@ -324,7 +369,8 @@ describe("the runner on a computer", () => {
   /** Run the real runner script with a stand-in systemctl and claude. */
   const runner = (args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; out: string }> =>
     new Promise((resolve) => {
-      const p = spawn(process.execPath, [RUNNER, ...args], { env: { ...env, ...extra } });
+      const p = spawn(process.execPath, [RUNNER, ...args], { env: {
+          AMBIENT_CLAUDE_ENV: "/nonexistent/ambient-claude.env", AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner", ...env, ...extra } });
       let out = "";
       p.stdout.on("data", (d) => (out += d));
       p.stderr.on("data", (d) => (out += d));
@@ -344,7 +390,8 @@ describe("the runner on a computer", () => {
       join(bin, "claude"),
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
-cat > prompt.txt
+# A bot's run streams its input (it stays open for messages while the run works): the first line.
+if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > prompt.txt; else cat > prompt.txt; fi
 echo "$@" > args.txt
 env > env.txt
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status"}}]}}'
@@ -366,7 +413,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
       AMBIENT_STATE_DIR: join(dir, "state"),
       AMBIENT_FOLDER: join(dir, "work"),
     };
-    const made = await appCall(s, lena, "POST", "/v1/app/routines", { name: "Blog draft", prompt: "Draft next Monday's post.", schedule: vienna, folder: join(dir, "work"), computer: computerId });
+    const made = await appCall(s, lena, "POST", "/v1/app/routines", { name: "Blog draft", prompt: "Draft next Monday's post.", schedule: vienna, folder: join(dir, "work"), computer: computerId , bot: HOST });
     routineId = (made.json.routine as R).id;
     await appCall(s, lena, "PUT", "/v1/app/routines/secrets/GH_TOKEN", { value: "ghp_personal_2" });
   });
@@ -389,6 +436,28 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     await appCall(s, lena, "POST", `/v1/app/routines/${routineId}/run`);
     await runner(["sync"]);
     expect(readFileSync(join(dir, "systemctl.log"), "utf8")).toContain(`start --no-block ambient-routine-${routineId}.service`);
+  });
+
+  it("a routine without a schedule keeps its service and loses its timer, and gets it back", async () => {
+    const unit = (ext: string) => join(dir, "units", `ambient-routine-${routineId}.${ext}`);
+    const needed = (await appCall(s, lena, "PATCH", `/v1/app/routines/${routineId}`, { schedule: { ...vienna, every: "needed" } })).json.routine as R;
+    expect(needed).toMatchObject({ scheduleText: "When it needs to", nextRunAt: null });
+    expect(((await hostCall(host, "POST", "/v1/host/sync", {})).json.routines as { id: string }[]).find((r) => r.id === routineId)).toMatchObject({ onCalendar: "" });
+    writeFileSync(join(dir, "systemctl.log"), "");
+    const out = await runner(["sync"]);
+    expect(out.code, out.out).toBe(0);
+    expect(existsSync(unit("service"))).toBe(true);
+    expect(existsSync(unit("timer"))).toBe(false);
+    const calls = readFileSync(join(dir, "systemctl.log"), "utf8");
+    expect(calls).toContain(`disable --now ambient-routine-${routineId}.timer`);
+    expect(calls).not.toContain(`enable ambient-routine-${routineId}.timer`);
+    // Requested runs still start.
+    await appCall(s, lena, "POST", `/v1/app/routines/${routineId}/run`);
+    await runner(["sync"]);
+    expect(readFileSync(join(dir, "systemctl.log"), "utf8")).toContain(`start --no-block ambient-routine-${routineId}.service`);
+    await appCall(s, lena, "PATCH", `/v1/app/routines/${routineId}`, { schedule: vienna });
+    await runner(["sync"]);
+    expect(readFileSync(unit("timer"), "utf8")).toContain("OnCalendar=Wed *-*-* 08:52:00 Europe/Vienna");
   });
 
   it("an installed older runner replaces itself with the gateway's signed release", async () => {
@@ -414,16 +483,45 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     const out = await runner(["run", routineId]);
     expect(out.code, out.out).toBe(0);
     expect(out.out).toContain("· Bash: git status");
-    expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toBe("Draft next Monday's post.");
+    expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toContain("Draft next Monday's post.");
     const args = readFileSync(join(dir, "work", "args.txt"), "utf8");
-    expect(args).toContain("-p --output-format stream-json --verbose --permission-mode auto --append-system-prompt");
-    expect(args).toContain('Ambient routine "Blog draft"');
+    // No sign-in of its own here: the user's Claude Code login, with only project and local settings.
+    expect(args).toContain("-p --input-format stream-json --output-format stream-json --include-partial-messages --verbose --permission-mode auto --setting-sources project,local");
+    expect(args).toContain("--append-system-prompt");
+    expect(readFileSync(join(dir, "work", "env.txt"), "utf8")).not.toContain("CLAUDE_CONFIG_DIR=");
+    expect(args).toContain(`You're "Blog draft", one of your owner's bots in Ambient`);
     const env = readFileSync(join(dir, "work", "env.txt"), "utf8");
     expect(env).not.toContain("AMBIENT_HOST_TOKEN");
     expect(env).toContain("GH_TOKEN=ghp_personal_2");
     expect(out.out).not.toContain("ghp_personal_2");
     const runs = (await appCall(s, lena, "GET", `/v1/app/routines/${routineId}/runs`)).json.runs as { status: string; trigger: string; summary: string; costUsd: number }[];
     expect(runs[0]).toMatchObject({ status: "succeeded", trigger: "manual", summary: "Drafted the post and opened PR #3.", costUsd: 0.42 });
+  });
+
+  it("with a sign-in of its own, a run gets a settings folder of the runner's, never the user's ~/.claude", async () => {
+    const claudeEnv = join(dir, "claude-plan.env");
+    writeFileSync(claudeEnv, `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-${"t".repeat(30)}\n`);
+    const out = await runner(["run", routineId], { AMBIENT_CLAUDE_ENV: claudeEnv });
+    expect(out.code, out.out).toBe(0);
+    const args = readFileSync(join(dir, "work", "args.txt"), "utf8");
+    expect(args).not.toContain("--setting-sources");
+    const runEnv = readFileSync(join(dir, "work", "env.txt"), "utf8");
+    const configDir = /^CLAUDE_CONFIG_DIR=(.*)$/m.exec(runEnv)?.[1];
+    expect(configDir).toBe(join(env.AMBIENT_STATE_DIR!, "claude", "root"));
+    expect(existsSync(configDir!)).toBe(true);
+    // Turned off in runner.env: the user's own settings again.
+    const own = await runner(["run", routineId], { AMBIENT_CLAUDE_ENV: claudeEnv, AMBIENT_CLAUDE_CONFIG: "own" });
+    expect(own.code, own.out).toBe(0);
+    expect(readFileSync(join(dir, "work", "env.txt"), "utf8")).not.toContain("CLAUDE_CONFIG_DIR=");
+  });
+
+  it("claude-status says whether Claude can run here", async () => {
+    const claudeEnv = join(dir, "claude-plan.env");
+    expect((await runner(["claude-status"], { AMBIENT_CLAUDE_ENV: claudeEnv })).out.trim()).toBe("signed-in");
+    // The stand-in claude has no `auth status`: not signed in.
+    const missing = await runner(["claude-status"]);
+    expect(missing.out.trim()).toBe("missing");
+    expect(missing.code).toBe(1);
   });
 
   it("a missing folder fails the run with a sentence", async () => {

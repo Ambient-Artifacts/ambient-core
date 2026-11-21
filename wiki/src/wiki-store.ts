@@ -67,7 +67,8 @@ export interface Brief {
 
 const ENTITY_TYPES = ["person", "org", "project", "topic"];
 const LINK_FIELDS = ["people", "orgs", "projects", "topics", "deciders", "affects", "recorded_by", "supersedes", "source"];
-const SKIP_TEAM_ROOT = new Set(["AGENTS.md", "conventions.md", "index.md", "log.md", "_meta", "raw", "inbox", "review", "out", ".git"]);
+// bots/: bots' folders mirrored from Ambient (docs/bots.md, "A bot's folder in git"), not pages.
+const SKIP_TEAM_ROOT = new Set(["AGENTS.md", "conventions.md", "index.md", "log.md", "_meta", "raw", "inbox", "review", "out", "bots", ".git"]);
 /** Generated or agent-facing files at the top of a personal wiki folder; not pages. */
 const SKIP_PERSONAL_ROOT = new Set(["index.md", "log.md", "AGENTS.md"]);
 

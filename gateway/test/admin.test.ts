@@ -63,8 +63,11 @@ describe("admin CLI", () => {
     const made = await admin("team", "create", "Analytical Engines", "--owner", "ada@example.com");
     expect(made).toContain('Created team "Analytical Engines" (slug analytical-engines) on pool-1');
     expect(made).toContain(`${s.origin}/t/analytical-engines/mcp`);
+    // A person is in one team.
+    await expect(admin("team", "create", "Second", "--owner", "ada@example.com")).rejects.toThrow(/in Analytical Engines already/);
     // The pool is empty now.
-    await expect(admin("team", "create", "Second", "--owner", "ada@example.com")).rejects.toThrow(/No free team server/);
+    await admin("user", "add", "grace@example.com", "--name", "Grace Hopper");
+    await expect(admin("team", "create", "Second", "--owner", "grace@example.com")).rejects.toThrow(/No free team server/);
 
     await admin("user", "add", "charles@example.com", "--name", "Charles Babbage");
     await expect(admin("token", "charles@example.com", "--team", "analytical-engines")).rejects.toThrow(/isn't in a team/);
@@ -93,8 +96,8 @@ describe("admin CLI", () => {
     expect(await admin("server", "add", "pool-2", "http://team-2:8090")).toBe("Updated team server pool-2 at http://team-2:8090 (free).");
     await expect(admin("server", "add", "pool-3", "team-3")).rejects.toThrow(/isn't a URL/);
     const out = await admin("computer-code", "ada@example.com", "--name", "Build box");
-    expect(out).toContain(`curl -fsSL ${s.origin}/runner/ambient-runner.mjs -o ambient-runner.mjs`);
-    expect(out).toMatch(/sudo node ambient-runner\.mjs setup [A-Z2-9]{4}-[A-Z2-9]{4}/);
+    expect(out).toContain(`curl -fsSL ${s.origin}/install.sh | sudo bash -s `);
+    expect(out).toMatch(/sudo bash -s [A-Z2-9]{4}-[A-Z2-9]{4}$/);
   });
 
   it("takes people out of a team, but never its last owner", async () => {

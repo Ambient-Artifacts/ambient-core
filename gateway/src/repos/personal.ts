@@ -5,6 +5,7 @@
 //   only the repo changed it    → import it (the phone pulls it like any server write)
 //   both changed it             → living pages merge (mergeLiving), other files: Ambient wins
 // Generated files (index.md, _index.md, AGENTS.md) are rebuilt on every sync, never imported.
+// So are the person's bots' folders under bots/ (docs/bots.md, "A bot's folder in git").
 // Every sync works in a throwaway shallow clone; nothing stays on disk.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -15,6 +16,7 @@ import { mergeLiving } from "@brain/spec";
 import { agentsDoc, attention, checkRepoUrl, checkout, commitAndPush, git, GitError, HasContent, remoteInfo, indexFilesIn, renderIndexFiles, WikiStore, type GitOptions, type RemoteRepo } from "@brain/wiki";
 import { api, type Control } from "../control.ts";
 import { PERSONAL_PATH, type PersonalStore } from "../personal.ts";
+import { writeMirror } from "../bots/mirror.ts";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const LIVING = /^wiki\/(people|orgs|projects|topics)\//;
@@ -49,6 +51,8 @@ export class PersonalRepos {
     private control: Control,
     private personal: PersonalStore,
     private opts: GitOptions = {},
+    /** The person's bots' files (bots/…), mirrored on every sync; absent: none are. */
+    private bots?: { files: (uid: string) => Promise<Map<string, string>> },
   ) {}
 
   async status(uid: string): Promise<RepoStatus | null> {
@@ -187,7 +191,9 @@ export class PersonalRepos {
       for (const p of deletes) await rm(join(dir, p), { force: true });
       // A folder whose pages all moved or went keeps no index of nothing.
       for (const p of await indexFilesIn(join(dir, "wiki"))) if (!generated.has(`wiki/${p}`)) await rm(join(dir, "wiki", p), { force: true });
-      const commit = await commitAndPush(dir, remote, branch, `Ambient: sync (${writes.size + deletes.size} out, ${imports.length} in)`, this.opts);
+      // The person's bots, as Ambient has them (one-way: an edit made in the repo is overwritten).
+      const bots = this.bots ? await writeMirror(dir, await this.bots.files(uid)) : 0;
+      const commit = await commitAndPush(dir, remote, branch, `Ambient: sync (${writes.size + deletes.size} out, ${imports.length} in${bots ? `, ${bots} bot files` : ""})`, this.opts);
       if (imports.length) await this.personal.serverWrite(uid, imports);
 
       const sealed = await this.personal.seal(uid, "repo:state", JSON.stringify({ base, commit: commit ?? state.commit, ...(state.keep?.length ? { keep: state.keep } : {}) } satisfies SyncState));

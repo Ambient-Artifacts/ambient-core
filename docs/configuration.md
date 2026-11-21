@@ -35,6 +35,11 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 | `BRAIN_MICROSOFT_CLIENT_IDS` | Microsoft Entra app registration ids for "Continue with Microsoft"; the first is the one the apps use. |
 | `BRAIN_GOOGLE_CLIENT_IDS` | Google OAuth client ids (type iOS) for "Continue with Google"; the first is the one the apps use. |
 | `BRAIN_MICROSOFT_CONNECT_CLIENT_ID`, `BRAIN_MICROSOFT_CONNECT_CERT_FILE`, `BRAIN_MICROSOFT_CONNECT_SECRET` | "Connect Microsoft 365" for team folders: a multi-tenant Entra app of its own (a web app with the redirect URI `<origin>/connect/microsoft/callback`, the application permission `Files.SelectedOperations.Selected` and the delegated `Sites.FullControl.All`, `User.Read`), and its credential: a PEM file with the private key and the certificate (readable by the gateway's user), or a client secret. Unset: teams connect their own Entra app. See ops/README.md. |
+| `BRAIN_MSTEAMS_BOTS` | A team's bot in Microsoft Teams: a JSON list, one entry per bot: `team` (slug), `tenantId`, `appId` and `secret` of the customer's own single-tenant Entra app behind an Azure Bot whose messaging endpoint is `<origin>/teams/messages`, and optionally `anthropicApiKey` (the team's own, so answers are billed to them; `ANTHROPIC_API_KEY` otherwise), `model` (default `claude-sonnet-5-5`) and `language` (`en`, `de`). The bot answers questions with Claude over the team's own MCP tools as the person who asked (matched to their Ambient account by the email Teams gives), and takes an owner's click on a correction card as their own correction. The morning report and the cards come from the team's loops, which post with the same app id and secret. Unset: `/teams/messages` answers 401. |
+| `BRAIN_AMBIENT_MODEL` | The model Ambient's chat answers with. Default `claude-sonnet-5-5`. |
+| `BRAIN_LINQ_API_KEY`, `BRAIN_LINQ_WEBHOOK_SECRET`, `BRAIN_LINQ_NUMBER` | Ambient's iMessage line at [Linq](https://linqapp.com) ([bots.md](bots.md#imessage)): the API key, and the signing secret (`whsec_…`) of a webhook subscription for `message.received`, `poll.vote.added` and `phone_number.status_updated` at `<origin>/v1/hooks/linq?version=2026-02-03` (Linq shows the secret once, when the subscription is created). The key and the secret go together; one without the other stops the gateway at start. `BRAIN_LINQ_NUMBER` is the line's number (`+14155550123`), shown to people so they can text it; unset, the gateway asks Linq for it. All unset: no iMessage, `/v1/app/imessage` answers 404 and `/v1/hooks/linq` too. |
+| `BRAIN_TRANSCRIBE_API_KEY`, `BRAIN_TRANSCRIBE_URL`, `BRAIN_TRANSCRIBE_MODEL` | Speech-to-text for voice memos texted to Ambient ([bots.md](bots.md#imessage)): the key of a service that speaks OpenAI's transcription API (`POST …/audio/transcriptions`), its address (default `https://api.openai.com/v1/audio/transcriptions`; any compatible service or a self-hosted Whisper server works) and the model (default `gpt-4o-transcribe`). The audio of each voice memo is sent there and billed to this key. Unset: voice memos aren't taken, and the person is told so. |
+| `BRAIN_GITHUB_APP_ID`, `BRAIN_GITHUB_APP_SLUG`, `BRAIN_GITHUB_APP_KEY_FILE`, `BRAIN_GITHUB_APP_WEBHOOK_SECRET` | Ambient's GitHub App for Connect GitHub ([bots.md](bots.md#connect-github), [self-hosting.md](self-hosting.md#connect-github)): its App ID, its URL name (`github.com/apps/<slug>`), the path to its private key (PEM, readable by the gateway only) and its webhook secret. All four or none; a half-set App stops the gateway at start. Unset: Connect GitHub answers `app: null` and owners' own webhooks keep working. |
 | `BRAIN_APNS_KEY_ID`, `BRAIN_APNS_PRIVATE_KEY`, `BRAIN_APNS_TEAM_ID`, `BRAIN_APNS_TOPIC` | An APNs key for push notifications. Team id defaults to `BRAIN_APPLE_TEAM_ID`, topic to the first bundle id. |
 | `BRAIN_MIN_APP_VERSION`, `BRAIN_APP_UPDATE_URL` | Older apps are asked to update, pointing at this link. |
 
@@ -92,15 +97,16 @@ The gateway (`gateway/src/server.ts`) and its jobs (`gateway/src/worker/cli.ts`)
 
 ## Routine runner
 
-`runner/ambient-runner.mjs setup <code>` writes `/etc/ambient-runner/runner.env`. Variables there or in the environment override it:
+`runner/install.sh` (or `runner/ambient-runner.mjs setup <code>` by hand) writes `/etc/ambient-runner/runner.env`. Variables there or in the environment override it:
 
 | Variable | Default | |
 |---|---|---|
 | `AMBIENT_SERVER` | the server it was downloaded from | |
 | `AMBIENT_HOST_TOKEN` | set by `setup` | The computer's own token. |
-| `AMBIENT_USER` | `root` | The user routines run as (`setup --user`). |
+| `AMBIENT_USER` | `ambient` (install.sh), else `root` | The user Ambient's sessions, bots and routines run as (`--user`). |
 | `AMBIENT_CLAUDE`, `AMBIENT_CLAUDE_ARGS` | `claude`, `--permission-mode auto` | How Claude Code is started (`setup --claude-args`). |
 | `AMBIENT_FOLDER` | `~/ambient-routines` | Where routines run unless they name a folder. |
+| `AMBIENT_CLAUDE_CONFIG` | `isolated` | `own`: runs use the user's own Claude Code settings (`~/.claude`) even with a sign-in from Ambient. See [What the setup leaves alone](self-hosting.md#what-the-setup-leaves-alone). |
 
 ## Claude Code plugin
 

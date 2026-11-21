@@ -57,6 +57,15 @@ export function decryptPage(dek: Buffer, uid: string, path: string, iv: string, 
   return open(dek, iv, ciphertext, `page:${uid}:${path}`).toString("utf8");
 }
 
+/** A file's bytes sealed with a data key; `scope` and `label` are bound in (who it is, which file). */
+export function encryptBytes(dek: Buffer, scope: string, label: string, bytes: Buffer) {
+  return seal(dek, bytes, `file:${scope}:${label}`);
+}
+
+export function decryptBytes(dek: Buffer, scope: string, label: string, iv: string, ciphertext: string): Buffer {
+  return open(dek, iv, ciphertext, `file:${scope}:${label}`);
+}
+
 export function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
 }

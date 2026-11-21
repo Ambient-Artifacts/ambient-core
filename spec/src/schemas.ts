@@ -9,8 +9,11 @@ export const PageRef = z
 
 export const Scope = z.enum(["personal", "team"]);
 
-/** `session`: a work session with an AI agent (Claude Code, Claude, ChatGPT, Copilot), not a recording. */
-export const NoteKind = z.enum(["meeting", "call", "memo", "idea", "lecture", "other", "session"]);
+/**
+ * `session`: a work session with an AI agent (Claude Code, Claude, ChatGPT, Copilot), not a recording.
+ * `correction`: a team member saying what the team wiki got wrong (MCP suggest_correction), for whoever keeps the page.
+ */
+export const NoteKind = z.enum(["meeting", "call", "memo", "idea", "lecture", "other", "session", "correction"]);
 
 export const ConsentMode = z.enum(["all-agreed", "announced", "solo", "unknown"]);
 

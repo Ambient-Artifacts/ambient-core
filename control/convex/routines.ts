@@ -8,7 +8,7 @@ import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
-import { routineSchedule, runStatus } from "./schema.js";
+import { botSettings, modelChoice, routineSchedule, runStatus } from "./schema.js";
 import { emailVouched } from "./admin.js";
 
 const MAX_ROUTINES = 50;
@@ -17,7 +17,14 @@ const MAX_SECRETS = 30;
 const KEEP_RUNS = 50;
 
 const access = { uid: v.id("users"), teamIds: v.array(v.id("teams")) };
-const hostInfo = v.object({ hostname: v.string(), os: v.string(), runner: v.string(), claude: v.string() });
+const hostInfo = v.object({
+  hostname: v.string(),
+  os: v.string(),
+  runner: v.string(),
+  claude: v.string(),
+  codex: v.optional(v.string()),
+  codexLogin: v.optional(v.union(v.literal("chatgpt"), v.literal("api_key"), v.literal("none"))),
+});
 
 function routineShape(r: Doc<"routines">) {
   return {
@@ -34,6 +41,10 @@ function routineShape(r: Doc<"routines">) {
     runRequestedAt: r.runRequestedAt ?? null,
     source: r.source,
     lastRun: r.lastRun ?? null,
+    bot: r.bot ?? null,
+    openQuestionId: r.openQuestionId ?? null,
+    seenAt: r.seenAt ?? null,
+    nextWakeAt: r.nextWakeAt ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
@@ -48,6 +59,18 @@ function hostShape(h: Doc<"routineHosts">) {
     codeExpiresAt: h.tokenHash ? null : (h.codeExpiresAt ?? null),
     info: h.info ?? null,
     lastSeenAt: h.lastSeenAt ?? null,
+    // Who stored what and when; never the sealed values.
+    claude: h.claude
+      ? {
+          use: h.claude.use,
+          plan: h.claude.plan ? { by: h.claude.plan.by ?? null, at: h.claude.plan.at } : null,
+          key: h.claude.key ? { by: h.claude.key.by ?? null, at: h.claude.key.at } : null,
+        }
+      : null,
+    openai: { use: h.openai?.use ?? ("plan" as const), key: h.openai?.key ? { by: h.openai.key.by ?? null, at: h.openai.key.at } : null },
+    model: h.model ?? null,
+    access: h.access ?? "standard",
+    allowed: h.allowed ?? [],
     createdAt: h.createdAt,
   };
 }
@@ -75,13 +98,13 @@ function runShape(r: Doc<"routineRuns">) {
  * gateway's view of roles is cached for up to a minute, and an admin who was just demoted or
  * removed mustn't change what runs on the team's server in that minute.
  */
-async function manages(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamId: Id<"teams">): Promise<boolean> {
+export async function manages(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamId: Id<"teams">): Promise<boolean> {
   const m = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid)).unique();
   return !!m && (m.role === "owner" || m.role === "admin");
 }
 
 /** A routine the user may see (reads) or change (writes): theirs, or one of the given teams'. */
-async function routineFor(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamIds: Id<"teams">[], id: string) {
+export async function routineFor(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, teamIds: Id<"teams">[], id: string) {
   const routineId = ctx.db.normalizeId("routines", id);
   const r = routineId ? await ctx.db.get(routineId) : null;
   if (!r) return null;
@@ -115,12 +138,31 @@ export const list = query({
       routines.push(...(await teamRoutines(ctx, teamId)));
       hosts.push(...(await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(5)));
     }
+    // A team bot's thread is a group chat: read is each person's own (`botReads`).
+    const shapes = [];
+    for (const r of routines.sort((a, b) => a.createdAt - b.createdAt)) {
+      const shape = routineShape(r);
+      if (r.teamId && r.bot) {
+        const read = await ctx.db.query("botReads").withIndex("by_routine_user", (q) => q.eq("routineId", r._id).eq("userId", uid)).unique();
+        shape.seenAt = read?.at ?? null;
+      }
+      shapes.push(shape);
+    }
     return {
-      routines: routines.sort((a, b) => a.createdAt - b.createdAt).map(routineShape),
+      routines: shapes,
       hosts: hosts.sort((a, b) => a.createdAt - b.createdAt).map(hostShape),
     };
   },
 });
+
+/**
+ * The computer a team's bots run on: one set up (with a token) among the team's. A code still
+ * waiting for setup isn't one, whichever row comes first.
+ */
+export async function teamComputer(ctx: { db: QueryCtx["db"] }, teamId: Id<"teams">): Promise<Doc<"routineHosts"> | null> {
+  const hosts = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(MAX_HOSTS * 2);
+  return hosts.find((h) => h.tokenHash) ?? null;
+}
 
 export const create = mutation({
   args: {
@@ -135,6 +177,8 @@ export const create = mutation({
     hostId: v.optional(v.string()),
     folder: v.optional(v.string()),
     enabled: v.boolean(),
+    /** A bot (the gateway checked bots are on for this owner). */
+    bot: v.optional(botSettings),
     source: v.string(),
     now: v.number(),
   },
@@ -148,6 +192,9 @@ export const create = mutation({
       host = await ownHost(ctx, uid, hostId);
       if (!host) return { ok: false as const, error: "no_such_computer" };
     }
+    // A team's bot without a computer for the team's bots would only ever sit there asleep (as a
+    // personal one without a computer, bot_needs_computer): refused up front.
+    if (teamId && fields.bot && !(await teamComputer(ctx, teamId))) return { ok: false as const, error: "team_needs_computer" };
     const id = await ctx.db.insert("routines", { userId: uid, teamId, ...fields, hostId: host?._id, createdAt: now, updatedAt: now });
     return { ok: true as const, routine: routineShape((await ctx.db.get(id))!) };
   },
@@ -167,10 +214,12 @@ export const update = mutation({
     /** null: the runner's own folder. */
     folder: v.optional(v.union(v.string(), v.null())),
     enabled: v.optional(v.boolean()),
+    /** null: a plain loop again. */
+    bot: v.optional(v.union(botSettings, v.null())),
     source: v.string(),
     now: v.number(),
   },
-  handler: async (ctx, { secret, uid, teamIds, id, hostId, folder, now, ...fields }) => {
+  handler: async (ctx, { secret, uid, teamIds, id, hostId, folder, bot, now, ...fields }) => {
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r) return { ok: false as const, error: "no_such_routine" };
@@ -184,6 +233,10 @@ export const update = mutation({
     if (fields.schedule !== undefined) patch.schedule = fields.schedule;
     if (fields.enabled !== undefined) patch.enabled = fields.enabled;
     if (folder !== undefined) patch.folder = folder ?? undefined;
+    if (bot !== undefined) {
+      patch.bot = bot ?? undefined;
+      if (bot === null) Object.assign(patch, { openQuestionId: undefined, pendingMessageId: undefined });
+    }
     if (hostId !== undefined && !r.teamId) {
       if (hostId === null) patch.hostId = undefined;
       else {
@@ -206,6 +259,17 @@ export const remove = mutation({
     if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     const runs = await ctx.db.query("routineRuns").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(KEEP_RUNS * 4);
     for (const run of runs) await ctx.db.delete(run._id);
+    const messages = await ctx.db.query("botMessages").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(1000);
+    for (const m of messages) await ctx.db.delete(m._id);
+    for (const w of await ctx.db.query("botWakes").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(500)) await ctx.db.delete(w._id);
+    for (const read of await ctx.db.query("botReads").withIndex("by_routine_user", (q) => q.eq("routineId", r._id)).take(500)) await ctx.db.delete(read._id);
+    // Its own GitHub App's record (the App itself stays on GitHub until someone deletes it there).
+    for (const g of await ctx.db.query("githubApps").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(10)) await ctx.db.delete(g._id);
+    // The files sent in its thread go with it.
+    for (const f of await ctx.db.query("attachments").withIndex("by_routine", (q) => q.eq("routineId", r._id)).take(500)) {
+      await ctx.storage.delete(f.storageId);
+      await ctx.db.delete(f._id);
+    }
     await ctx.db.delete(r._id);
     return { ok: true as const, name: r.name };
   },
@@ -220,8 +284,7 @@ export const requestRun = mutation({
     if (!r) return { ok: false as const, error: "no_such_routine" };
     if (r.teamId && !(await manages(ctx, uid, r.teamId))) return { ok: false as const, error: "admins_only" };
     if (r.teamId) {
-      const server = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", r.teamId)).first();
-      if (!server?.tokenHash) return { ok: false as const, error: "no_team_server" };
+      if (!(await teamComputer(ctx, r.teamId))) return { ok: false as const, error: "no_team_server" };
     } else if (!r.hostId) return { ok: false as const, error: "no_computer" };
     const userId = ctx.db.normalizeId("users", uid);
     const user = userId ? await ctx.db.get(userId) : null;
@@ -255,6 +318,23 @@ export const addHost = mutation({
     for (const h of hosts) if (!h.tokenHash && (h.codeExpiresAt ?? 0) < now) await ctx.db.delete(h._id);
     if (hosts.filter((h) => h.tokenHash).length >= MAX_HOSTS) return { ok: false as const, error: "too_many_computers" };
     const id = await ctx.db.insert("routineHosts", { userId: uid, name, codeHash, codeExpiresAt: expiresAt, createdAt: now });
+    return { ok: true as const, host: hostShape((await ctx.db.get(id))!) };
+  },
+});
+
+/**
+ * A computer for a team (its owner or an admin adds it): it runs the team's brain when the team has
+ * no server of its own (docs/architecture.md, "A team on its own computer"), and the team's bots.
+ */
+export const addTeamHost = mutation({
+  args: { ...secretArg, uid: v.id("users"), teamId: v.id("teams"), name: v.string(), codeHash: v.string(), expiresAt: v.number(), now: v.number() },
+  handler: async (ctx, { secret, uid, teamId, name, codeHash, expiresAt, now }) => {
+    assertService(secret);
+    if (!(await manages(ctx, uid, teamId))) return { ok: false as const, error: "admins_only" };
+    const hosts = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(MAX_HOSTS * 2);
+    for (const h of hosts) if (!h.tokenHash && (h.codeExpiresAt ?? 0) < now) await ctx.db.delete(h._id);
+    if (hosts.filter((h) => h.tokenHash).length >= MAX_HOSTS) return { ok: false as const, error: "too_many_computers" };
+    const id = await ctx.db.insert("routineHosts", { teamId, name, codeHash, codeExpiresAt: expiresAt, createdAt: now });
     return { ok: true as const, host: hostShape((await ctx.db.get(id))!) };
   },
 });
@@ -445,7 +525,7 @@ export const hostSync = mutation({
     const h = await ctx.db.get(hostId);
     if (!h) return null;
     await ctx.db.patch(hostId, { lastSeenAt: now, ...(info ? { info } : {}) });
-    return { routines: (await hostRoutines(ctx, h)).map(routineShape) };
+    return { routines: (await hostRoutines(ctx, h)).map(routineShape), model: h.model ?? null };
   },
 });
 
@@ -464,8 +544,8 @@ async function pruneRuns(ctx: MutationCtx, routineId: Id<"routines">) {
  * Returns the routine and its owner's secrets (both sealed) for the run.
  */
 export const startRun = mutation({
-  args: { ...secretArg, hostId: v.id("routineHosts"), id: v.string(), now: v.number() },
-  handler: async (ctx, { secret, hostId, id, now }) => {
+  args: { ...secretArg, hostId: v.id("routineHosts"), id: v.string(), runTokenHash: v.optional(v.string()), now: v.number() },
+  handler: async (ctx, { secret, hostId, id, runTokenHash, now }) => {
     assertService(secret);
     const h = await ctx.db.get(hostId);
     const routineId = ctx.db.normalizeId("routines", id);
@@ -479,11 +559,28 @@ export const startRun = mutation({
     for (const run of stale) if (run.status === "running") await ctx.db.patch(run._id, { status: "failed", finishedAt: now });
     const trigger = r.runRequestedAt ? ("manual" as const) : ("schedule" as const);
     const startedByName = trigger === "manual" ? r.runRequestedBy : undefined;
-    const runId = await ctx.db.insert("routineRuns", { routineId: r._id, userId: r.userId, hostId, trigger, status: "running", startedByName, startedAt: now });
-    await ctx.db.patch(r._id, { runRequestedAt: undefined, runRequestedBy: undefined, lastRun: { status: "running", startedAt: now } });
+    const runId = await ctx.db.insert("routineRuns", {
+      routineId: r._id,
+      userId: r.userId,
+      hostId,
+      trigger,
+      status: "running",
+      startedByName,
+      startedAt: now,
+      ...(r.bot && runTokenHash ? { runTokenHash } : {}),
+    });
+    // A bot's run that starts with an answer or a message continues its last session with it.
+    const pending = r.bot && r.pendingMessageId ? await ctx.db.get(r.pendingMessageId) : null;
+    // What the gateway needs to wake a bot (docs/bots.md, "How a bot wakes up"): its last session,
+    // and when its last run started and ended (what's new in its thread since).
+    const previous = r.bot ? { session: r.lastSessionId ?? null, startedAt: r.lastRun?.startedAt ?? null, finishedAt: r.lastRun?.finishedAt ?? null, status: r.lastRun?.status ?? null } : null;
+    await ctx.db.patch(r._id, { runRequestedAt: undefined, runRequestedBy: undefined, pendingMessageId: undefined, lastRun: { status: "running", startedAt: now } });
     await pruneRuns(ctx, r._id);
-    const secrets = (await secretRows(ctx, r.userId, r.teamId)).map((s) => ({ name: s.name, iv: s.valueIv, ct: s.valueCt }));
-    return { ok: true as const, runId, trigger, routine: routineShape(r), secrets };
+    // A bot gets only the secrets granted to it; a loop (or a bot from before grants) all of its owner's.
+    const granted = r.bot?.secrets ? new Set(r.bot.secrets) : null;
+    const secrets = (await secretRows(ctx, r.userId, r.teamId)).filter((s) => !granted || granted.has(s.name)).map((s) => ({ name: s.name, iv: s.valueIv, ct: s.valueCt }));
+    const resume = pending ? { id: pending._id, sessionId: r.lastSessionId ?? null, kind: pending.kind, iv: pending.iv, ct: pending.ct, authorName: pending.authorName ?? null, authorId: pending.authorId ?? null } : null;
+    return { ok: true as const, runId, trigger, routine: routineShape(r), secrets, resume, previous };
   },
 });
 
@@ -499,9 +596,16 @@ export const finishRun = mutation({
     costUsd: v.optional(v.number()),
     turns: v.optional(v.number()),
     sessionId: v.optional(v.string()),
+    /** A bot's run: what its thread gets (the gateway sealed it), and a hash to tell news from a repeat. */
+    /**
+     * `keep`: a result with substance of its own (a draft, a report), shown even when the run also
+     * asked something: the question may well be about it (2026-11-19: "the draft is in my last
+     * message", and that message was held back).
+     */
+    message: v.optional(v.object({ iv: v.string(), ct: v.string(), hash: v.string(), keep: v.optional(v.boolean()) })),
     now: v.number(),
   },
-  handler: async (ctx, { secret, hostId, runId, now, ...fields }) => {
+  handler: async (ctx, { secret, hostId, runId, now, message, ...fields }) => {
     assertService(secret);
     const id = ctx.db.normalizeId("routineRuns", runId);
     const run = id ? await ctx.db.get(id) : null;
@@ -511,8 +615,9 @@ export const finishRun = mutation({
     if (r?.lastRun && r.lastRun.startedAt === run.startedAt) {
       await ctx.db.patch(r._id, { lastRun: { status: fields.status, startedAt: run.startedAt, finishedAt: now } });
     }
+    const replied = r?.bot ? await botRunMessage(ctx, r, run, fields.status, fields.sessionId, message, now) : null;
     const notice = fields.status === "failed" && r ? await failureNotice(ctx, run, r, now) : null;
-    return { ok: true as const, notice };
+    return { ok: true as const, notice, replied };
   },
 });
 
@@ -536,6 +641,58 @@ export const updateRunProgress = mutation({
     return { ok: true as const };
   },
 });
+
+/**
+ * What a bot's finished run puts in its thread: a failure always; a result when the bot reports
+ * every run, or when it says something new and isn't waiting for an answer (its question is the
+ * news then). Keeps the session to continue the conversation with.
+ */
+async function botRunMessage(
+  ctx: MutationCtx,
+  r: Doc<"routines">,
+  run: Doc<"routineRuns">,
+  status: "running" | "succeeded" | "failed",
+  sessionId: string | undefined,
+  message: { iv: string; ct: string; hash: string; keep?: boolean } | undefined,
+  now: number,
+) {
+  const patch: Partial<Doc<"routines">> = {};
+  const failed = status === "failed";
+  if (sessionId) patch.lastSessionId = sessionId;
+  // A run that failed without a session (its session to resume was gone, say) starts the next one afresh.
+  else if (failed) patch.lastSessionId = undefined;
+  // Held back only for a question this run asked, and only when it's short (the question is the
+  // news then). A result with substance (`keep`) shows; a question left open from an earlier run
+  // must not swallow what this run did.
+  const question = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
+  const asked = Boolean(question && !question.answeredAt && question.runId === run._id);
+  const fresh = message && message.hash !== r.lastResultHash;
+  if (message && (failed || r.bot?.report === "every_run" || (fresh && (!asked || message.keep)))) {
+    // Before the question it may be about, in the thread's order.
+    const at = asked && question ? Math.min(now, question.createdAt - 1) : now;
+    await ctx.db.insert("botMessages", { routineId: r._id, teamId: r.teamId, role: "bot", kind: failed ? "failure" : "result", iv: message.iv, ct: message.ct, runId: run._id, createdAt: at });
+    if (!failed) patch.lastResultHash = message.hash;
+    if (Object.keys(patch).length) await ctx.db.patch(r._id, patch);
+    // A team bot's answer, in its group chat: whoever wrote to it since it last said something hears it.
+    if (r.teamId && !failed) {
+      const since = await ctx.db
+        .query("botMessages")
+        .withIndex("by_routine", (q) => q.eq("routineId", r._id).lt("createdAt", at))
+        .order("desc")
+        .take(50);
+      const waiting = new Set<string>();
+      for (const m of since) {
+        if (m.role === "bot") break;
+        if (m.role === "user" && m.authorId) waiting.add(String(m.authorId));
+      }
+      const team = await ctx.db.get(r.teamId);
+      return waiting.size ? { to: [...waiting], routineId: r._id, name: r.name, team: team?.name ?? null, face: r.bot?.face ?? "classic", color: r.bot?.color ?? null, wear: r.bot?.wear ?? null } : null;
+    }
+    return null;
+  }
+  if (Object.keys(patch).length) await ctx.db.patch(r._id, patch);
+  return null;
+}
 
 /** A routine that keeps failing is pushed about again after this long. */
 const NOTICE_REPEAT_MS = 24 * 3600_000;
@@ -575,6 +732,250 @@ export const runOwner = query({
     const run = id ? await ctx.db.get(id) : null;
     if (!run || run.hostId !== hostId) return null;
     const r = await ctx.db.get(run.routineId);
-    return { uid: run.userId, teamId: r?.teamId ?? null };
+    return { uid: run.userId, teamId: r?.teamId ?? null, bot: Boolean(r?.bot), routineId: run.routineId, startedAt: run.startedAt, name: r?.name ?? "" };
+  },
+});
+
+// ---- whose Claude a computer uses (docs/bots.md) ----
+
+/** A computer the user may set Claude for: their own, or the server of a team they manage. */
+async function claudeHost(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, id: string) {
+  const hostId = ctx.db.normalizeId("routineHosts", id);
+  const h = hostId ? await ctx.db.get(hostId) : null;
+  if (!h) return null;
+  if (h.teamId) return (await manages(ctx, uid, h.teamId)) ? h : null;
+  return h.userId === uid ? h : null;
+}
+
+/** Store a plan token or an API key (sealed by the gateway) and use it. */
+export const setClaude = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), kind: v.union(v.literal("plan"), v.literal("key")), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, id, kind, iv, ct, now }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    const user = await ctx.db.get(uid);
+    const stored = { iv, ct, by: user?.name, at: now };
+    await ctx.db.patch(h._id, { claude: { ...(h.claude ?? {}), use: kind, [kind]: stored } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/**
+ * The computer stores its own Claude plan (install.sh signed Claude in there with `claude
+ * setup-token`): sealed by the gateway, and used. For a team's server, whose sign-in only its
+ * owner and admins change in the app; a person's computer goes through setClaude as its owner.
+ */
+export const setClaudeByHost = mutation({
+  args: { ...secretArg, hostId: v.id("routineHosts"), kind: v.union(v.literal("plan"), v.literal("key")), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, hostId, kind, iv, ct, now }) => {
+    assertService(secret);
+    const h = await ctx.db.get(hostId);
+    if (!h?.tokenHash) return { ok: false as const, error: "no_such_computer" };
+    const stored = { iv, ct, by: "the computer's setup", at: now };
+    await ctx.db.patch(h._id, { claude: { ...(h.claude ?? {}), use: kind, [kind]: stored } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** Switch which sign-in the computer uses. */
+export const useClaude = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), use: v.union(v.literal("plan"), v.literal("key"), v.literal("computer")) },
+  handler: async (ctx, { secret, uid, id, use }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    if (use === "plan" && !h.claude?.plan) return { ok: false as const, error: "no_plan" };
+    if (use === "key" && !h.claude?.key) return { ok: false as const, error: "no_key" };
+    await ctx.db.patch(h._id, { claude: { ...(h.claude ?? {}), use } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** Remove a stored plan or key; the computer falls back to the other, or its own sign-in. */
+export const removeClaude = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), kind: v.union(v.literal("plan"), v.literal("key")) },
+  handler: async (ctx, { secret, uid, id, kind }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    const rest = { ...(h.claude ?? { use: "computer" as const }) };
+    delete rest[kind];
+    const other = kind === "plan" ? "key" : "plan";
+    const use = rest.use === kind ? (rest[other] ? other : "computer") : rest.use;
+    await ctx.db.patch(h._id, { claude: { ...rest, use } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** The computer's chosen sign-in (sealed), for the computer itself; null: its own. */
+export const hostClaude = query({
+  args: { ...secretArg, hostId: v.id("routineHosts") },
+  handler: async (ctx, { secret, hostId }) => {
+    assertService(secret);
+    const h = await ctx.db.get(hostId);
+    if (!h?.claude || h.claude.use === "computer") return null;
+    const c = h.claude[h.claude.use];
+    if (!c) return null;
+    return { kind: h.claude.use, iv: c.iv, ct: c.ct, at: c.at, uid: h.userId ?? null, teamId: h.teamId ?? null };
+  },
+});
+
+// ---- how a computer's Codex bots sign in to OpenAI (docs/bots.md, "Codex next to Claude Code") ----
+
+/** Store an OpenAI API key (sealed) and use it. */
+export const setOpenAI = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, id, iv, ct, now }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    const user = await ctx.db.get(uid);
+    await ctx.db.patch(h._id, { openai: { use: "key", key: { iv, ct, by: user?.name, at: now } } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** Use the stored key, or the computer's own Codex sign-in (its ChatGPT plan). */
+export const useOpenAI = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), use: v.union(v.literal("plan"), v.literal("key")) },
+  handler: async (ctx, { secret, uid, id, use }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    if (use === "key" && !h.openai?.key) return { ok: false as const, error: "no_openai_key" };
+    await ctx.db.patch(h._id, { openai: { ...(h.openai ?? {}), use } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** Remove the stored key; the computer's own sign-in is used. */
+export const removeOpenAI = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string() },
+  handler: async (ctx, { secret, uid, id }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    await ctx.db.patch(h._id, { openai: { use: "plan" } });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** The computer's stored key (sealed) when it uses one, for the computer itself; null: its own sign-in. */
+export const hostOpenAI = query({
+  args: { ...secretArg, hostId: v.id("routineHosts") },
+  handler: async (ctx, { secret, hostId }) => {
+    assertService(secret);
+    const h = await ctx.db.get(hostId);
+    if (h?.openai?.use !== "key" || !h.openai.key) return null;
+    return { iv: h.openai.key.iv, ct: h.openai.key.ct, at: h.openai.key.at, uid: h.userId ?? null, teamId: h.teamId ?? null };
+  },
+});
+
+// ---- a computer's model, Ambient's access there, and root commands waiting for approval ----
+
+/** The default model for the computer's runs and Ambient there (null: Claude Code's own). */
+export const setModel = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), model: v.union(modelChoice, v.null()) },
+  handler: async (ctx, { secret, uid, id, model }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    await ctx.db.patch(h._id, { model: model ?? undefined });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** What Ambient may do there. `onlyLower`: an AI app asked, which may only take access away. */
+export const setAccess = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), access: v.union(v.literal("standard"), v.literal("admin"), v.literal("full")), onlyLower: v.boolean() },
+  handler: async (ctx, { secret, uid, id, access, onlyLower }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    const rank = { standard: 0, admin: 1, full: 2 } as const;
+    if (onlyLower && rank[access] > rank[h.access ?? "standard"]) return { ok: false as const, error: "raise_in_app" };
+    await ctx.db.patch(h._id, { access });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+export const removeAllowed = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), command: v.string() },
+  handler: async (ctx, { secret, uid, id, command }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    await ctx.db.patch(h._id, { allowed: (h.allowed ?? []).filter((c) => c !== command) });
+    return { ok: true as const, host: hostShape((await ctx.db.get(h._id))!) };
+  },
+});
+
+/** The computer as Ambient's root commands see it: may this person act there, and how. */
+export const hostForAdmin = query({
+  args: { ...secretArg, uid: v.id("users"), id: v.string() },
+  handler: async (ctx, { secret, uid, id }) => {
+    assertService(secret);
+    const h = await claudeHost(ctx, uid, id);
+    if (!h) return null;
+    return { id: h._id, name: h.name, teamId: h.teamId ?? null, ownerUid: h.userId ?? null, access: h.access ?? "standard", allowed: h.allowed ?? [] };
+  },
+});
+
+const APPROVAL_TTL_MS = 10 * 60_000;
+
+export const requestApproval = mutation({
+  args: { ...secretArg, uid: v.id("users"), hostId: v.id("routineHosts"), iv: v.string(), ct: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, hostId, iv, ct, now }) => {
+    assertService(secret);
+    const id = await ctx.db.insert("approvals", { hostId, uid, iv, ct, status: "pending", createdAt: now, expiresAt: now + APPROVAL_TTL_MS });
+    return { id, expiresAt: now + APPROVAL_TTL_MS };
+  },
+});
+
+function approvalShape(a: Doc<"approvals">, now: number) {
+  const status = a.status === "pending" && a.expiresAt < now ? ("expired" as const) : a.status;
+  return { id: a._id, hostId: a.hostId, iv: a.iv, ct: a.ct, status, decision: a.decision ?? null, createdAt: a.createdAt, expiresAt: a.expiresAt };
+}
+
+/** The person's pending approvals, newest first. */
+export const approvals = query({
+  args: { ...secretArg, uid: v.id("users"), now: v.number() },
+  handler: async (ctx, { secret, uid, now }) => {
+    assertService(secret);
+    const rows = await ctx.db
+      .query("approvals")
+      .withIndex("by_user", (q) => q.eq("uid", uid))
+      .order("desc")
+      .take(50);
+    return rows.map((a) => approvalShape(a, now)).filter((a) => a.status === "pending");
+  },
+});
+
+export const approval = query({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), now: v.number() },
+  handler: async (ctx, { secret, uid, id, now }) => {
+    assertService(secret);
+    const aid = ctx.db.normalizeId("approvals", id);
+    const a = aid ? await ctx.db.get(aid) : null;
+    return a && a.uid === uid ? approvalShape(a, now) : null;
+  },
+});
+
+/** The person decides; "always" also adds the command to the computer's always-allowed list. */
+export const decide = mutation({
+  args: { ...secretArg, uid: v.id("users"), id: v.string(), decision: v.union(v.literal("once"), v.literal("session"), v.literal("always"), v.literal("deny")), command: v.optional(v.string()), now: v.number() },
+  handler: async (ctx, { secret, uid, id, decision, command, now }) => {
+    assertService(secret);
+    const aid = ctx.db.normalizeId("approvals", id);
+    const a = aid ? await ctx.db.get(aid) : null;
+    if (!a || a.uid !== uid) return { ok: false as const, error: "no_such_approval" };
+    if (a.status !== "pending" || a.expiresAt < now) return { ok: false as const, error: "already_decided" };
+    // Whoever decides must still be allowed to change the computer.
+    const h = await claudeHost(ctx, uid, a.hostId);
+    if (!h) return { ok: false as const, error: "no_such_computer" };
+    await ctx.db.patch(a._id, { status: decision === "deny" ? "denied" : "approved", decision, decidedAt: now });
+    if (decision === "always" && command) await ctx.db.patch(h._id, { allowed: [...new Set([...(h.allowed ?? []), command])].slice(-100) });
+    return { ok: true as const, approval: approvalShape((await ctx.db.get(a._id))!, now) };
   },
 });

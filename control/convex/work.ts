@@ -27,7 +27,7 @@ export const get = query({
   handler: async (ctx, { secret, uid }) => {
     assertService(secret);
     const w = await ctx.db.query("personalWork").withIndex("by_user", (q) => q.eq("userId", uid)).unique();
-    return w ? { done: w.done, lastSeq: w.lastSeq, lastRunAt: w.lastRunAt, lastStatus: w.lastStatus, lintHistory: w.lintHistory } : null;
+    return w ? { done: w.done, lastSeq: w.lastSeq, lastRunAt: w.lastRunAt, lastStatus: w.lastStatus, lastResult: w.lastResult ?? null, lintHistory: w.lintHistory } : null;
   },
 });
 
