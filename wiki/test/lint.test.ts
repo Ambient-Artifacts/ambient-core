@@ -36,6 +36,15 @@ describe("lint", () => {
     expect(report.checked).toEqual({ pages: 5, notes: 2, living: 3 });
   });
 
+  it("reads a link to a file as a link to its page", () => {
+    // A repo written for git and Obsidian names pages by file: `affects: [people/anna.md]`.
+    const s = new WikiStore("team", "t");
+    s.upsert("people/anna.md", living("Anna", "person"));
+    s.upsert("decisions/0001-x.md", `---\ntitle: X\ntype: decision\nsummary: x\nupdated: 2026-10-01\naffects:\n  - ./people/anna.md\n  - people/ghost.md\nsupersedes: decisions/0000-w.md\n---\n# X\n`);
+    expect(s.backlinks("people/anna").map((p) => p.ref)).toContain("decisions/0001-x");
+    expect(s.lint({ today: "2026-10-07" }).issues.filter((i) => i.kind === "broken_link").map((i) => i.refs[0]).sort()).toEqual(["decisions/0000-w", "people/ghost"]);
+  });
+
   it("flags living pages nothing links to", () => {
     const s = wiki();
     s.upsert("wiki/topics/lonely.md", living("Lonely", "topic"));

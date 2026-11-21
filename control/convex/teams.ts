@@ -41,13 +41,25 @@ export const bySlug = query({
   },
 });
 
+/** One team by id (where its brain runs changes, so it's read fresh). */
+export const byId = query({
+  args: { ...secretArg, teamId: v.id("teams") },
+  handler: async (ctx, { secret, teamId }) => {
+    assertService(secret);
+    const team = await ctx.db.get(teamId);
+    return team ? shape(team) : null;
+  },
+});
+
 /** Active teams with a server, for the health check. */
 export const active = query({
   args: { ...secretArg },
   handler: async (ctx, { secret }) => {
     assertService(secret);
     const teams = await ctx.db.query("teams").collect();
-    return teams.filter((t) => t.status === "active" && t.serverUrl).map((t) => ({ id: t._id, slug: t.slug, name: t.name, serverUrl: t.serverUrl! }));
+    return teams
+      .filter((t) => t.status === "active" && t.serverUrl)
+      .map((t) => ({ id: t._id, slug: t.slug, name: t.name, serverUrl: t.serverUrl!, microsoftTenantId: t.microsoftTenantId ?? null }));
   },
 });
 
@@ -61,6 +73,20 @@ export const ofUser = query({
 });
 
 /** Accept an invite code (hashed by the gateway). Returns the team or an error code. */
+/**
+ * One team per person (Nikolai, 2026-11-20): the apps switch between Personal and the one team,
+ * and Settings has one team's page. The team someone is in (an active one), if any; `except`, a
+ * team that doesn't count (the one they're joining again).
+ */
+export async function teamOfUser(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, except?: Id<"teams">): Promise<Doc<"teams"> | null> {
+  for (const m of await ctx.db.query("members").withIndex("by_user", (q) => q.eq("userId", uid)).collect()) {
+    if (m.teamId === except) continue;
+    const t = await ctx.db.get(m.teamId);
+    if (t && t.status === "active") return t;
+  }
+  return null;
+}
+
 export const joinWithInvite = mutation({
   args: { ...secretArg, uid: v.id("users"), codeHash: v.string(), peopleSlug: v.string(), now: v.number() },
   handler: async (ctx, { secret, uid, codeHash, peopleSlug, now }) => {
@@ -88,6 +114,8 @@ export const joinWithInvite = mutation({
       .withIndex("by_team_user", (q) => q.eq("teamId", team._id).eq("userId", uid))
       .unique();
     if (existing) return { ok: true as const, team: shape(team, existing) };
+    const other = await teamOfUser(ctx, uid, team._id);
+    if (other) return { ok: false as const, error: "one_team", team: other.name };
     // Keep people slugs unique inside a team (two "Anna Müller"s get -2), and never hand someone
     // a removed member's page by renaming themselves after them (their own comes back to them).
     const taken = new Set(
@@ -113,6 +141,31 @@ export const create = internalMutation({
     const clash = await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
     if (clash) throw new ConvexError(`team ${slug} exists`);
     return ctx.db.insert("teams", { slug, name, status: "active", serverUrl, createdAt: Date.now() });
+  },
+});
+
+/** The Microsoft 365 tenant a team connected with Ambient's own Microsoft app, or null. */
+export const microsoftTenant = query({
+  args: { ...secretArg, slug: v.string() },
+  handler: async (ctx, { secret, slug }) => {
+    assertService(secret);
+    const team = await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+    return team?.microsoftTenantId ?? null;
+  },
+});
+
+/**
+ * The Microsoft 365 tenant connected with Ambient's own Microsoft app (null: disconnected). Only
+ * the gateway sets it, at the end of "Connect Microsoft 365" or when the team disconnects.
+ */
+export const setMicrosoftTenant = mutation({
+  args: { ...secretArg, slug: v.string(), tenantId: v.union(v.string(), v.null()) },
+  handler: async (ctx, { secret, slug, tenantId }) => {
+    assertService(secret);
+    if (tenantId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(tenantId)) throw new ConvexError("bad tenant id");
+    const team = await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+    if (!team) throw new ConvexError(`no team ${slug}`);
+    await ctx.db.patch(team._id, { microsoftTenantId: tenantId ?? undefined });
   },
 });
 
@@ -187,8 +240,13 @@ const canManage = (r: string) => r === "owner" || r === "admin";
  * claim (the gateway tells it which team it now serves); `no_server` when the pool is empty.
  */
 export const createOwned = mutation({
-  args: { ...secretArg, uid: v.id("users"), name: v.string(), peopleSlug: v.string(), now: v.number() },
-  handler: async (ctx, { secret, uid, name, peopleSlug, now }) => {
+  /**
+   * `pool`: take a server from Ambient's pool (hosted teams). False (new teams since 2026-11-19):
+   * the team starts without a server and runs on a computer of its own, connected by its owner
+   * (docs/architecture.md, "A team on its own computer"); creating it never waits for the pool.
+   */
+  args: { ...secretArg, uid: v.id("users"), name: v.string(), peopleSlug: v.string(), now: v.number(), pool: v.optional(v.boolean()) },
+  handler: async (ctx, { secret, uid, name, peopleSlug, now, pool = true }) => {
     assertService(secret);
     const clean = name.trim().slice(0, 80);
     if (!clean) return { ok: false as const, error: "bad_name" };
@@ -198,17 +256,19 @@ export const createOwned = mutation({
       if (m.role === "owner" && (await ctx.db.get(m.teamId))?.status === "active") owned++;
     }
     if (owned >= MAX_OWNED_TEAMS) return { ok: false as const, error: "too_many_teams" };
-    const server = await ctx.db.query("teamServers").withIndex("by_status", (q) => q.eq("status", "free")).first();
-    if (!server) return { ok: false as const, error: "no_server" };
+    const other = await teamOfUser(ctx, uid);
+    if (other) return { ok: false as const, error: "one_team", team: other.name };
+    const server = pool ? await ctx.db.query("teamServers").withIndex("by_status", (q) => q.eq("status", "free")).first() : null;
+    if (pool && !server) return { ok: false as const, error: "no_server" };
     const base = clean.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "team";
     let slug = base.length >= 2 ? base : `${base}-team`;
     for (let i = 2; await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", slug)).unique(); i++) slug = `${base}-${i}`;
-    const teamId = await ctx.db.insert("teams", { slug, name: clean, status: "active", serverUrl: server.url, createdAt: now });
+    const teamId = await ctx.db.insert("teams", { slug, name: clean, status: "active", ...(server ? { serverUrl: server.url } : {}), createdAt: now });
     await ctx.db.insert("members", { teamId, userId: uid, role: "owner", peopleSlug, joinedAt: now });
-    await ctx.db.patch(server._id, { status: "claimed", teamId });
+    if (server) await ctx.db.patch(server._id, { status: "claimed", teamId });
     const team = (await ctx.db.get(teamId))!;
     const member = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid)).unique();
-    return { ok: true as const, team: shape(team, member ?? undefined), server: { serverId: server.serverId, url: server.url } };
+    return { ok: true as const, team: shape(team, member ?? undefined), server: server ? { serverId: server.serverId, url: server.url } : null };
   },
 });
 
@@ -359,5 +419,24 @@ export const freeServers = query({
     assertService(secret);
     const free = await ctx.db.query("teamServers").withIndex("by_status", (q) => q.eq("status", "free")).collect();
     return free.map((s) => ({ serverId: s.serverId, url: s.url }));
+  },
+});
+
+/**
+ * Where a team's brain is (docs/architecture.md, "A team on its own computer"): set once the team's
+ * computer runs it (`computer://<hostId>`). Only a team without a server, or one already on that
+ * computer, is changed: a hosted team's server is never replaced from a computer.
+ */
+export const setComputerServer = mutation({
+  args: { ...secretArg, teamId: v.id("teams"), hostId: v.id("routineHosts") },
+  handler: async (ctx, { secret, teamId, hostId }) => {
+    assertService(secret);
+    const team = await ctx.db.get(teamId);
+    const host = await ctx.db.get(hostId);
+    if (!team || !host || host.teamId !== teamId) return { ok: false as const };
+    const url = `computer://${hostId}`;
+    if (team.serverUrl && team.serverUrl !== url && !team.serverUrl.startsWith("computer://")) return { ok: false as const };
+    if (team.serverUrl !== url) await ctx.db.patch(teamId, { serverUrl: url });
+    return { ok: true as const, changed: team.serverUrl !== url };
   },
 });

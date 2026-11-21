@@ -9,6 +9,8 @@ User=brain
 Group=brain
 WorkingDirectory=/opt/brain/app
 EnvironmentFile=/etc/brain/gateway.env
+# ANTHROPIC_API_KEY for the Teams bots' answers: the key the session and upkeep jobs use (optional).
+EnvironmentFile=-/etc/brain/personal.env
 ExecStart=/usr/bin/node --import tsx gateway/src/server.ts
 Restart=always
 RestartSec=3

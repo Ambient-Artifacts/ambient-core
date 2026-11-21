@@ -21,7 +21,7 @@ This repository is Ambient's server: the MCP gateway, the personal and team wiki
 
 ## ✨ Features
 
-- **One MCP server for every AI app.** OAuth 2.1 with dynamic client registration for Claude, ChatGPT and other MCP clients; personal access tokens for the rest. Tools: `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items`, `transcript`, `save_note` and `log_work`.
+- **One MCP server for every AI app.** OAuth 2.1 with dynamic client registration for Claude, ChatGPT and other MCP clients; personal access tokens for the rest. Tools: `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items`, `transcript`, `save_note`, `log_work` and `suggest_correction`.
 - **Personal wikis, encrypted at rest.** Each user's pages are sealed with their own data key (AES-256-GCM) before they reach the database. The key that wraps those keys never leaves the gateway.
 - **Team wikis in git.** Each team's wiki is a git repository on the team's own server: plain markdown with front matter, one commit per change. Connect your own GitHub or GitLab repo and the wiki stays in step with it, both ways.
 - **Work sessions become notes.** The [Claude Code plugin](integrations/claude-code) sends finished sessions; the gateway cuts them down, strips secrets in the formats it knows, and Claude writes a short note. Folder rules route sessions to a team after a 30-minute hold.
@@ -33,7 +33,7 @@ This repository is Ambient's server: the MCP gateway, the personal and team wiki
 
 ### Ambient Cloud
 
-The fastest way: install the app, sign in with Apple or Microsoft, and connect your AI apps. No servers. Personal wikis are free; teams get a managed team server in Germany. See [ambientartifacts.si](https://ambientartifacts.si).
+The fastest way: install the app, sign in with Apple, Microsoft or Google, and connect your AI apps. No servers. Personal wikis are free; teams get a managed team server in Germany. See [ambientartifacts.si](https://ambientartifacts.si).
 
 ### Self-host Ambient
 
@@ -56,7 +56,7 @@ Then add `https://ambient.example.com/mcp` as a connector in Claude (Settings �
 | Work-session notes, nightly upkeep, overviews | ✓, included | ✓, with your Anthropic API key |
 | Loops | ✓ | ✓ |
 | iPhone and Mac apps: recording, on-device transcription | ✓ | ✓, "Use your own server" at sign-in |
-| Sign-in | Apple, Microsoft; anyone can sign up | Apple; only people you add or allow |
+| Sign-in | Apple, Microsoft, Google; anyone can sign up | Apple; only people you add or allow |
 | Push notifications | ✓ | – |
 | Updates, backups, monitoring | We run them | You run them |
 

@@ -12,6 +12,8 @@ import {
   unwrapDataKey,
   wrapDataKey,
   type MasterKey,
+  decryptBytes,
+  encryptBytes,
 } from "./crypto.ts";
 
 export interface SyncUpsert {
@@ -73,6 +75,12 @@ export class PersonalStore {
         now: Date.now(),
       });
     }
+    return this.unwrap(uid, rec);
+  }
+
+  private unwrap(uid: string, rec: { masterKeyId: string; wrapped: string }): Buffer {
+    const cached = this.keys.get(uid);
+    if (cached) return cached;
     if (rec.masterKeyId !== this.master.id) throw new Error(`user key wrapped by unknown master key ${rec.masterKeyId}`);
     const dek = unwrapDataKey(this.master, uid, rec.wrapped);
     this.keys.set(uid, dek);
@@ -239,6 +247,15 @@ export class PersonalStore {
     return row ? decryptPage(dek, uid, row.path, row.iv, row.ciphertext) : undefined;
   }
 
+  /** A file's bytes, sealed with the user's own data key (attachments in their chat). */
+  async sealBytes(uid: string, label: string, bytes: Buffer): Promise<{ iv: string; ciphertext: string }> {
+    return encryptBytes(await this.dataKey(uid), uid, label, bytes);
+  }
+
+  async openBytes(uid: string, label: string, iv: string, ciphertext: string): Promise<Buffer> {
+    return decryptBytes(await this.dataKey(uid), uid, label, iv, ciphertext);
+  }
+
   /** Encrypt a small secret (a repo token, sync state) with the user's own data key. */
   async seal(uid: string, label: string, text: string): Promise<{ iv: string; ciphertext: string }> {
     return encryptPage(await this.dataKey(uid), uid, label, text);
@@ -246,6 +263,14 @@ export class PersonalStore {
 
   async open(uid: string, label: string, iv: string, ciphertext: string): Promise<string> {
     return decryptPage(await this.dataKey(uid), uid, label, iv, ciphertext);
+  }
+
+  /**
+   * As `open`, with the user's wrapped key read in the same query as the sealed value: values of
+   * many users (a team's voices) open without a key lookup per user.
+   */
+  openWithKey(uid: string, key: { masterKeyId: string; wrapped: string }, label: string, iv: string, ciphertext: string): string {
+    return decryptPage(this.unwrap(uid, key), uid, label, iv, ciphertext);
   }
 
   /** A note's transcript, if the phone backed it up (`raw` in the note's front matter). */

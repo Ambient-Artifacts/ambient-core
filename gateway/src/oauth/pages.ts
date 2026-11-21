@@ -39,6 +39,10 @@ color:var(--text);font:600 28px/1.2 ui-monospace,"SF Mono",SFMono-Regular,Menlo,
 text-align:center;outline:none;transition:border-color .15s,box-shadow .15s}
 .code::placeholder{color:var(--muted);opacity:.35}
 .code:focus{border-color:var(--muted);box-shadow:0 0 0 3px var(--ring)}
+.field{width:100%;margin:0 0 12px;padding:11px 12px;border-radius:10px;border:1px solid var(--border);background:var(--field);
+color:var(--text);font:15px/1.3 inherit;font-family:inherit;outline:none;transition:border-color .15s,box-shadow .15s}
+.field:focus{border-color:var(--muted);box-shadow:0 0 0 3px var(--ring)}
+.where{margin:0 0 16px;padding:12px;border-radius:10px;border:1px solid var(--border);background:var(--field);font-size:14px;line-height:1.4;word-break:break-word}
 .btn{display:block;width:100%;height:44px;border-radius:10px;border:0;font-size:15px;font-weight:500;font-family:inherit;cursor:pointer;
 background:var(--primary);color:var(--on-primary);transition:background .15s,transform .05s}
 .btn:hover{background:var(--primary-hover)}.btn:active{transform:scale(.99)}
@@ -174,5 +178,48 @@ export function errorPage(o: { title?: string; message: string }): string {
     `<h1>${esc(o.title ?? "Couldn't connect")}</h1>
 <p class="sub">Start again from the app you were connecting.</p>
 ${alertBox(o.message)}`,
+  );
+}
+
+// ---- "Connect Microsoft 365" (gateway/src/microsoft-connect.ts) ----
+
+const MS_HEADER = `<div class="pair" aria-hidden="true"><img class="app" src="${AMBIENT_ICON}" width="48" height="48" alt=""></div>`;
+
+/** Step 2 of 3: the admin signed in; which folder may Ambient write to? */
+export function m365FolderPage(o: { state: string; team: string; account: string; purpose: "transcripts" | "work"; error?: string; link?: string }): string {
+  const what = o.purpose === "work" ? "copies of shared work logs" : "meeting transcripts";
+  return layout(
+    "Choose the folder",
+    `${MS_HEADER}
+<h1>Choose the folder</h1>
+<p class="sub">Signed in as <b>${esc(o.account)}</b>. Paste the link to the OneDrive or SharePoint folder for the ${esc(o.team)} team's ${what}. Ambient will be able to write files into that folder and nothing else.</p>
+${o.error ? alertBox(o.error) : ""}
+<form method="post" action="/connect/microsoft/folder">
+<input type="hidden" name="state" value="${esc(o.state)}">
+<label class="sr" for="link">Folder link</label>
+<input class="field" id="link" name="link" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="2000" placeholder="https://…sharepoint.com/…" value="${esc(o.link ?? "")}" autofocus required>
+<button class="btn" type="submit">Continue</button>
+</form>
+<p class="note">${ICON.lock}<span>Open the folder in OneDrive or SharePoint in your browser and copy the address, or use Share → Copy link.</span></p>`,
+  );
+}
+
+/** Step 3 of 3: who gets what, before Ambient's app gets access. */
+export function m365ConfirmPage(o: { state: string; team: string; requester: string; folder: string; purpose: "transcripts" | "work" }): string {
+  const what = o.purpose === "work" ? "copies of the work logs shared with the team" : "the transcripts of the team's recordings";
+  return layout(
+    "Give Ambient access to this folder?",
+    `${MS_HEADER}
+<h1>Give Ambient access to this folder?</h1>
+<div class="where">${esc(o.folder)}</div>
+<ul class="perms">
+<li><span class="tick">${ICON.check}</span><span>Ambient writes ${what} of <b>${esc(o.team)}</b> here (set up by ${esc(o.requester)}).</span></li>
+<li><span class="tick">${ICON.check}</span><span>It can write in this folder only, nothing else in your OneDrive or SharePoint.</span></li>
+</ul>
+<div class="actions">
+<form method="post" action="/connect/microsoft/cancel"><input type="hidden" name="state" value="${esc(o.state)}"><button class="btn secondary" type="submit">Cancel</button></form>
+<form method="post" action="/connect/microsoft/grant"><input type="hidden" name="state" value="${esc(o.state)}"><button class="btn" type="submit">Give Access</button></form>
+</div>
+<p class="note">${ICON.lock}<span>To take it back, remove Ambient under Enterprise applications in Microsoft Entra.</span></p>`,
   );
 }

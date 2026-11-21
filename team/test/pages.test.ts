@@ -104,6 +104,14 @@ describe("the page prompt", () => {
     expect(user).toContain('<evidence note="notes/b" date="2026-10-14">');
   });
 
+  it("weighs a team member's correction over the page, but not over a source document the page names", () => {
+    const { system, user } = pagePrompt({ ...input, evidence: [{ note: "corrections/c", date: "2026-10-15", title: "Correction: Nikolai", summary: "x", body: "y", role: "correction" }] }, "team");
+    expect(system).toContain('role="correction" is a team member correcting what the wiki said');
+    expect(system).toContain('keep the documented fact and put the conflict in "openQuestions"');
+    expect(system).toContain('"Corrected by <name>: ..."');
+    expect(user).toContain('<evidence note="corrections/c" date="2026-10-15" role="correction">');
+  });
+
   it("asks topics for one list, and personal pages for no timeline", () => {
     expect(pagePrompt({ ...input, ref: "topics/pricing", type: "topic" }, "team").system).toContain('"currentTruth": at most 10');
     const personal = pagePrompt(input, "personal").system;
@@ -139,6 +147,58 @@ describe("consolidation", () => {
     const after = parsePage(again[0]!.text);
     expect(splitCompiled(after.body).timeline).toEqual(before);
     expect(after.body).toContain("### Who they are\n- Someone.");
+  });
+});
+
+describe("corrections", () => {
+  it("are marked as such for the pages they name, and leave the page of the person who sent them alone", async () => {
+    const s = new WikiStore("team", "t1");
+    s.upsert("people/lena.md", living("person", "Lena Vogel", "# Lena Vogel\n\n- Sales.\n\n## Timeline\n"));
+    s.upsert("people/petra.md", living("person", "Petra Schäfer", "# Petra Schäfer\n\n- Leads sales.\n\n## Timeline\n"));
+    s.upsert("corrections/2026-10/c.md", noteText("N-COR-000001", "Correction: Petra Schäfer", { kind: "correction", recorded_by: "people/lena", people: ["people/petra"] }));
+    // Lena correcting her own page: still a correction, not her own work.
+    s.upsert("corrections/2026-10/d.md", noteText("N-COR-000002", "Correction: Lena Vogel", { kind: "correction", recorded_by: "people/lena", people: ["people/lena"] }));
+    const updater = new Recorder(() => ({ title: "x", summary: "x", aliases: [], sections: { who: ["Someone."] }, openQuestions: [], timeline: [] }));
+    await consolidatePages({ store: s, updater, done: new Set(), mode: "team", write: async () => null });
+    const evidence = Object.fromEntries(updater.seen.map((i) => [i.ref, i.evidence.map((e) => [e.note, e.role])]));
+    expect(evidence).toEqual({
+      "people/petra": [["corrections/2026-10/c", "correction"]],
+      "people/lena": [["corrections/2026-10/d", "correction"]],
+    });
+  });
+
+  it("are filed under corrections/, linked only to pages the wiki has, and not to the person who sent them", async () => {
+    const wiki = await TeamWiki.open(join(mkdtempSync(join(tmpdir(), "brain-ingest-")), "wiki"), "t1", "Acme");
+    await wiki.write(async (put) => {
+      await put("people/anna-mueller.md", living("person", "Anna Müller", "# Anna Müller\n\n- Sales.\n\n## Timeline\n", ["Anna"]));
+      return { message: "test: setup", result: {} };
+    });
+    const note: TeamNoteV1 = {
+      schema: "brain.team-note/v1",
+      note_id: "01JBCORRECTION000000000001",
+      team_id: "t1",
+      recorded_by: "u_lena",
+      recorded_by_name: "Lena Vogel",
+      recorded_at: "2026-10-14T10:00:00Z",
+      duration_s: 0,
+      language: "en",
+      kind: "correction",
+      consent: { mode: "solo", confirmed_at: "2026-10-14T10:00:00Z" },
+      entry_page: {
+        frontmatter: { title: "Correction: Anna Müller", summary: "Anna leads support, not sales.", people: ["people/anna-mueller", "people/nobody-here"], projects: ["projects/unknown"] },
+        body_md: "# Correction: Anna Müller\n\n## What the wiki says\n> Anna leads sales.\n\n## What is true\nAnna leads support.",
+      },
+      transcript: null,
+      participants_hint: [],
+      client: { app: "ai:claude", transcriber: "none", compiler: "none" },
+    };
+    const out = await ingestNote(wiki, note, { rawDir: join(wiki.dir, "..", "raw"), recordedBySlug: "people/lena-vogel" });
+    expect(out).toMatchObject({ status: "stored", path: "corrections/2026-10/2026-10-14-correction-anna-mueller-000001.md" });
+    const page = parsePage(readFileSync(join(wiki.dir, out.path), "utf8"));
+    expect(page.frontmatter).toMatchObject({ kind: "correction", recorded_by: "people/lena-vogel", people: ["people/anna-mueller"], projects: [] });
+    expect(page.frontmatter.compile).toBeUndefined();
+    expect(page.body).toContain("## What is true\nAnna leads support.");
+    expect(readFileSync(join(wiki.dir, "corrections", "_index.md"), "utf8")).toContain("2026-10");
   });
 });
 

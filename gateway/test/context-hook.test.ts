@@ -24,6 +24,9 @@ function hook(mode: string, input: Record<string, unknown>, env: Record<string, 
     let out = "";
     p.stdout.on("data", (d) => (out += d));
     p.on("close", (code) => resolve({ code, out }));
+    // A hook that exits before reading its input closes the pipe: that's its answer, not a crash
+    // of the test run (an unhandled EPIPE failed CI on #7, #78 and #80).
+    p.stdin.on("error", () => {});
     p.stdin.end(JSON.stringify(input));
   });
 }

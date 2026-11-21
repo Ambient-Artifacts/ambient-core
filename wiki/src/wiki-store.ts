@@ -10,11 +10,13 @@ import {
   firstHeading,
   foldText,
   parseActionItems,
-  parsePage,
+  parsePageLenient,
   section,
   splitCompiled,
 } from "@brain/spec";
+import { bodyLinks } from "./body-links.ts";
 import { buildListing, type Listing, type ListedPage } from "./indexes.ts";
+import { ignoring, purposeOf } from "./repo-files.ts";
 import { attention, lintWiki, type LintReport } from "./lint.ts";
 
 export type StoreScope = "personal" | "team";
@@ -65,7 +67,8 @@ export interface Brief {
 
 const ENTITY_TYPES = ["person", "org", "project", "topic"];
 const LINK_FIELDS = ["people", "orgs", "projects", "topics", "deciders", "affects", "recorded_by", "supersedes", "source"];
-const SKIP_TEAM_ROOT = new Set(["AGENTS.md", "conventions.md", "index.md", "log.md", "_meta", "raw", "inbox", "review", "out", ".git"]);
+// bots/: bots' folders mirrored from Ambient (docs/bots.md, "A bot's folder in git"), not pages.
+const SKIP_TEAM_ROOT = new Set(["AGENTS.md", "conventions.md", "index.md", "log.md", "_meta", "raw", "inbox", "review", "out", "bots", ".git"]);
 /** Generated or agent-facing files at the top of a personal wiki folder; not pages. */
 const SKIP_PERSONAL_ROOT = new Set(["index.md", "log.md", "AGENTS.md"]);
 
@@ -105,20 +108,32 @@ export class WikiStore {
     this.db.exec(INDEX_SCHEMA_SQL);
   }
 
-  static fromDirectory(root: string, scope: StoreScope, teamId: string | null = null): WikiStore {
+  /**
+   * What folders say about themselves in their own `_index.md` (a repo Ambient didn't write has them),
+   * by folder ref. Ambient's generated index files say nothing here.
+   */
+  readonly folderNotes = new Map<string, string>();
+
+  /** `ignore`: paths below the repo root (folders or files) that aren't knowledge and stay out. */
+  static fromDirectory(root: string, scope: StoreScope, teamId: string | null = null, opts: { ignore?: readonly string[] } = {}): WikiStore {
     const store = new WikiStore(scope, teamId);
     const base = scope === "personal" ? join(root, "wiki") : root;
+    const skip = ignoring(opts.ignore ?? []);
     const walk = (dir: string, top: boolean): void => {
       for (const name of readdirSync(dir)) {
         if (top && scope === "team" && SKIP_TEAM_ROOT.has(name)) continue;
         if (top && scope === "personal" && SKIP_PERSONAL_ROOT.has(name)) continue;
         if (name.startsWith(".")) continue;
         const p = join(dir, name);
+        if (skip(relative(root, p).split(sep).join("/"))) continue;
         // lstat: a symlink (from a connected repo) is skipped, never followed out of the wiki.
         const st = lstatSync(p);
         if (st.isDirectory()) walk(p, false);
         else if (st.isFile() && name.endsWith(".md") && !name.startsWith("_")) {
           store.upsert(relative(root, p).split(sep).join("/"), readFileSync(p, "utf8"));
+        } else if (st.isFile() && name === "_index.md" && dir !== base && st.size < 200_000) {
+          const about = purposeOf(readFileSync(p, "utf8"));
+          if (about) store.folderNotes.set(relative(base, dir).split(sep).join("/"), about);
         }
       }
     };
@@ -134,8 +149,15 @@ export class WikiStore {
     return `${this.prefix}${ref}.md`;
   }
 
+  /** Pages whose front matter couldn't be read, by path. They're indexed without front matter. */
+  readonly invalid = new Map<string, string>();
+
   upsert(path: string, text: string): void {
-    const { frontmatter: fm, body } = parsePage(text);
+    const { frontmatter: fm, body, error } = parsePageLenient(text);
+    if (error) {
+      this.invalid.set(path, error);
+      console.warn(`wiki: front matter of ${path} isn't valid YAML (${error}); indexed without it`);
+    } else this.invalid.delete(path);
     const fileTitle = path.split("/").pop()!.replace(/\.md$/, "").replace(/-/g, " ");
     const title = asString(fm.title) || firstHeading(body) || fileTitle;
     const summary = asString(fm.summary);
@@ -159,18 +181,26 @@ export class WikiStore {
       for (const a of aliases) if (a.trim()) insAlias.run(foldText(a.trim()), path);
 
       const insLink = this.db.prepare("INSERT OR IGNORE INTO links (src, dst, rel) VALUES (?, ?, ?)");
+      // A page is named by its ref ("people/anna"), but a repo written for git and Obsidian names it by its
+      // file ("people/anna.md", "./people/anna.md"): both mean the same page.
       const addLinks = (rel: string, v: unknown) => {
-        for (const dst of Array.isArray(v) ? v : [v]) if (typeof dst === "string" && dst) insLink.run(ref, dst, rel);
+        for (const raw of Array.isArray(v) ? v : [v]) {
+          const dst = typeof raw === "string" ? raw.trim().replace(/^(\.\/)+/, "").replace(/\.md$/, "") : "";
+          if (dst) insLink.run(ref, dst, rel);
+        }
       };
       for (const f of LINK_FIELDS) addLinks(f, fm[f]);
       if (fm.links && typeof fm.links === "object") {
         for (const [rel, v] of Object.entries(fm.links as Record<string, unknown>)) addLinks(rel, v);
       }
+      // Links in the text, for wikis that link there (a team's own repo): the graph and backlinks.
+      addLinks("mentions", bodyLinks(path, body, this.prefix));
     });
     tx();
   }
 
   remove(path: string): void {
+    this.invalid.delete(path);
     this.db.transaction(() => this.removeRows(path))();
   }
 
@@ -206,6 +236,20 @@ export class WikiStore {
     return r ? this.toPage(r) : undefined;
   }
 
+  /**
+   * The team's page for one recording: the one a team's own pipeline wrote and named it in
+   * (`recording_id`), else the note Ambient filed under the recording's id. The recording's id is
+   * the `id` of the transcript file the team was sent.
+   */
+  findByRecording(id: string): Page | undefined {
+    const r = (this.db
+      .prepare("SELECT * FROM pages WHERE json_extract(frontmatter_json, '$.recording_id') = ? ORDER BY path LIMIT 1")
+      .get(id) ?? this.db
+      .prepare("SELECT * FROM pages WHERE type = 'note' AND json_extract(frontmatter_json, '$.id') = ? LIMIT 1")
+      .get(id)) as PageRow | undefined;
+    return r ? this.toPage(r) : undefined;
+  }
+
   /** Every page of one type, oldest first by sort date. */
   ofType(type: string): Page[] {
     return (this.db.prepare("SELECT * FROM pages WHERE type = ? ORDER BY sort_date ASC").all(type) as PageRow[]).map((r) =>
@@ -231,10 +275,10 @@ export class WikiStore {
 
   /** The folders and pages at one level ("" = top), as on the index pages. */
   listing(folder = ""): Listing {
-    return buildListing(this.entries(), folder, folder ? undefined : attention(this.lint()));
+    return buildListing(this.entries(), folder, folder ? undefined : attention(this.lint()), this.folderNotes);
   }
 
-  /** Every front-matter link (src and dst are refs). */
+  /** Every link (src and dst are refs): front matter by its field, links in the text as "mentions". */
   allLinks(): { src: string; dst: string; rel: string }[] {
     return this.db.prepare("SELECT src, dst, rel FROM links").all() as { src: string; dst: string; rel: string }[];
   }

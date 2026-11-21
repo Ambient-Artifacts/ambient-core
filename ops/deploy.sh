@@ -14,6 +14,9 @@ rev=$(git -C "$root" rev-parse --short HEAD)
 git -C "$root" diff --quiet HEAD -- || echo "note: uncommitted changes are not deployed" >&2
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
+# mktemp makes the folder 0700, and rsync -a gives /opt/brain/app the stage folder's own mode: the
+# services (user brain) then can't enter their working directory and fail with status 200/CHDIR.
+chmod 755 "$stage"
 git -C "$root" archive HEAD | tar -x -C "$stage"
 rsync -az --delete --chown=root:root \
   --exclude node_modules --exclude '.env*' --exclude 'control/.convex' \
@@ -46,14 +49,24 @@ fi
 # /etc/brain/host.env: BRAIN_HOST (public name) and, on team VMs, BRAIN_GATEWAY_IP.
 test -f /etc/brain/host.env || { echo "missing /etc/brain/host.env" >&2; exit 1; }
 . /etc/brain/host.env
-sed -e "s/__BRAIN_HOST__/${BRAIN_HOST:?}/" -e "s/__BRAIN_GATEWAY_IP__/${BRAIN_GATEWAY_IP:-127.0.0.1}/" "$caddyfile" > /etc/caddy/Caddyfile
+sed -e "s/__BRAIN_HOST__/${BRAIN_HOST:?}/" -e "s/__BRAIN_GATEWAY_IP__/${BRAIN_GATEWAY_IP:-127.0.0.1}/" "$caddyfile" > /etc/caddy/Caddyfile.next
+# Caddy's admin API is off (see the Caddyfile), so `systemctl reload` can't work: Caddy restarts,
+# only when its config changed (a restart drops every open connection for a moment).
+caddy_changed=1
+cmp -s /etc/caddy/Caddyfile.next /etc/caddy/Caddyfile && caddy_changed=0
+mv /etc/caddy/Caddyfile.next /etc/caddy/Caddyfile
 systemctl daemon-reload
 systemctl enable $units >/dev/null
 # Restart the services and (re)start the timers.
 systemctl restart $units
-systemctl reload caddy || systemctl restart caddy
-sleep 2
+if [ "$caddy_changed" = 1 ] || ! systemctl is-active --quiet caddy; then systemctl restart caddy; fi
 port=$([ "$role" = core ] && echo 8080 || echo 8090)
-curl -fsS "http://127.0.0.1:$port/health" && echo
+# Up within 20 seconds, or the deploy fails loudly (a service that can't start keeps restarting).
+ok=0
+for _ in $(seq 20); do
+  sleep 1
+  curl -fs "http://127.0.0.1:$port/health" && { echo; ok=1; break; }
+done
+[ "$ok" = 1 ] || { echo "deployed $rev ($role) but its health check fails: journalctl -u ${units%% *}" >&2; exit 1; }
 echo "deployed $rev ($role)"
 REMOTE

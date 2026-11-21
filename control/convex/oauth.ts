@@ -225,6 +225,39 @@ export const destroyByAccount = mutation({
   },
 });
 
+/** How long a registered client may go without anyone connecting with it before it's swept. */
+export const UNUSED_CLIENT_MS = 7 * 24 * 60 * 60_000;
+/** "Never expires", as the gateway's adapter writes it (a client's row has no expiry). */
+const NEVER = 8_640_000_000_000_000;
+
+/**
+ * Deletes AI-app clients that registered (anyone can: dynamic client registration) but had no
+ * grant UNUSED_CLIENT_MS later. An app registers when someone connects it and is approved within
+ * minutes, so these are abandoned attempts, or a script filling the table. Clients are looked at
+ * oldest first; one in use (it has a grant), or from before its row named its id, gets an expiry
+ * of NEVER - 1, which is still never but takes it out of this queue for good. A slice per run.
+ */
+export const sweepUnusedClients = internalMutation({
+  args: { now: v.optional(v.number()) },
+  handler: async (ctx, { now }) => {
+    const before = (now ?? Date.now()) - UNUSED_CLIENT_MS;
+    let removed = 0;
+    let looked = 0;
+    for await (const c of ctx.db.query("oauth").withIndex("by_expires", (q) => q.eq("expiresAt", NEVER))) {
+      if (++looked > 2_000 || c._creationTime > before) break;
+      if (c.model !== "Client") continue;
+      const grant = c.clientId ? await ctx.db.query("oauth").withIndex("by_model_client", (q) => q.eq("model", "Grant").eq("clientId", c.clientId)).first() : null;
+      if (grant || !c.clientId) {
+        await ctx.db.patch(c._id, { expiresAt: NEVER - 1 });
+        continue;
+      }
+      await ctx.db.delete(c._id);
+      removed++;
+    }
+    return { removed };
+  },
+});
+
 /**
  * Deletes expired rows: codes, sign-in sessions, interactions, refresh tokens, and the ids of
  * DPoP proofs already seen (one per token request). oidc-provider never deletes them itself and

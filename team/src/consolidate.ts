@@ -78,8 +78,11 @@ export interface Evidence {
   title: string;
   summary: string;
   body: string;
-  /** "recorder": the page's subject recorded this note (their own meeting or work session). */
-  role?: "recorder";
+  /**
+   * "recorder": the page's subject recorded this note (their own meeting or work session).
+   * "correction": a team member correcting what the wiki said (MCP suggest_correction).
+   */
+  role?: "recorder" | "correction";
 }
 
 export interface PageUpdateInput {
@@ -212,7 +215,8 @@ function today(): string {
 
 function noteRefs(n: Page): string[] {
   const fm = n.frontmatter;
-  const all = [fm.recorded_by, ...(["people", "orgs", "projects", "topics"] as const).flatMap((k) => (Array.isArray(fm[k]) ? fm[k] : []))];
+  // A correction is about the pages it names, not about the person who sent it.
+  const all = [fm.kind === "correction" ? undefined : fm.recorded_by, ...(["people", "orgs", "projects", "topics"] as const).flatMap((k) => (Array.isArray(fm[k]) ? fm[k] : []))];
   return [...new Set(all.filter((r): r is string => typeof r === "string" && Object.hasOwn(FOLDER_TYPE, r.split("/")[0]!)))];
 }
 
@@ -380,7 +384,11 @@ export async function consolidatePages(run: ConsolidateRun): Promise<Consolidate
         title: n.title,
         summary: n.summary,
         body: n.body.slice(0, 4000),
-        ...(n.frontmatter.recorded_by === ref ? { role: "recorder" as const } : {}),
+        ...(n.frontmatter.kind === "correction"
+          ? { role: "correction" as const }
+          : n.frontmatter.recorded_by === ref
+            ? { role: "recorder" as const }
+            : {}),
       })),
     };
     try {
@@ -563,7 +571,7 @@ export async function consolidate(
   if (opts.overview && (opts.forceOverview || outcome.pagesUpdated > 0 || merged.length > 0 || (outcome.fresh > 0 && outcome.failedNotes.size === 0) || (!wiki.store.getByRef("overview") && wiki.store.size > 0))) {
     try {
       const today = new Date().toISOString().slice(0, 10);
-      const { overview, usage } = await opts.overview.write(overviewInput(wiki.store, { kind: "team", title: `${wiki.teamName} wiki`, today }));
+      const { overview, usage } = await opts.overview.write(overviewInput(wiki.store, { kind: "team", title: `${wiki.teamName} brain`, today }));
       outcome.requests++;
       outcome.usage.input_tokens += usage.input_tokens;
       outcome.usage.output_tokens += usage.output_tokens;

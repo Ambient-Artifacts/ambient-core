@@ -10,12 +10,28 @@ import { WikiStore } from "@brain/wiki";
 import { api, type Control } from "../control.ts";
 import { composeMe, ME_PATH, ME_REF } from "../me.ts";
 import type { PersonalStore } from "../personal.ts";
+import { lastOk, type UpkeepComputer, type WaitingResult } from "../upkeep.ts";
+
+/** One person's writers: their page updater and overview writer. */
+export interface Writers {
+  updater: PageUpdater;
+  overview: OverviewWriter | null;
+}
 
 export interface WorkerDeps {
   control: Control;
   personal: PersonalStore;
-  updater: PageUpdater;
-  overview: OverviewWriter | null;
+  /** The same writers for everyone (an API key: self-hosting, tests). */
+  updater?: PageUpdater;
+  overview?: OverviewWriter | null;
+  /**
+   * Upkeep on each person's own computer (upkeep.ts): where it runs, and their writers there.
+   * Without a connected computer their notes wait.
+   */
+  computers?: {
+    computerFor(uid: string): Promise<UpkeepComputer | null>;
+    writers(uid: string): Writers;
+  };
   version: string;
   /** Wait this long after the phone's last write, so a sync burst is processed once. */
   quietMs?: number;
@@ -24,7 +40,7 @@ export interface WorkerDeps {
 
 export interface UserRun {
   uid: string;
-  status: JobResult["status"];
+  status: JobResult["status"] | "waiting";
   notes: number;
   pagesUpdated: number;
   overview: boolean;
@@ -34,11 +50,25 @@ export interface UserRun {
 }
 
 export async function runPersonalWorker(d: WorkerDeps, now = Date.now()): Promise<UserRun[]> {
-  const due = await d.control.q(api.work.due, { now, quietMs: d.quietMs ?? 10 * 60_000, limit: d.maxUsers ?? 50 });
+  // People whose notes wait for a computer stay due (their next run is when it connects), and a
+  // wait costs a query, so they don't count towards the runs per pass.
+  const max = d.maxUsers ?? 50;
+  const due = await d.control.q(api.work.due, { now, quietMs: d.quietMs ?? 10 * 60_000, limit: d.computers ? Math.max(max, 1000) : max });
   const runs: UserRun[] = [];
   for (const u of due) {
+    if (runs.filter((r) => r.status !== "waiting").length >= max) break;
     try {
-      runs.push(await runUser(d, u.uid, now));
+      let writers: Writers | null = d.updater ? { updater: d.updater, overview: d.overview ?? null } : null;
+      if (d.computers) {
+        const c = await d.computers.computerFor(u.uid);
+        if (!c?.connected) {
+          runs.push(await wait(d, u, c, now));
+          continue;
+        }
+        writers = d.computers.writers(u.uid);
+      }
+      if (!writers) throw new Error("no model for upkeep: neither a computer nor a key");
+      runs.push(await runUser(d, writers, u.uid, now));
     } catch (err) {
       // One user's failure must not stop the others; the health check sees the status.
       const error = (err as Error).message.slice(0, 300);
@@ -49,7 +79,7 @@ export async function runPersonalWorker(d: WorkerDeps, now = Date.now()): Promis
   return runs;
 }
 
-async function runUser(d: WorkerDeps, uid: string, now: number): Promise<UserRun> {
+async function runUser(d: WorkerDeps, w: Writers, uid: string, now: number): Promise<UserRun> {
   const started = new Date(now).toISOString();
   const today = started.slice(0, 10);
   const state = await d.control.q(api.work.get, { uid: uid as never });
@@ -60,7 +90,7 @@ async function runUser(d: WorkerDeps, uid: string, now: number): Promise<UserRun
 
   const outcome = await consolidatePages({
     store,
-    updater: d.updater,
+    updater: w.updater,
     done,
     mode: "personal",
     write: async (pages) => {
@@ -70,13 +100,13 @@ async function runUser(d: WorkerDeps, uid: string, now: number): Promise<UserRun
     },
   });
 
-  await updateMe(d, uid, store, outcome, today);
+  await updateMe(w, d, uid, store, outcome, today);
 
   let overview = false;
   const wantsOverview = outcome.pagesUpdated > 0 || (outcome.fresh > 0 && outcome.failedNotes.size === 0) || !store.getByRef("overview");
-  if (d.overview && wantsOverview && store.ofType("note").length > 0) {
+  if (w.overview && wantsOverview && store.ofType("note").length > 0) {
     try {
-      const { overview: raw, usage } = await d.overview.write(overviewInput(store, { kind: "personal", title: "Your Ambient wiki", today }));
+      const { overview: raw, usage } = await w.overview.write(overviewInput(store, { kind: "personal", title: "Your brain", today }));
       outcome.requests++;
       outcome.usage.input_tokens += usage.input_tokens;
       outcome.usage.output_tokens += usage.output_tokens;
@@ -92,7 +122,7 @@ async function runUser(d: WorkerDeps, uid: string, now: number): Promise<UserRun
 
   const lint = store.lint({ today });
   outcome.checks.push({ name: "lint", ok: lint.counts.broken_link === 0, detail: JSON.stringify(lint.counts) });
-  const result = jobResult(outcome, d.updater.model, { runId: `${started.replace(/[:.]/g, "-")}-${randomUUID().slice(0, 6)}`, version: d.version, started });
+  const result = jobResult(outcome, w.updater.model, { runId: `${started.replace(/[:.]/g, "-")}-${randomUUID().slice(0, 6)}`, version: d.version, started });
   // The seq after our own writes, so they don't make the user due again.
   const lastSeq = await d.control.q(api.personal.seq, { uid: uid as never });
   await d.control.m(api.work.save, { uid: uid as never, done: [...done], lastSeq, status: result.status, result: JSON.stringify(result), lint: lint.counts, now });
@@ -112,7 +142,7 @@ async function runUser(d: WorkerDeps, uid: string, now: number): Promise<UserRun
  * The owner's own page, rewritten from what they wrote about themselves and their latest notes:
  * when they changed what they wrote, or once a day when there were new notes.
  */
-async function updateMe(d: WorkerDeps, uid: string, store: WikiStore, outcome: ConsolidateOutcome, today: string): Promise<void> {
+async function updateMe(w: Writers, d: WorkerDeps, uid: string, store: WikiStore, outcome: ConsolidateOutcome, today: string): Promise<void> {
   const me = store.getByRef(ME_REF);
   if (!me) return;
   const pending = Number(me.frontmatter.pending_rewrite ?? 0) > 0;
@@ -121,7 +151,7 @@ async function updateMe(d: WorkerDeps, uid: string, store: WikiStore, outcome: C
   const about = typeof me.frontmatter.about === "string" ? me.frontmatter.about : "";
   try {
     outcome.requests++;
-    const { update, usage } = await d.updater.update({
+    const { update, usage } = await w.updater.update({
       ref: ME_REF,
       type: "person",
       self: true,
@@ -140,4 +170,26 @@ async function updateMe(d: WorkerDeps, uid: string, store: WikiStore, outcome: C
   } catch (err) {
     outcome.checks.push({ name: "page:me", ok: false, detail: (err as Error).message.slice(0, 200) });
   }
+}
+
+/**
+ * No connected computer: the person's notes wait. It's recorded once per change (new notes, or
+ * the computer coming or going), with how many notes wait, so the app can say so; the next run
+ * with the computer connected catches up.
+ */
+async function wait(d: WorkerDeps, u: { uid: string; seq: number }, c: UpkeepComputer | null, now: number): Promise<UserRun> {
+  const reason = c ? "offline" : "no_computer";
+  const prev = await d.control.q(api.work.get, { uid: u.uid as never });
+  const run: UserRun = { uid: u.uid, status: "waiting", notes: 0, pagesUpdated: 0, overview: false, lint: {}, costUsd: 0, error: null };
+  if (prev?.lastStatus === "waiting") {
+    const was = JSON.parse(prev.lastResult ?? "{}") as Partial<WaitingResult>;
+    if (was.seq === u.seq && was.waiting === reason && (was.computer ?? null) === (c?.name ?? null)) return { ...run, notes: was.pending ?? 0 };
+  }
+  const done = new Set(prev?.done ?? []);
+  const store = new WikiStore("personal");
+  for (const p of (await d.personal.pages(u.uid)).pages) if (p.path.startsWith("wiki/")) store.upsert(p.path, p.content);
+  const pending = store.ofType("note").filter((n) => typeof n.frontmatter.id === "string" && !done.has(n.frontmatter.id)).length;
+  const result: WaitingResult = { waiting: reason, computer: c?.name ?? null, pending, seq: u.seq, lastOkAt: lastOk(prev) };
+  await d.control.m(api.work.save, { uid: u.uid as never, done: [...done], lastSeq: prev?.lastSeq ?? 0, status: "waiting", result: JSON.stringify(result), now });
+  return { ...run, notes: pending };
 }

@@ -14,8 +14,9 @@ import type { WikiReader } from "@brain/wiki";
 import { api, type Control } from "../control.ts";
 import type { Directory, Team } from "../directory.ts";
 import type { PersonalStore } from "../personal.ts";
-import type { TeamLink } from "../teams.ts";
-import { condense, homeRelative, normalizeRemote, parseClaudeCode, pickTeam, splitBlocks, type SessionPlace, type SessionRule } from "./condense.ts";
+import { TeamServerError, type TeamLink } from "../teams.ts";
+import { condense, homeRelative, matchBudget, normalizeRemote, parseClaudeCode, pickTeam, splitBlocks, type ParsedSession, type SessionPlace, type SessionRule } from "./condense.ts";
+import { ComputerUnavailable } from "../bots/computer.ts";
 
 /** How long a team copy waits, so the user can keep a session personal. */
 export const SHARE_HOLD_MS = 30 * 60_000;
@@ -50,6 +51,8 @@ export const MAX_BLOCKS = 50;
 
 export class BadUpload extends Error {}
 
+export type Received = { status: "queued" | "skipped"; reason?: string; sessionId: string; blocks?: number; queued?: number };
+
 export interface NoteSpec {
   sessionId: string;
   contentHash?: string;
@@ -66,6 +69,11 @@ export interface NoteSpec {
   /** Write the note into the personal wiki (false on a team-only connection). */
   personal: boolean;
   team: Team | null;
+  /**
+   * Send the team copy now instead of after the hold (a team-only connection: there is nothing
+   * personal to keep it in). If the team server doesn't take it, it is retried like a held copy.
+   */
+  immediate?: boolean;
 }
 
 export interface SessionDeps {
@@ -87,15 +95,19 @@ export class SessionService {
    * A long session becomes one note per working block; a block that hasn't changed since the
    * last upload isn't queued again.
    */
-  async receive(uid: string, body: string, now = Date.now()): Promise<{ status: "queued" | "skipped"; reason?: string; sessionId: string; blocks?: number; queued?: number }> {
+  async receive(uid: string, body: string, now = Date.now()): Promise<Received> {
     const nl = body.indexOf("\n");
+    return this.receiveParsed(uid, nl < 0 ? body : body.slice(0, nl), parseClaudeCode(nl < 0 ? "" : body.slice(nl + 1)), now);
+  }
+
+  /** The same, from the hook's line and the transcript already read (the upload route streams it through claudeCodeReader). */
+  async receiveParsed(uid: string, metaLine: string, parsed: ParsedSession, now = Date.now()): Promise<Received> {
     let meta: UploadMeta;
     try {
-      meta = JSON.parse(nl < 0 ? body : body.slice(0, nl)) as UploadMeta;
+      meta = JSON.parse(metaLine) as UploadMeta;
     } catch {
       throw new BadUpload("the first line must be the hook's JSON input");
     }
-    const parsed = parseClaudeCode(nl < 0 ? "" : body.slice(nl + 1));
     const sessionId = String(meta.session_id ?? parsed.sessionId ?? "");
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(sessionId)) throw new BadUpload("missing or malformed session id");
     if (!parsed.interactive) return { status: "skipped", reason: "nobody typed in this session (a scheduled or scripted run)", sessionId };
@@ -104,6 +116,7 @@ export class SessionService {
     const tool = TOOL_NAMES[meta.ambient?.tool ?? "claude-code"] ?? "Claude Code";
     const blocks = splitBlocks(parsed);
     let route: { rules: SessionRule[]; teams: Team[] } | null = null;
+    const budget = matchBudget();
     let queued = 0;
     // A block per gap of an hour or more: a made-up transcript can have tens of thousands, each a
     // seal and a queued row. A real one has a handful; past the cap, the latest are kept.
@@ -125,7 +138,7 @@ export class SessionService {
         // (a rule added since) is written again, for the team.
         if (known.share || !known.path) continue;
         route ??= await this.routing(uid);
-        if (!pickTeam(route.rules, place, route.teams)) continue;
+        if (!pickTeam(route.rules, place, route.teams, budget)) continue;
       }
       const item: Queued = {
         v: 1,
@@ -149,17 +162,23 @@ export class SessionService {
   }
 
   /** Summarize waiting sessions into notes. Failures are retried a few times, then flagged by the health check. */
-  async process(summarizer: SessionSummarizer, opts: { limit?: number; now?: number } = {}) {
+  /**
+   * Write the notes of uploaded work sessions. `summarizer`: one for everyone (a key), or each
+   * person's own (upkeep on their computer): a session whose person has no connected computer
+   * waits, without counting as a failed attempt.
+   */
+  async process(summarizer: SessionSummarizer | ((uid: string) => SessionSummarizer), opts: { limit?: number; now?: number; waitMs?: number } = {}) {
     const now = opts.now ?? Date.now();
+    const summarizerFor = typeof summarizer === "function" ? summarizer : () => summarizer;
     const items = await this.d.control.m(api.sessions.claim, { now, limit: opts.limit ?? 20, leaseMs: 10 * 60_000 });
-    const results: { sessionId: string; status: "written" | "skipped" | "failed"; path?: string; team?: string | null; error?: string; tokens?: number }[] = [];
+    const results: { sessionId: string; status: "written" | "skipped" | "failed" | "waiting"; path?: string; team?: string | null; error?: string; tokens?: number }[] = [];
     for (const item of items) {
       const uid = String(item.uid);
       try {
         const q = JSON.parse(await this.d.personal.open(uid, `session:${item.sessionId}`, item.iv, item.ciphertext)) as Queued;
         const user = await this.d.directory.user(uid);
         const team = await this.teamFor(uid, q.place);
-        const out = await summarizer.summarize({
+        const out = await summarizerFor(uid).summarize({
           transcript: q.transcript,
           tool: q.tool,
           person: user?.name ?? "the user",
@@ -207,6 +226,11 @@ export class SessionService {
         await this.d.control.m(api.sessions.done, { id: item.id });
         results.push({ sessionId: item.sessionId, status: "written", path: written.path, team: team?.slug ?? null, tokens });
       } catch (err) {
+        if (err instanceof ComputerUnavailable) {
+          await this.d.control.m(api.sessions.later, { id: item.id, waitMs: opts.waitMs ?? 15 * 60_000, now });
+          results.push({ sessionId: item.sessionId, status: "waiting", error: err.reason });
+          continue;
+        }
         const error = (err as Error).message;
         await this.d.control.m(api.sessions.failed, { id: item.id, error, now });
         results.push({ sessionId: item.sessionId, status: "failed", error });
@@ -228,7 +252,7 @@ export class SessionService {
   }
 
   /** Write (or rewrite) a session's note, and hold a copy for the team when there is one. */
-  async writeNote(uid: string, spec: NoteSpec, now = Date.now()): Promise<{ path: string; noteId: string; share: string | null }> {
+  async writeNote(uid: string, spec: NoteSpec, now = Date.now()): Promise<{ path: string; noteId: string; share: string | null; teamPath?: string }> {
     const existing = await this.d.control.q(api.sessions.noteFor, { uid: uid as never, sessionId: spec.sessionId });
     const noteId = existing?.noteId ?? newNoteId(now);
     const s = spec.summary;
@@ -284,6 +308,7 @@ export class SessionService {
     }
 
     let share: { teamId: never; iv: string; ciphertext: string; dueAt: number } | undefined;
+    let teamPath: string | undefined;
     if (spec.team) {
       const note: TeamNoteV1 = TeamNoteV1.parse({
         schema: "brain.team-note/v1",
@@ -311,8 +336,19 @@ export class SessionService {
         participants_hint: fullNames,
         client: { app: spec.source, transcriber: "none", compiler: "session-summary" },
       });
-      const sealed = await this.d.personal.seal(uid, `share:${spec.sessionId}`, JSON.stringify(note));
-      share = { teamId: spec.team.id as never, iv: sealed.iv, ciphertext: sealed.ciphertext, dueAt: now + (this.d.holdMs ?? SHARE_HOLD_MS) };
+      if (spec.immediate) {
+        try {
+          const out = await this.d.teams.deliver(spec.team, note, uid, spec.team.peopleSlug ?? null);
+          teamPath = out.path;
+        } catch (err) {
+          if (err instanceof TeamServerError && err.status === 409) throw err;
+          // Down for a moment: the worker sends it within a minute or two.
+        }
+      }
+      if (!teamPath) {
+        const sealed = await this.d.personal.seal(uid, `share:${spec.sessionId}`, JSON.stringify(note));
+        share = { teamId: spec.team.id as never, iv: sealed.iv, ciphertext: sealed.ciphertext, dueAt: now + (spec.immediate ? 0 : (this.d.holdMs ?? SHARE_HOLD_MS)) };
+      }
     }
     const saved = await this.d.control.m(api.sessions.saveNote, {
       uid: uid as never,
@@ -325,7 +361,7 @@ export class SessionService {
       share,
       now,
     });
-    return { path, noteId, share: saved.share };
+    return { path, noteId, share: teamPath ? "delivered" : saved.share, ...(teamPath ? { teamPath } : {}) };
   }
 
   /**
@@ -366,6 +402,13 @@ export class SessionService {
         await this.d.control.m(api.sessions.shareDelivered, { id: s.id, now });
         results.push({ sessionId: s.sessionId, status: "delivered" });
       } catch (err) {
+        // The team's repo is kept by another tool (connected read-only): the note stays personal
+        // rather than being tried again every minute.
+        if (err instanceof TeamServerError && err.status === 409) {
+          await this.d.control.m(api.sessions.keepPersonal, { uid: uid as never, sessionId: s.sessionId, now });
+          results.push({ sessionId: s.sessionId, status: "dropped" });
+          continue;
+        }
         await this.d.control.m(api.sessions.shareFailed, { id: s.id, now });
         results.push({ sessionId: s.sessionId, status: "failed", error: (err as Error).message });
       }
@@ -378,7 +421,8 @@ function validIso(s: string | null | undefined): string | null {
   return s && !Number.isNaN(Date.parse(s)) ? new Date(s).toISOString() : null;
 }
 
-function newNoteId(now: number): string {
+/** A note's id: base36 time and random hex (NoteId). Also suggest_correction's. */
+export function newNoteId(now: number): string {
   return `${now.toString(36).toUpperCase()}${randomBytes(5).toString("hex").toUpperCase()}`;
 }
 

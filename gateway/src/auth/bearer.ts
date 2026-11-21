@@ -18,6 +18,8 @@ export interface Principal {
   personal: boolean;
   /** Teams readable on this resource (team:read): all memberships on /mcp, one on /t/<slug>/mcp. */
   teams: Team[];
+  /** A bot's run (mcp/bot-principal.ts): the brain as an employee's AI app has it, no more. */
+  bot?: { routineId: string; name: string };
 }
 
 export class AuthError extends Error {
@@ -93,7 +95,9 @@ export function createBearerVerifier(opts: { issuer: string; signingKeys: JWK[];
         clientId = typeof payload.client_id === "string" ? payload.client_id : undefined;
         via = "oauth";
       } catch (err) {
-        const expired = (err as { code?: unknown }).code === "ERR_JWT_EXPIRED";
+        // Expired, as jose says it (Bearer) or as oauth4webapi does (DPoP: a timestamp check on "exp").
+        const e = err as { code?: unknown; cause?: { claim?: unknown } };
+        const expired = e.code === "ERR_JWT_EXPIRED" || (e.code === "OAUTH_JWT_TIMESTAMP_CHECK_FAILED" && e.cause?.claim === "exp");
         throw new AuthError(401, "invalid_token", "invalid, expired or wrong-audience token", !expired);
       }
     }

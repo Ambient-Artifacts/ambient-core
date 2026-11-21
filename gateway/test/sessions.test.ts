@@ -3,15 +3,19 @@
 // and a session in a team's folder reaches the team server only after the 30-minute hold,
 // unless the user keeps it personal. Plus `log_work` for AI apps over MCP.
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { Readable } from "node:stream";
+import { createGzip, gzipSync } from "node:zlib";
 import type { SessionSummarizer, SessionSummaryInput } from "@brain/team";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parsePage } from "@brain/spec";
 import { appCall, INVITE, mcpClient, signIn, startStack, text, type Stack } from "./helpers.ts";
 import { MAX_BLOCKS } from "../src/sessions/service.ts";
+import { MAX_UPLOAD_BYTES } from "../src/sessions/route.ts";
+import { ComputerUnavailable } from "../src/bots/computer.ts";
 
 const SCRIPT = join(import.meta.dirname, "..", "..", "integrations", "claude-code", "scripts", "capture.sh");
 const HOLD = 30 * 60_000;
@@ -125,6 +129,18 @@ describe("Claude Code sessions", () => {
     expect(log()).not.toContain("sent 5f0c2a9e-aaaa-4c4c-8888-000000000099");
   });
 
+  it("wait for the person's computer without using up their attempts (upkeep on their computer)", async () => {
+    const path = transcript("5f0c2a9e-aaaa-4c4c-8888-0000000000aa", "Rename the upload helper");
+    await end(path, "5f0c2a9e-aaaa-4c4c-8888-0000000000aa");
+    const offline = { summarize: async () => Promise.reject(new ComputerUnavailable("no_computer")) };
+    expect(await s.sessions.process(() => offline as never)).toMatchObject([{ status: "waiting", error: "no_computer" }]);
+    // Not stuck on our side, not failed, and not claimed again before it's worth another look.
+    const backlog = await s.control.q(s.api.sessions.backlog, { now: Date.now() + 3600_000 });
+    expect(backlog).toMatchObject({ stuck: 0, failed: 0 });
+    expect(await s.sessions.process(model)).toEqual([]);
+    expect(await s.sessions.process(model, { now: Date.now() + 16 * 60_000 })).toMatchObject([{ status: "written" }]);
+  });
+
   it("leaves scheduled runs alone, in the hook and on the server", async () => {
     const path = transcript("cccccccc-0000-4000-8000-000000000001", "Run the nightly audit", { cron: true });
     await end(path, "cccccccc-0000-4000-8000-000000000001");
@@ -216,6 +232,60 @@ describe("Claude Code sessions", () => {
     expect(await upload()).toMatchObject({ status: "skipped", queued: 0 });
   });
 
+  it("streams an upload: skips a line too long to matter, refuses one too large, and one account's slow uploads don't hold up another's", async () => {
+    const id = "5f0c2a9e-bbbb-4c4c-8888-000000000031";
+    const base = { sessionId: id, cwd: "/opt/workspace", gitBranch: "main", entrypoint: "sdk-cli" };
+    const prompt = { ...base, type: "user", timestamp: "2026-10-09T08:00:00Z", origin: { kind: "human" }, message: { role: "user", content: "Write down why the upload limit is 150 MB and what happens past it." } };
+    const screenshot = { ...base, type: "user", timestamp: "2026-10-09T08:01:00Z", message: { role: "user", content: [{ type: "tool_result", content: "x".repeat(9 * 1024 * 1024) }] } };
+    const send = (body: Buffer, auth = token) =>
+      fetch(`${s.origin}/v1/sessions`, { method: "POST", headers: { authorization: `Bearer ${auth}`, "content-encoding": "gzip" }, body: new Uint8Array(body) });
+    const meta = JSON.stringify({ session_id: id, cwd: "/opt/workspace", ambient: { home } });
+    const ok = await send(gzipSync(`${meta}\n${JSON.stringify(prompt)}\n${JSON.stringify(screenshot)}\n`));
+    expect(ok.status).toBe(202);
+    expect(await ok.json()).toMatchObject({ status: "queued", queued: 1 });
+    await s.t.run(async (ctx) => {
+      for (const r of await ctx.db.query("sessionInbox").collect()) if (r.sessionId.startsWith(id)) await ctx.db.delete(r._id);
+    });
+
+    // Past the limit once inflated: refused, without buffering it.
+    // Compressed from a stream, a megabyte at a time: the test never holds the inflated size either.
+    const mb = Buffer.alloc(1024 * 1024, 0x20);
+    const parts: Buffer[] = [];
+    const zip = Readable.from((function* () {
+      yield Buffer.from(`${meta}\n`);
+      for (let i = 0; i <= MAX_UPLOAD_BYTES / mb.length; i++) yield mb;
+    })()).pipe(createGzip({ level: 1 }));
+    for await (const part of zip) parts.push(part as Buffer);
+    const bomb = Buffer.concat(parts);
+    expect((await send(bomb)).status).toBe(413);
+
+    // Three other accounts trickle two uploads each (what used to take every shared slot); this
+    // one's upload still goes through.
+    const others: string[] = [];
+    for (const n of [1, 2, 3]) {
+      const other = await signIn(s, `apple-trickle-${n}`, `Tara Trickle ${n}`);
+      others.push(String((await appCall(s, other.access_token, "POST", "/v1/app/pats", { label: "Claude Code", purpose: "claude-code" })).json.token));
+    }
+    const otherToken = others[0]!;
+    const url = new URL(`${s.origin}/v1/sessions`);
+    const trickles = others.flatMap((t) =>
+      [0, 1].map(() => {
+        const req = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: "POST", headers: { authorization: `Bearer ${t}` } });
+        req.on("error", () => undefined);
+        req.write(`${meta}\n`);
+        return req;
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    expect((await send(gzipSync(`${meta}\n${JSON.stringify(prompt)}\n`))).status).toBeLessThan(300);
+    // Its own third one waits its turn.
+    expect((await send(gzipSync(`${meta}\n`), otherToken)).status).toBe(429);
+    for (const req of trickles) req.destroy();
+    await s.t.run(async (ctx) => {
+      for (const r of await ctx.db.query("sessionInbox").collect()) if (r.sessionId.startsWith(id)) await ctx.db.delete(r._id);
+    });
+  });
+
   it("queues at most MAX_BLOCKS blocks from one upload, the latest", async () => {
     const id = "5f0c2a9e-bbbb-4c4c-8888-000000000021";
     const base = { sessionId: id, cwd: "/opt/workspace", gitBranch: "main", entrypoint: "sdk-cli" };
@@ -293,19 +363,47 @@ describe("log_work for AI apps over MCP", () => {
     await client.close();
   });
 
+  it("work shared with the team on request goes there at once, and stays in the personal wiki", async () => {
+    const uid = ((await appCall(s, app, "GET", "/v1/app/me")).json.user as { uid: string }).uid;
+    const team = (await s.directory.teamsOf(uid)).find((t) => t.slug === "acme")!;
+    const out = await s.sessions.writeNote(uid, {
+      sessionId: `mcp-shared-${Date.now()}`,
+      tool: "Claude",
+      source: "ai:claude",
+      summary: { substantial: true, title: "Rollout plan", summary: "Planned the rollout.", workedOn: [], decisions: [], nextSteps: [], openQuestions: [], people: [], projects: [], orgs: [], language: "en" },
+      startedAt: null,
+      endedAt: null,
+      place: { cwd: null, repo: null, files: [] },
+      branch: null,
+      prs: [],
+      commits: [],
+      personal: true,
+      team,
+      immediate: true,
+    });
+    expect(out.share).toBe("delivered");
+    expect(out.teamPath).toMatch(/sessions\/.*rollout-plan/);
+    expect(out.path).toMatch(/^wiki\/sessions\//);
+    const pending = (await appCall(s, app, "GET", "/v1/app/sessions")).json.pending as { title: string }[];
+    expect(pending.filter((p) => p.title === "Rollout plan")).toEqual([]);
+  });
+
   it("the Claude Code plugin's connection doesn't get log_work (its sessions arrive whole)", async () => {
     const client = await mcpClient(`${s.origin}/mcp`, token);
     expect((await client.listTools()).tools.map((t) => t.name)).not.toContain("log_work");
     await client.close();
   });
 
-  it("a team-only connection (Copilot) logs to the team, after the hold", async () => {
+  it("a team-only connection (Copilot) logs to the team right away: there's nothing personal to hold it in", async () => {
     const copilot = String((await appCall(s, app, "POST", "/v1/app/pats", { label: "Copilot", team: "acme" })).json.token);
     const client = await mcpClient(`${s.origin}/t/acme/mcp`, copilot);
-    const res = await client.callTool({ name: "log_work", arguments: { title: "Quarterly plan", summary: "Outlined the Q4 plan.", app: "Copilot" } });
-    expect(text(res)).toContain("Acme team wiki in 30 minutes");
-    const pending = (await appCall(s, app, "GET", "/v1/app/sessions")).json.pending as { title: string; path: string | null; team: { slug: string } }[];
-    expect(pending.filter((p) => p.title === "Quarterly plan")).toMatchObject([{ path: null, team: { slug: "acme" } }]);
+    const res = await client.callTool({ name: "log_work", arguments: { title: "Quarterly plan", summary: "Outlined the Q4 plan.", app: "Copilot", project: "none" } });
+    expect(text(res)).toMatch(/^Logged "Quarterly plan" to the Acme team wiki as .*sessions\/.*quarterly-plan.*\.md; it can be found there now/);
+    const id = (res.structuredContent as { id: string }).id;
+    const back = (await client.callTool({ name: "fetch", arguments: { id } })).structuredContent as { title: string };
+    expect(back.title).toBe("Quarterly plan");
+    const pending = (await appCall(s, app, "GET", "/v1/app/sessions")).json.pending as { title: string }[];
+    expect(pending.filter((p) => p.title === "Quarterly plan")).toEqual([]);
     await client.close();
   });
 

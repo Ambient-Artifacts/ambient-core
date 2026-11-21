@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { RoutineSchedule, describeSchedule, nextRun, onCalendar } from "../src/index.ts";
+import { RoutineSchedule, describeSchedule, describeWake, nextRun, onCalendar, wakeTime } from "../src/index.ts";
 
 const vienna = (s: Omit<RoutineSchedule, "timezone">) => RoutineSchedule.parse({ ...s, timezone: "Europe/Vienna" });
 const at = (iso: string) => Date.parse(iso);
-const iso = (ts: number) => new Date(ts).toISOString();
+const iso = (ts: number | null) => new Date(ts ?? NaN).toISOString();
 
 describe("routine schedules", () => {
   it("validates", () => {
@@ -49,5 +49,26 @@ describe("routine schedules", () => {
     expect(iso(nextRun(RoutineSchedule.parse({ every: "day", time: "07:00", timezone: "America/Los_Angeles" }), at("2026-10-11T13:00:00Z")))).toBe(
       "2026-10-11T14:00:00.000Z",
     );
+  });
+});
+
+describe("no schedule, and wake-ups", () => {
+  it('"needed" has no timer, no next run, and reads "When it needs to"', () => {
+    const s = vienna({ every: "needed", time: "09:00" });
+    expect(onCalendar(s)).toBeNull();
+    expect(nextRun(s, at("2026-11-19T10:00:00Z"))).toBeNull();
+    expect(describeSchedule(s)).toBe("When it needs to");
+  });
+
+  it("reads a wake-up's time locally in the bot's zone, or with its own offset", () => {
+    // Vienna is UTC+1 in November, UTC+2 in July.
+    expect(iso(wakeTime("2026-11-24 09:00", "Europe/Vienna")!)).toBe("2026-11-24T08:00:00.000Z");
+    expect(iso(wakeTime("2026-07-01T09:30", "Europe/Vienna")!)).toBe("2026-07-01T07:30:00.000Z");
+    expect(iso(wakeTime("2026-11-24T09:00:00+01:00", "America/New_York")!)).toBe("2026-11-24T08:00:00.000Z");
+    expect(iso(wakeTime("2026-11-24T08:00:00Z", "Europe/Vienna")!)).toBe("2026-11-24T08:00:00.000Z");
+    expect(wakeTime("next tuesday", "Europe/Vienna")).toBeNull();
+    expect(wakeTime("2026-11-24", "Europe/Vienna")).toBeNull();
+    expect(wakeTime("2026-13-01 09:00", "Europe/Vienna")).toBeNull();
+    expect(describeWake(at("2026-11-24T08:00:00Z"), "Europe/Vienna")).toBe("Tue 24 Nov, 09:00");
   });
 });

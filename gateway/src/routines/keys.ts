@@ -2,7 +2,7 @@
 // with a team data key that's wrapped by the master key like a person's, so Convex holds no
 // readable prompt, run result or secret either way.
 import { api, type Control } from "../control.ts";
-import { decryptPage, encryptPage, newDataKey, unwrapDataKey, wrapDataKey, type MasterKey } from "../crypto.ts";
+import { decryptPage, encryptPage, newDataKey, unwrapDataKey, wrapDataKey, type MasterKey, decryptBytes, encryptBytes } from "../crypto.ts";
 import type { PersonalStore } from "../personal.ts";
 
 export type Owner = { kind: "user"; uid: string } | { kind: "team"; teamId: string };
@@ -36,6 +36,17 @@ export class RoutineKeys {
   async seal(owner: Owner, label: string, text: string): Promise<{ iv: string; ciphertext: string }> {
     if (owner.kind === "user") return this.d.personal.seal(owner.uid, label, text);
     return encryptPage(await this.teamKey(owner.teamId), `team:${owner.teamId}`, label, text);
+  }
+
+  /** A file's bytes, sealed with its owner's key (attachments: bots/attachments.ts). */
+  async sealBytes(owner: Owner, label: string, bytes: Buffer): Promise<{ iv: string; ciphertext: string }> {
+    if (owner.kind === "user") return this.d.personal.sealBytes(owner.uid, label, bytes);
+    return encryptBytes(await this.teamKey(owner.teamId), `team:${owner.teamId}`, label, bytes);
+  }
+
+  async openBytes(owner: Owner, label: string, iv: string, ciphertext: string): Promise<Buffer> {
+    if (owner.kind === "user") return this.d.personal.openBytes(owner.uid, label, iv, ciphertext);
+    return decryptBytes(await this.teamKey(owner.teamId), `team:${owner.teamId}`, label, iv, ciphertext);
   }
 
   async open(owner: Owner, label: string, iv: string, ciphertext: string): Promise<string> {

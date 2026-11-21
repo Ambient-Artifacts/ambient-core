@@ -71,7 +71,9 @@ export function convexAdapterFactory(control: Control, master: MasterKey) {
         uid: payload.uid ? hash("uid", model, payload.uid) : undefined,
         userCode: payload.userCode ? hash("userCode", model, payload.userCode) : undefined,
         accountId: payload.accountId,
-        clientId: payload.clientId,
+        // A registered client's own row carries its id too (a client id isn't a secret), so one
+        // nobody ever connected with can be found and swept (oauth.sweepUnusedClients).
+        clientId: payload.clientId ?? (model === "Client" ? id : undefined),
       });
     },
     async find(id: string) {
