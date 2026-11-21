@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
 import { SignInNonces } from "../src/auth/signin-nonce.ts";
 import { parseMasterKey } from "../src/crypto.ts";
+import { api } from "../src/control.ts";
 import { APP_CLIENT_ID, APP_REDIRECT_URI } from "../src/oauth/provider.ts";
 import {
   appCall,
@@ -180,6 +181,14 @@ describe("sign-in nonces (a token given to another server can't sign in here)", 
     const elsewhere = new SignInNonces(parseMasterKey("other", randomBytes(32).toString("base64"))).issue().nonce;
     const replayed = await appSignIn(s, { apple: await s.appleToken("apple-nonce-1", "n1@example.com", { nonce: elsewhere }), name: "Nina" });
     expect(replayed.json).toMatchObject({ error: "invalid_nonce" });
+  });
+
+  it("remembers a used nonce across a restart (in Convex, not only in memory)", async () => {
+    const mine = await nonce(s);
+    expect((await appSignIn(s, { apple: await s.appleToken("apple-nonce-3", "n3@example.com", { nonce: mine }), name: "Nora" })).session).toBeDefined();
+    // A fresh process holds nothing in memory: what it knows comes from the database.
+    const fresh = new SignInNonces(s.config.masterKey, async (key, expiresAt) => (await s.control.m(api.oauth.useOnce, { model: "SignInNonce", key, expiresAt })).first);
+    expect(await fresh.check(mine)).toBe("used");
   });
 
   it("refuses a token without a nonce once the server requires them", async () => {

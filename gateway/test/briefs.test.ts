@@ -45,7 +45,7 @@ describe("the brief before a meeting", () => {
       ["Jonas Becker", true, "team:acme:people/jonas-becker"],
       ["Petra Nobody", false, null],
     ]);
-    expect(b.people[1]!.where).toBe("Acme team wiki");
+    expect(b.people[1]!.where).toBe("Acme brain");
     expect(b.people[1]!.truth).toContain("Sales lead.");
     const tasks = b.openActions.map((a) => a.task);
     expect(tasks).toEqual(expect.arrayContaining(["Entwurf der Preisseite schicken", "redesign the paywall step", "Angebot mit Jahrespreis schicken", "SSO-Zeitplan mit dem Dev-Team klären"]));

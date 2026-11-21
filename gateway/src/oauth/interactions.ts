@@ -17,11 +17,12 @@ import express, { type Request, type Response, type Router } from "express";
 import type Provider from "oidc-provider";
 import { z } from "zod";
 import type { AppleVerifier } from "../auth/apple.ts";
+import type { GoogleVerifier } from "../auth/google.ts";
 import type { MicrosoftVerifier } from "../auth/microsoft.ts";
 import type { Pairing } from "../auth/pairing.ts";
 import { api, type Control } from "../control.ts";
 import type { Directory } from "../directory.ts";
-import { limiter, strikes } from "../limiter.ts";
+import { addressKey, limiter, strikes } from "../limiter.ts";
 import { consentPage, errorPage, esc, loginPage, type LoginCodes } from "./pages.ts";
 import { APP_CLIENT_ID, appResource, parseResource } from "./provider.ts";
 import type { SignInNonces } from "../auth/signin-nonce.ts";
@@ -31,11 +32,13 @@ export interface AppSignIn {
   apple: AppleVerifier;
   /** Only when the gateway has a Microsoft app registration. */
   microsoft?: MicrosoftVerifier;
+  /** Only when the gateway has a Google OAuth client. */
+  google?: GoogleVerifier;
   /** Where sign-in codes come from: the app (default), the admin CLI, or either. */
   codes?: LoginCodes;
   /** Who may make a new account from the apps (config.signups); absent: anyone. */
   signups?: { allow: string[] };
-  /** The nonces this server hands the apps for Apple and Microsoft sign-in. */
+  /** The nonces this server hands the apps for Apple, Microsoft and Google sign-in. */
   nonces: SignInNonces;
   /** config.requireSignInNonce: a token without one of them is refused. */
   requireNonce?: boolean;
@@ -64,6 +67,8 @@ const MicrosoftBody = z.object({
   name: z.string().max(80).optional(),
 });
 
+const GoogleBody = z.object({ idToken: z.string().min(20).max(10_000), name: z.string().max(80).optional() });
+
 const MAX_ATTEMPTS = 5;
 /** Wrong codes from one address before it has to wait. */
 const MAX_WRONG_PER_ADDRESS = 10;
@@ -72,10 +77,10 @@ const ADDRESS_WINDOW_MS = 10 * 60_000;
 const INTERACTION_MS = 3_600_000;
 
 const SCOPE_TEXT: Record<string, string> = {
-  "personal:read": "Read your personal notes and wiki",
-  "personal:write": "Save notes into your personal wiki, and draft loops that run only once you turn them on in the app",
-  "team:read": "Read the team wikis you belong to",
-  "team:write": "Log finished work to your team's wiki (after a 30-minute hold you can undo in the app), and draft team loops that run only once someone turns them on in the app",
+  "personal:read": "Read your notes and your brain",
+  "personal:write": "Save notes into your brain, change your preferences, and draft loops that run only once you turn them on in the app",
+  "team:read": "Read the brains of the teams you belong to",
+  "team:write": "Save notes and log finished work to your team's brain (in a project named private they stay in your personal brain), send your corrections of it to whoever keeps it, draft team loops that run only once someone turns them on in the app, and change a team's settings where you're an owner or admin",
   "team:review": "See and act on team review items",
   offline_access: "Stay connected without signing in again",
   openid: "Know who you are",
@@ -123,7 +128,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         const parsed = parseResource(provider.issuer, r);
         if (!parsed?.teamSlug) continue;
         const team = await directory.teamBySlug(parsed.teamSlug);
-        teamLines.push(`Only the <b>${esc(team?.name ?? parsed.teamSlug)}</b> team wiki (not your personal notes)`);
+        teamLines.push(`Only the <b>${esc(team?.name ?? parsed.teamSlug)}</b> team's brain (not your personal notes)`);
       }
       // Whose notes: so nobody approves an app for an account that isn't theirs (a shared browser).
       const who = details.session?.accountId ? await directory.user(details.session.accountId) : undefined;
@@ -152,7 +157,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         await provider.interactionFinished(req, res, { error: "access_denied", error_description: "too many wrong codes" }, { mergeWithLastSubmission: false });
         return;
       }
-      const address = req.ip ?? "unknown";
+      const address = addressKey(req.ip);
       const form = async (status: number, error: string) => {
         const client = await provider.Client.find(String(details.params.client_id));
         res.status(status).send(loginForm(details.uid, String(client?.clientName ?? details.params.client_id), shownHost(String(details.params.redirect_uri)), error));
@@ -228,7 +233,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
 
   /** The interaction, when it's the app's and waiting for a sign-in; otherwise answered here. */
   const appInteraction = async (req: Request, res: Response) => {
-    if (!appSignIns(req.ip ?? "?")) {
+    if (!appSignIns(addressKey(req.ip))) {
       res.status(429).json({ error: "slow_down" });
       return null;
     }
@@ -243,16 +248,19 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
   const appJson = express.json({ limit: "32kb" });
 
   /**
-   * Whether an Apple or Microsoft ID token may sign in here, by its nonce: one this server issued
+   * Whether an Apple, Microsoft or Google ID token may sign in here, by its nonce: one this server issued
    * (still valid, first use), or none at all from an app from before nonces, which is taken until
-   * BRAIN_SIGNIN_NONCE=required. A nonce that isn't ours (another server's) is refused: that's a
-   * token given to some other server, replayed here. `legacy` is the old Microsoft flow's own
-   * random nonce, sent next to the token. Returns why it's refused, or null.
+   * BRAIN_SIGNIN_NONCE=required. One of ours that expired or was used already is refused (a
+   * replay), and so is an Apple token with a nonce that isn't ours: a token given to some other
+   * server, replayed here. `legacy` is the old Microsoft flow's own random nonce, sent next to the
+   * token: it can't be told apart from another server's nonce, so until nonces are required such
+   * a Microsoft token is taken. Returns why it's refused, or null.
    */
-  const nonceRefusal = (token: string | undefined, legacy?: string): string | null => {
+  const nonceRefusal = async (token: string | undefined, legacy?: string): Promise<string | null> => {
     if (token !== undefined) {
-      const check = app.nonces.check(token);
+      const check = await app.nonces.check(token);
       if (check === "ok") return null;
+      if (check === "expired" || check === "used") return check;
       if (legacy === undefined || token !== legacy) return check;
     }
     return app.requireNonce ? "missing" : null;
@@ -279,7 +287,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         res.status(401).json({ error: "invalid_apple_token" });
         return;
       }
-      const appleRefusal = nonceRefusal(identity.nonce);
+      const appleRefusal = await nonceRefusal(identity.nonce);
       if (appleRefusal) return refuseNonce(res, appleRefusal);
       let user;
       try {
@@ -328,7 +336,7 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
         res.status(401).json({ error: "invalid_microsoft_token" });
         return;
       }
-      const microsoftRefusal = nonceRefusal(identity.nonce, body.data.nonce);
+      const microsoftRefusal = await nonceRefusal(identity.nonce, body.data.nonce);
       if (microsoftRefusal) return refuseNonce(res, microsoftRefusal);
       let user;
       try {
@@ -336,6 +344,56 @@ export function interactionRouter(provider: Provider, directory: Directory, pair
       } catch (err) {
         if (!isNotInvited(err)) throw err;
         res.status(403).json({ error: "not_invited", message: notInvited(undefined) });
+        return;
+      }
+      if (!user) {
+        res.status(403).json({ error: "account_disabled" });
+        return;
+      }
+      await finishAppSignIn(req, res, String(user.uid));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Also its own account (not joined by email to an Apple or Microsoft one). Unlike Microsoft's,
+  // the app sends no nonce of its own: only one this server issued, or none from an app before.
+  router.post("/interaction/:uid/google", appJson, async (req, res, next) => {
+    try {
+      if (!app.google) {
+        res.status(404).json({ error: "google_not_configured" });
+        return;
+      }
+      if (!(await appInteraction(req, res))) return;
+      const body = GoogleBody.safeParse(req.body);
+      if (!body.success) {
+        res.status(400).json({ error: "bad_request" });
+        return;
+      }
+      let identity;
+      try {
+        identity = await app.google(body.data.idToken);
+      } catch (err) {
+        // The reason only (a wrong audience, an expired token), never the token.
+        console.warn(`[gateway] google sign-in rejected: ${(err as Error).message}`);
+        res.status(401).json({ error: "invalid_google_token" });
+        return;
+      }
+      const googleRefusal = await nonceRefusal(identity.nonce);
+      if (googleRefusal) return refuseNonce(res, googleRefusal);
+      let user;
+      try {
+        user = await control.m(api.users.upsertGoogle, {
+          googleSub: identity.id,
+          email: identity.email,
+          emailTrusted: identity.emailTrusted,
+          name: identity.name ?? body.data.name,
+          signups: app.signups,
+          now: Date.now(),
+        });
+      } catch (err) {
+        if (!isNotInvited(err)) throw err;
+        res.status(403).json({ error: "not_invited", message: notInvited(identity.emailTrusted ? identity.email : undefined) });
         return;
       }
       if (!user) {

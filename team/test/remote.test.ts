@@ -30,6 +30,11 @@ describe("the team repo's token", () => {
     const without = new TeamRemote(file, dir, {});
     await without.load();
     expect(without.connected).toBe(false);
+
+    // With another secret (changed, or mistyped): sync is off, and the server still starts.
+    const wrong = new TeamRemote(file, dir, {}, "another-secret");
+    await wrong.load();
+    expect(wrong.connected).toBe(false);
   });
 
   it("stays as it was on a server without the secret", async () => {

@@ -46,3 +46,42 @@ export function strikes(limit: number, windowMs: number) {
 function prune(hits: Map<string, { at: number }>, now: number, windowMs: number) {
   for (const [key, h] of hits) if (now - h.at > windowMs) hits.delete(key);
 }
+
+/**
+ * The key an address is limited by: an IPv4 address as is, an IPv6 one by its /64. One host or
+ * network usually gets a whole /64, and switching addresses inside it would get round a
+ * per-address limit.
+ */
+export function addressKey(ip: string | undefined): string {
+  if (!ip) return "unknown";
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (mapped) return mapped[1]!;
+  if (!ip.includes(":")) return ip;
+  const [head = "", tail = ""] = ip.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = ip.includes("::") ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right] : left;
+  return `${groups.slice(0, 4).map((g) => (g || "0").toLowerCase().replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
+
+/**
+ * At most `max` requests per key at a time (their bodies read, buffered and handled). Returns a
+ * release to call when the request ends, or null when the key has `max` going already. A rate
+ * limit counts starts; this bounds what's held at once (large bodies, kept in memory).
+ */
+export function inFlight(max: number) {
+  const n = new Map<string, number>();
+  return (key: string): (() => void) | null => {
+    const c = n.get(key) ?? 0;
+    if (c >= max) return null;
+    n.set(key, c + 1);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      const left = (n.get(key) ?? 1) - 1;
+      if (left <= 0) n.delete(key);
+      else n.set(key, left);
+    };
+  };
+}

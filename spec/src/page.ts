@@ -19,6 +19,20 @@ export function parsePage(text: string): ParsedPage {
   return { frontmatter, body: text.slice(m[0].length) };
 }
 
+/**
+ * parsePage for text Ambient didn't write (a team's own repository): a front matter block that isn't
+ * valid YAML (a typo, a duplicate key) yields an empty front matter and the error instead of throwing.
+ * Writers keep using parsePage, so they never rewrite a page whose front matter they couldn't read.
+ */
+export function parsePageLenient(text: string): ParsedPage & { error?: string } {
+  try {
+    return parsePage(text);
+  } catch (e) {
+    const m = FRONTMATTER.exec(text);
+    return { frontmatter: {}, body: m ? text.slice(m[0].length) : text, error: (e as Error).message.split("\n")[0] };
+  }
+}
+
 export function renderPage(page: ParsedPage): string {
   const yaml = stringifyYaml(page.frontmatter, { lineWidth: 0 }).trimEnd();
   return `---\n${yaml}\n---\n${page.body.startsWith("\n") ? page.body.slice(1) : page.body}`;
@@ -99,17 +113,47 @@ export function mergeLiving(serverText: string, phoneText: string): string {
  * `pending_rewrite`, since their current truth may still mention it.
  */
 export function forgetNote(notePath: string, pages: Map<string, string>): { writes: { path: string; content: string }[]; deletes: string[] } {
-  const file = notePath.split("/").pop() ?? notePath;
-  const deletes = [notePath];
-  const note = pages.get(notePath);
-  const raw = note ? parsePage(note).frontmatter.raw : undefined;
-  if (typeof raw === "string" && raw) deletes.push(raw);
+  return forgetNotes([notePath], pages);
+}
+
+/**
+ * `forgetNote` for several recordings at once, the same as one after another but reading each
+ * living page once: a sync can delete hundreds, and a wiki has thousands of pages.
+ */
+export function forgetNotes(notePaths: string[], pages: Map<string, string>): { writes: { path: string; content: string }[]; deletes: string[] } {
+  const deletes: string[] = [];
+  const files = new Set<string>();
+  for (const notePath of new Set(notePaths)) {
+    files.add(notePath.split("/").pop() ?? notePath);
+    deletes.push(notePath);
+    const note = pages.get(notePath);
+    const raw = note ? parsePage(note).frontmatter.raw : undefined;
+    if (typeof raw === "string" && raw) deletes.push(raw);
+  }
+  // Whether a timeline line points at one of the files: "/<file>" somewhere in it. Only names like
+  // the app's notes count (no "/", ".md" once, at the end): then the text from the last "/" before
+  // an ".md" through that ".md" is the name, and one pass over the line finds every candidate. A
+  // made-up delete path can't make this slow, and no timeline line links anything else.
+  const names = new Set([...files].filter((f) => f.length > 3 && !f.includes("/") && f.indexOf(".md") === f.length - 3));
+  const longest = Math.max(0, ...[...names].map((f) => f.length));
+  const pointsAt = (line: string): boolean => {
+    if (names.size === 0) return false;
+    let slash = -1;
+    for (let i = 0; i < line.length; i++) {
+      const c = line.charCodeAt(i);
+      if (c === 47) slash = i;
+      else if (c === 46 && slash >= 0 && i + 3 - slash - 1 <= longest && line.startsWith(".md", i) && names.has(line.slice(slash + 1, i + 3))) return true;
+    }
+    return false;
+  };
   const writes: { path: string; content: string }[] = [];
   for (const [path, text] of [...pages.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     if (!/^wiki\/(people|orgs|projects|topics)\//.test(path)) continue;
+    // Most pages link none of them: skip those without parsing.
+    if (!text.split("\n").some(pointsAt)) continue;
     const page = parsePage(text);
     const { currentTruth, timeline } = splitCompiled(page.body);
-    const kept = timeline.filter((l) => !l.includes(`/${file}`));
+    const kept = timeline.filter((l) => !pointsAt(l));
     if (kept.length === timeline.length) continue;
     if (kept.length === 0) {
       deletes.push(path);

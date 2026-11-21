@@ -31,7 +31,7 @@ export interface LintSource {
 }
 
 const LIVING_TYPES = ["person", "org", "project", "topic"];
-const PAGE_FOLDERS = new Set(["people", "orgs", "projects", "topics", "notes", "sessions", "decisions"]);
+const PAGE_FOLDERS = new Set(["people", "orgs", "projects", "topics", "notes", "sessions", "corrections", "decisions"]);
 const STALE_DAYS = 120;
 
 const words = (s: string) => foldText(s).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
@@ -43,10 +43,10 @@ export function lintWiki(store: LintSource, opts: { today?: string } = {}): Lint
   const issues: LintIssue[] = [];
   const links = store.allLinks();
 
-  // Front-matter links to pages that don't exist.
+  // Front-matter links to pages that don't exist (links in the text are the writer's business).
   const seen = new Set<string>();
   for (const l of links) {
-    if (!PAGE_FOLDERS.has(l.dst.split("/")[0]!) || store.getByRef(l.dst)) continue;
+    if (l.rel === "mentions" || !PAGE_FOLDERS.has(l.dst.split("/")[0]!) || store.getByRef(l.dst)) continue;
     const key = `${l.src}->${l.dst}`;
     if (seen.has(key)) continue;
     seen.add(key);

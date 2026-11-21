@@ -1,8 +1,9 @@
 name: Eval
 
-# The placement eval (eval/README.md) on changes to what the model is told: the MCP
-# instructions, the upkeep and session prompts, and the eval itself. Needs the repository
-# secret ANTHROPIC_API_KEY; without it the job passes with a notice.
+# The placement and consolidation evals (eval/README.md) on changes to what the model is
+# told and how its answers become pages: the MCP instructions, the upkeep and session prompts,
+# the nightly consolidation, decision and overview steps, and the evals themselves. Needs the
+# repository secret ANTHROPIC_API_KEY; without it the jobs pass with a notice.
 on:
   pull_request:
     paths:
@@ -10,6 +11,8 @@ on:
       - "gateway/src/me.ts"
       - "team/src/anthropic.ts"
       - "team/src/consolidate.ts"
+      - "team/src/decisions.ts"
+      - "team/src/overview.ts"
       - "team/src/session-summary.ts"
       - "eval/**"
   workflow_dispatch:
@@ -41,3 +44,23 @@ jobs:
             exit 0
           fi
           npm run -s eval
+
+  consolidation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Consolidation eval
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::No ANTHROPIC_API_KEY secret: the consolidation eval was skipped."
+            exit 0
+          fi
+          npm run -s eval:consolidation

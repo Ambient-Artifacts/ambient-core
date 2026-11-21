@@ -1,7 +1,13 @@
+import { readFileSync } from "node:fs";
 import { exportJWK, generateKeyPair, type JWK } from "jose";
+import type { GitHubAppConfig } from "./bots/github-app.ts";
+import { loadLinq, type LinqConfig } from "./channels/imessage.ts";
+import { loadTranscribe, type TranscribeConfig } from "./channels/transcribe.ts";
 import type { AppleRevokeConfig } from "./auth/apple-revoke.ts";
 import { parseMasterKey, type MasterKey } from "./crypto.ts";
+import { loadMicrosoftConnect, type MicrosoftConnectConfig } from "./microsoft-connect.ts";
 import type { ApnsConfig } from "./push.ts";
+import { parseMsTeamsBots, type MsTeamsBotConfig } from "./msteams/config.ts";
 
 export interface GatewayConfig {
   /** Public origin without trailing slash, e.g. https://mcp.example.com. Also the token issuer. */
@@ -41,6 +47,14 @@ export interface GatewayConfig {
    * the one the apps use). Optional: without one the apps show only Sign in with Apple.
    */
   microsoftClientIds?: string[];
+  /** Sign in with Google: the apps' OAuth client ids in Google Cloud (the first is the one the apps use). */
+  googleClientIds?: string[];
+  /**
+   * "Connect Microsoft 365": Ambient's own multi-tenant Microsoft app (a confidential client of
+   * its own, not the apps' sign-in app) and its credential. Optional: without it, teams connect
+   * their own Entra app.
+   */
+  microsoftConnect?: MicrosoftConnectConfig;
   /**
    * A self-hosted server whose admin hands out AI-app sign-in codes (`admin connect-code`): the
    * sign-in page mentions it next to the app's codes.
@@ -53,11 +67,24 @@ export interface GatewayConfig {
    */
   signups?: { allow: string[] };
   /**
-   * Refuse Apple and Microsoft sign-ins whose ID token doesn't carry a nonce this server issued
+   * Refuse Apple, Microsoft and Google sign-ins whose ID token doesn't carry a nonce this server issued
    * (auth/signin-nonce.ts). Off until every app in use sends one (set BRAIN_MIN_APP_VERSION to
    * the first that does); until then a token without a nonce is still taken.
    */
   requireSignInNonce?: boolean;
+  /** Teams' bots in Microsoft Teams (msteams/), from BRAIN_MSTEAMS_BOTS. None: /teams/messages answers 401. */
+  msteamsBots?: MsTeamsBotConfig[];
+  /** The model Ambient's chat answers with (BRAIN_AMBIENT_MODEL). */
+  ambientModel?: string;
+  /**
+   * Ambient's GitHub App (docs/bots.md, "Connect GitHub"): BRAIN_GITHUB_APP_ID, _SLUG, _KEY_FILE,
+   * _WEBHOOK_SECRET. Absent: Connect GitHub answers `app: null`, owners' own webhooks still work.
+   */
+  githubApp?: GitHubAppConfig;
+  /** Amb's iMessage line at Linq (channels/imessage.ts), from BRAIN_LINQ_*. None: no iMessage. */
+  linq?: LinqConfig;
+  /** Speech-to-text for voice memos (channels/transcribe.ts), from BRAIN_TRANSCRIBE_*. None: voice memos aren't taken. */
+  transcribe?: TranscribeConfig;
 }
 
 export async function generateSigningKey(): Promise<JWK> {
@@ -115,9 +142,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     minAppVersion: env.BRAIN_MIN_APP_VERSION || undefined,
     appUpdateUrl: env.BRAIN_APP_UPDATE_URL || undefined,
     microsoftClientIds: env.BRAIN_MICROSOFT_CLIENT_IDS?.split(",").map((s) => s.trim()).filter(Boolean),
+    googleClientIds: env.BRAIN_GOOGLE_CLIENT_IDS?.split(",").map((s) => s.trim()).filter(Boolean),
+    microsoftConnect: loadMicrosoftConnect(env),
     adminCodes: env.BRAIN_ADMIN_CODES === "true",
     signups: parseSignups(env.BRAIN_SIGNUPS),
     requireSignInNonce: env.BRAIN_SIGNIN_NONCE === "required",
+    msteamsBots: parseMsTeamsBots(env.BRAIN_MSTEAMS_BOTS),
+    ambientModel: env.BRAIN_AMBIENT_MODEL || undefined,
+    githubApp: loadGitHubApp(env),
+    linq: loadLinq(env),
+    transcribe: loadTranscribe(env),
     apns:
       env.BRAIN_APNS_KEY_ID && env.BRAIN_APNS_PRIVATE_KEY
         ? {
@@ -128,4 +162,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
           }
         : undefined,
   };
+}
+
+/** Ambient's GitHub App, when all four settings are there (a half-set App is a mistake: said at start). */
+export function loadGitHubApp(env: Record<string, string | undefined>): GitHubAppConfig | undefined {
+  const { BRAIN_GITHUB_APP_ID: appId, BRAIN_GITHUB_APP_SLUG: slug, BRAIN_GITHUB_APP_KEY_FILE: keyFile, BRAIN_GITHUB_APP_WEBHOOK_SECRET: webhookSecret } = env;
+  const given = [appId, slug, keyFile, webhookSecret].filter(Boolean).length;
+  if (given === 0) return undefined;
+  if (given < 4) throw new Error("The GitHub App needs BRAIN_GITHUB_APP_ID, BRAIN_GITHUB_APP_SLUG, BRAIN_GITHUB_APP_KEY_FILE and BRAIN_GITHUB_APP_WEBHOOK_SECRET together.");
+  return { appId: appId!, slug: slug!, privateKey: readFileSync(keyFile!, "utf8"), webhookSecret: webhookSecret! };
 }

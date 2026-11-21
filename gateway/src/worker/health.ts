@@ -24,6 +24,8 @@ export interface HealthDeps {
   unit?: (name: string) => Promise<{ result: string; lastRunAt: number | null } | null>;
   /** A team server's health token (TeamLink, purpose "health"): only with it does /health say more than "ok". */
   teamToken?: (team: { id: string; slug: string }) => Promise<string>;
+  /** New teams take a server from the pool (BRAIN_TEAM_POOL=true): an empty pool is then a problem. */
+  poolInUse?: boolean;
 }
 
 const HOUR = 3_600_000;
@@ -52,6 +54,8 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
         pages: number;
         consolidate: null | { lastStatus: string | null; lastRunAt: string | null; pendingNotes: number; oldestPending: string | null };
         repo?: null | { status: string; lastError: string | null };
+        /** Delivery to the team's destinations (team servers from 2026-10-18 on). */
+        delivery?: null | { destination: string; waiting: number; failing: boolean; last_error: string | null };
         /** The wiki's git head (team servers from 2026-10-13 on). */
         head?: string | null;
       };
@@ -59,6 +63,12 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
       // move its head: tell the apps. Delivered notes already did.
       if (h.head && (await revisions.teamHead(team.id, h.head))) summary.push(`${team.slug}: wiki changed on the server`);
       if (h.repo?.status === "error") problems.push({ key: `team:${team.slug}:repo`, text: `Team ${team.name}: repo sync failing: ${h.repo.lastError ?? "unknown error"}` });
+      if (h.delivery?.failing) {
+        problems.push({
+          key: `team:${team.slug}:delivery`,
+          text: `Team ${team.name}: ${h.delivery.waiting} file(s) not reaching the team's folder: ${h.delivery.last_error ?? "unknown error"}`,
+        });
+      }
       const c = h.consolidate;
       if (c?.lastStatus === "failed" || c?.lastStatus === "partial") {
         problems.push({ key: `team:${team.slug}:run`, text: `Team ${team.name}: last nightly run was ${c.lastStatus} (${c.lastRunAt}).` });
@@ -69,7 +79,10 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
       }
       summary.push(`${team.slug}: ${h.pages} pages, last run ${c?.lastStatus ?? "never"}${c?.lastRunAt ? ` ${c.lastRunAt.slice(0, 16)}` : ""}, ${c?.pendingNotes ?? 0} pending`);
     } catch (err) {
-      problems.push({ key: `team:${team.slug}:down`, text: `Team ${team.name} server unreachable: ${(err as Error).message}` });
+      // A team on its own computer (relay.ts): that computer being off is the team's to see in the
+      // app, not an alert of ours.
+      if (team.serverUrl.startsWith("computer://")) summary.push(`${team.slug}: its computer isn't connected`);
+      else problems.push({ key: `team:${team.slug}:down`, text: `Team ${team.name} server unreachable: ${(err as Error).message}` });
     }
   }
 
@@ -80,8 +93,9 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
   if (sessions.overdueShares) problems.push({ key: "sessions:shares", text: `${sessions.overdueShares} work session(s) held for a team aren't getting through.` });
 
   // The pool of unclaimed team servers: creating a team in the app needs one.
+  // Only when new teams take one (BRAIN_TEAM_POOL=true); otherwise they run on their own computer.
   const pool = await d.control.q(api.teams.freeServers, {});
-  if (!pool.length) problems.push({ key: "pool:empty", text: "No free team servers left: creating a team in the app fails until one is registered." });
+  if (!pool.length && d.poolInUse) problems.push({ key: "pool:empty", text: "No free team servers left: creating a team in the app fails until one is registered." });
   for (const server of pool) {
     try {
       const r = await get(`${server.url}/health`, { signal: AbortSignal.timeout(10_000) });
@@ -97,7 +111,9 @@ export async function checkHealth(d: HealthDeps): Promise<{ problems: Problem[];
   const runs = await d.control.q(api.work.recent, { limit: 200 });
   const failed = runs.filter((r) => r.lastStatus === "failed" && now - r.lastRunAt < 24 * HOUR);
   if (failed.length) problems.push({ key: "personal:failed", text: `Personal upkeep failed for ${failed.length} user(s) in the last 24h.` });
-  const waiting = await d.control.q(api.work.due, { now, quietMs: 2 * HOUR, limit: 200 });
+  // Notes waiting for their person's own computer (upkeep.ts) aren't a backlog of ours.
+  const onTheirComputer = new Set(runs.filter((r) => r.lastStatus === "waiting").map((r) => String(r.uid)));
+  const waiting = (await d.control.q(api.work.due, { now, quietMs: 2 * HOUR, limit: 1000 })).filter((u) => !onTheirComputer.has(String(u.uid)));
   if (waiting.length) problems.push({ key: "personal:backlog", text: `${waiting.length} user(s) have notes waiting more than 2h for upkeep.` });
   summary.push(`personal: ${runs.filter((r) => now - r.lastRunAt < 24 * HOUR).length} users kept up in 24h`);
 

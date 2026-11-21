@@ -132,6 +132,8 @@ describe("disconnecting an AI app in the app", () => {
     const listed = (await appCall(s, lena.access_token, "GET", "/v1/app/connections")).json.connections as { id: string; clientId: string; name: string }[];
     const mine = listed.find((c) => c.clientId === clientId)!;
     expect(mine.name).toBe("Test MCP Client");
+    // Which AI app it is (docs/connect-agents.md): a loopback redirect and an unknown name say nothing.
+    expect(mine).toMatchObject({ kind: "other", via: "oauth", lastUsedAt: null });
     const other = await signIn(s, "apple-someone-else", "Someone Else");
     expect((await appCall(s, other.access_token, "DELETE", `/v1/app/connections/${encodeURIComponent(mine.id)}`)).status).toBe(404);
     expect((await appCall(s, lena.access_token, "DELETE", `/v1/app/connections/${encodeURIComponent(mine.id)}`)).status).toBe(204);
@@ -183,6 +185,14 @@ describe("OAuth for the personal /mcp resource", () => {
       expect(row.key).not.toBe(t.json.refresh_token);
       expect(row.payload).not.toContain(t.json.refresh_token!);
       expect(row.payload.startsWith("v1.")).toBe(true);
+    }
+
+    // The client's own row names it, so one nobody connects with can be swept.
+    expect(rows.some((r) => r.model === "Client" && r.clientId === clientId)).toBe(true);
+
+    // Nor is a row's stored key a token: handed in as one, it's refused.
+    for (const row of rows.filter((r) => r.model === "RefreshToken")) {
+      expect((await token(as, { grant_type: "refresh_token", refresh_token: row.key, client_id: clientId, resource })).status).toBe(400);
     }
 
     const r1 = await token(as, { grant_type: "refresh_token", refresh_token: t.json.refresh_token!, client_id: clientId, resource });

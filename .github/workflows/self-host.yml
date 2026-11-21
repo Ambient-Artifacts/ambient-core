@@ -70,7 +70,9 @@ jobs:
           cat docker-compose.override.yml
           docker compose up -d
           docker compose exec -T gateway admin server add team-2 http://team-2:8090
-          docker compose exec -T gateway admin team create "Difference Engines" --owner ada@example.com | tee created.txt
+          # A person is in one team: the second team has its own owner.
+          docker compose exec -T gateway admin user add grace@example.com --name "Grace Hopper"
+          docker compose exec -T gateway admin team create "Difference Engines" --owner grace@example.com | tee created.txt
           grep -q 'on team-2' created.txt
 
       - name: MCP over HTTP
@@ -92,7 +94,9 @@ jobs:
       - name: The jobs and the team server are running
         run: |
           sleep 20
-          docker compose logs jobs | grep -q '\[sessions\]'
+          # The sessions job is quiet with nothing to do (notes are written on people's computers);
+          # the personal job reports every pass.
+          docker compose logs jobs | grep -q '\[personal\]'
           docker compose logs team | grep -q 'claimed by Analytical Engines'
           docker compose logs team-jobs | grep -q 'consolidate at'
           docker compose ps

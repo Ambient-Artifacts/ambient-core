@@ -5,16 +5,18 @@
 //   only the repo changed it    → import it (the phone pulls it like any server write)
 //   both changed it             → living pages merge (mergeLiving), other files: Ambient wins
 // Generated files (index.md, _index.md, AGENTS.md) are rebuilt on every sync, never imported.
+// So are the person's bots' folders under bots/ (docs/bots.md, "A bot's folder in git").
 // Every sync works in a throwaway shallow clone; nothing stays on disk.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { mergeLiving } from "@brain/spec";
-import { agentsDoc, attention, checkRepoUrl, checkout, commitAndPush, GitError, remoteInfo, indexFilesIn, renderIndexFiles, WikiStore, type GitOptions, type RemoteRepo } from "@brain/wiki";
+import { agentsDoc, attention, checkRepoUrl, checkout, commitAndPush, git, GitError, HasContent, remoteInfo, indexFilesIn, renderIndexFiles, WikiStore, type GitOptions, type RemoteRepo } from "@brain/wiki";
 import { api, type Control } from "../control.ts";
 import { PERSONAL_PATH, type PersonalStore } from "../personal.ts";
+import { writeMirror } from "../bots/mirror.ts";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const LIVING = /^wiki\/(people|orgs|projects|topics)\//;
@@ -25,6 +27,8 @@ interface SyncState {
   /** path → hash both sides last agreed on. */
   base: Record<string, string>;
   commit: string | null;
+  /** The repo's own AGENTS.md or wiki/index.md, there before it was connected: never written. */
+  keep?: string[];
 }
 
 export interface RepoStatus {
@@ -47,6 +51,8 @@ export class PersonalRepos {
     private control: Control,
     private personal: PersonalStore,
     private opts: GitOptions = {},
+    /** The person's bots' files (bots/…), mirrored on every sync; absent: none are. */
+    private bots?: { files: (uid: string) => Promise<Map<string, string>> },
   ) {}
 
   async status(uid: string): Promise<RepoStatus | null> {
@@ -54,15 +60,24 @@ export class PersonalRepos {
     return r ? { url: r.url, branch: r.branch, status: r.status, lastSyncAt: r.lastSyncAt ?? null, lastError: r.lastError ?? null } : null;
   }
 
-  /** Check the repo and token, store them, and push the wiki for the first time. */
-  async connect(uid: string, rawUrl: string, token: string): Promise<RepoStatus> {
+  /**
+   * Check the repo and token, store them, and push the wiki for the first time. A repo with files
+   * of its own (not an Ambient wiki already) is connected only with `existing`, once the person
+   * has seen what's in it; Ambient then keeps `wiki/` and `raw/` there, and never writes the
+   * repo's own AGENTS.md or wiki/index.md.
+   */
+  async connect(uid: string, rawUrl: string, token: string, opts: { existing?: boolean } = {}): Promise<RepoStatus> {
     const url = await checkRepoUrl(rawUrl, this.opts);
     if (!token.trim()) throw new GitError("Add an access token for the repo.", "auth");
     const remote: RemoteRepo = { url, token: token.trim() };
     const info = await remoteInfo(remote, this.opts);
-    if (!info.empty) await this.assertOurs(remote);
+    const keep = info.empty ? [] : await this.whatsThere(remote, opts.existing === true);
     const sealed = await this.personal.seal(uid, "repo:token", remote.token);
     await this.control.m(api.repos.connect, { uid: uid as never, url, branch: info.branch, tokenIv: sealed.iv, tokenCt: sealed.ciphertext, now: Date.now() });
+    if (keep.length) {
+      const state = await this.personal.seal(uid, "repo:state", JSON.stringify({ base: {}, commit: null, keep } satisfies SyncState));
+      await this.control.m(api.repos.record, { uid: uid as never, ok: true, stateIv: state.iv, stateCt: state.ciphertext, now: Date.now() });
+    }
     await this.sync(uid);
     return (await this.status(uid))!;
   }
@@ -166,6 +181,8 @@ export class PersonalRepos {
       for (const [p, t] of writes) if (p.startsWith("wiki/")) wikiAfter.upsert(p, t);
       const generated = new Map<string, string>([["AGENTS.md", agentsDoc({ kind: "personal", name: "Ambient wiki", prefix: "wiki/" })]]);
       for (const [p, t] of renderIndexFiles(wikiAfter.entries(), "Ambient wiki", attention(wikiAfter.lint()))) generated.set(`wiki/${p}`, t);
+      // The repo's own AGENTS.md or index.md, there before Ambient, stay as their people wrote them.
+      for (const p of state.keep ?? []) generated.delete(p);
 
       for (const [p, t] of [...writes, ...generated]) {
         await mkdir(dirname(join(dir, p)), { recursive: true });
@@ -174,10 +191,12 @@ export class PersonalRepos {
       for (const p of deletes) await rm(join(dir, p), { force: true });
       // A folder whose pages all moved or went keeps no index of nothing.
       for (const p of await indexFilesIn(join(dir, "wiki"))) if (!generated.has(`wiki/${p}`)) await rm(join(dir, "wiki", p), { force: true });
-      const commit = await commitAndPush(dir, remote, branch, `Ambient: sync (${writes.size + deletes.size} out, ${imports.length} in)`, this.opts);
+      // The person's bots, as Ambient has them (one-way: an edit made in the repo is overwritten).
+      const bots = this.bots ? await writeMirror(dir, await this.bots.files(uid)) : 0;
+      const commit = await commitAndPush(dir, remote, branch, `Ambient: sync (${writes.size + deletes.size} out, ${imports.length} in${bots ? `, ${bots} bot files` : ""})`, this.opts);
       if (imports.length) await this.personal.serverWrite(uid, imports);
 
-      const sealed = await this.personal.seal(uid, "repo:state", JSON.stringify({ base, commit: commit ?? state.commit } satisfies SyncState));
+      const sealed = await this.personal.seal(uid, "repo:state", JSON.stringify({ base, commit: commit ?? state.commit, ...(state.keep?.length ? { keep: state.keep } : {}) } satisfies SyncState));
       await this.control.m(api.repos.record, { uid: uid as never, ok: true, stateIv: sealed.iv, stateCt: sealed.ciphertext, now: Date.now() });
       return { exported: writes.size + deletes.size, imported: imports.length, merged, commit };
     } finally {
@@ -185,26 +204,47 @@ export class PersonalRepos {
     }
   }
 
-  /** A non-empty repo must already be an Ambient wiki; we never write into someone's other repo. */
-  private async assertOurs(remote: RemoteRepo): Promise<void> {
+  /**
+   * What a non-empty repo holds: an Ambient wiki already (reconnecting) is fine as it is; one
+   * with files of its own needs `existing` (HasContent tells the app what's there, so it can
+   * ask). Returns the repo's own files Ambient mustn't write.
+   */
+  private async whatsThere(remote: RemoteRepo, existing: boolean): Promise<string[]> {
     const dir = await mkdtemp(join(tmpdir(), "ambient-check-"));
     try {
       await checkout(remote, dir, this.opts);
       const agents = existsSync(join(dir, "AGENTS.md")) ? await readFile(join(dir, "AGENTS.md"), "utf8") : "";
-      if (!agents.includes(MARKER)) throw new GitError("This repo already has other content. Use a new, empty repo.", "not_empty");
+      if (agents.includes(MARKER)) return [];
+      if (!existing) {
+        const files = (await git(["ls-files"], { cwd: dir, ...this.opts })).split("\n").filter(Boolean);
+        throw HasContent.of(files);
+      }
+      return ["AGENTS.md", "wiki/index.md"].filter((p) => existsSync(join(dir, p)));
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   }
 }
 
+/** Files a repo's wiki/ and raw/ may hold; more and the sync stops with a sentence. */
+const MAX_REPO_FILES = 50_000;
+/** Larger files aren't read: no page or transcript the app writes is that big. */
+const MAX_REPO_FILE_BYTES = 600_000;
+/**
+ * All of them together, as read into memory. A few KB of git pack can check out as hundreds of
+ * MB of pages (text compresses that well), each under the size above.
+ */
+export const MAX_REPO_READ_BYTES = 128 * 1024 * 1024;
+
 /**
  * The repo's wiki pages and transcripts (generated files excluded), path → text. Regular files
  * only: a symlink (git checks them out as plain files, but never trust that alone) would read a
- * file of the gateway's own into the user's wiki.
+ * file of the gateway's own into the user's wiki. A file too large to be one of ours is left out
+ * (so it's never imported; one Ambient has is written back over it).
  */
-async function readRepo(dir: string): Promise<Map<string, string>> {
+export async function readRepo(dir: string, maxBytes = MAX_REPO_READ_BYTES): Promise<Map<string, string>> {
   const out = new Map<string, string>();
+  let total = 0;
   const walk = async (d: string): Promise<void> => {
     for (const e of await readdir(d, { withFileTypes: true }).catch(() => [])) {
       if (e.name.startsWith(".")) continue;
@@ -213,7 +253,13 @@ async function readRepo(dir: string): Promise<Map<string, string>> {
       else if (e.isFile() && e.name.endsWith(".md")) {
         const rel = relative(dir, p).split(sep).join("/");
         const generated = rel === "AGENTS.md" || rel === "wiki/index.md" || rel === "wiki/log.md" || e.name === "_index.md";
-        if (!generated && (rel.startsWith("wiki/") || rel.startsWith("raw/"))) out.set(rel, await readFile(p, "utf8"));
+        if (generated || !(rel.startsWith("wiki/") || rel.startsWith("raw/"))) continue;
+        const size = (await stat(p)).size;
+        if (size > MAX_REPO_FILE_BYTES) continue;
+        if (out.size >= MAX_REPO_FILES) throw new GitError(`The repo has more than ${MAX_REPO_FILES} pages. Use a repo for the wiki alone.`, "too_large");
+        total += size;
+        if (total > maxBytes) throw new GitError(`The repo's pages come to more than ${Math.round(maxBytes / 1024 / 1024)} MB. Use a repo for the wiki alone.`, "too_large");
+        out.set(rel, await readFile(p, "utf8"));
       }
     }
   };

@@ -6,8 +6,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { JobResult, LivingPageFrontmatter, appendTimeline, parsePage, renderPage, section, splitCompiled } from "@brain/spec";
-import type { Page, WikiStore } from "@brain/wiki";
+import { JobResult, LivingPageFrontmatter, appendTimeline, parsePage, renderPage, section, slugify, splitCompiled } from "@brain/spec";
+import { EntityIndex, type Page, type WikiStore } from "@brain/wiki";
 import type { TeamWiki } from "./wiki.ts";
 import { overviewInput, renderOverview, type OverviewWriter } from "./overview.ts";
 import { decisionInput, decisionPages, type DecisionFiler } from "./decisions.ts";
@@ -78,8 +78,11 @@ export interface Evidence {
   title: string;
   summary: string;
   body: string;
-  /** "recorder": the page's subject recorded this note (their own meeting or work session). */
-  role?: "recorder";
+  /**
+   * "recorder": the page's subject recorded this note (their own meeting or work session).
+   * "correction": a team member correcting what the wiki said (MCP suggest_correction).
+   */
+  role?: "recorder" | "correction";
 }
 
 export interface PageUpdateInput {
@@ -154,6 +157,29 @@ export interface PageUpdater {
   update(input: PageUpdateInput): Promise<{ update: unknown; usage: Usage }>;
 }
 
+/**
+ * What a note is about when its front matter names no organizations or topics. Work notes from
+ * AI apps (log_work, agent sessions) arrive like that, so a note about a competitor never reached
+ * an org page (the consolidation eval's e2 and f5; every competitor note in the live wiki).
+ */
+export interface EntityFinder {
+  model: string;
+  find(input: EntityFinderInput): Promise<{ entities: unknown; usage: Usage }>;
+}
+
+export interface EntityFinderInput {
+  title: string;
+  summary: string;
+  body: string;
+  /** Organizations and topics the wiki already has pages for, so names match them. */
+  known: { ref: string; title: string }[];
+}
+
+export const FoundEntities = z.object({
+  orgs: z.array(z.string().min(1).max(80)).max(5),
+  topics: z.array(z.string().min(1).max(80)).max(3),
+});
+
 /** USD per million tokens. Check current prices before trusting the ledger. */
 export const PRICES: Record<string, { input: number; output: number; cacheRead: number }> = {
   "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1 },
@@ -189,7 +215,8 @@ function today(): string {
 
 function noteRefs(n: Page): string[] {
   const fm = n.frontmatter;
-  const all = [fm.recorded_by, ...(["people", "orgs", "projects", "topics"] as const).flatMap((k) => (Array.isArray(fm[k]) ? fm[k] : []))];
+  // A correction is about the pages it names, not about the person who sent it.
+  const all = [fm.kind === "correction" ? undefined : fm.recorded_by, ...(["people", "orgs", "projects", "topics"] as const).flatMap((k) => (Array.isArray(fm[k]) ? fm[k] : []))];
   return [...new Set(all.filter((r): r is string => typeof r === "string" && Object.hasOwn(FOLDER_TYPE, r.split("/")[0]!)))];
 }
 
@@ -207,6 +234,23 @@ function existingOf(page: Page | undefined): PageUpdateInput["existing"] {
 }
 
 const hasTruth = (h: Head) => h.currentTruth.length > 0 || h.sections.length > 0;
+
+/**
+ * Which of this run's notes a timeline entry means. The model names notes the way it sees them:
+ * the ref it was given (`notes/2026-10/2026-10-14-call-m1n2o3`), but often just the file name, the
+ * relative link an existing timeline uses, or with ".md". Matching only the exact ref dropped those
+ * entries without a trace, so the page changed with nothing saying why (the consolidation eval's
+ * e4 to e6 and s1). An entry naming none of this run's notes is still dropped: it's the model
+ * repeating a line the timeline already has, for an older note.
+ */
+export function noteFor(named: string, notePaths: Map<string, string>): string | undefined {
+  if (notePaths.has(named)) return named;
+  const clean = named.trim().replace(/^(\.\.\/)+/, "").replace(/\.md$/, "");
+  if (notePaths.has(clean)) return clean;
+  const base = clean.split("/").pop()!;
+  const byName = [...notePaths.keys()].filter((ref) => ref.split("/").pop() === base);
+  return byName.length === 1 ? byName[0] : undefined;
+}
 
 /**
  * Build the page text from a validated update. Only the part above ## Timeline is rewritten.
@@ -248,9 +292,12 @@ export function composePage(
     title,
     keep ?? (hasTruth(upd) ? upd : { currentTruth: [upd.summary], sections: [], openQuestions: upd.openQuestions }),
   );
-  const lines = upd.timeline
-    .filter((t) => mode === "team" && notePaths.has(t.note))
-    .map((t) => `- ${t.date}: ${t.fact.replace(/\s+/g, " ").trim()} ([note](${relative(dirname(path), notePaths.get(t.note)!)}))`);
+  const lines = mode !== "team"
+    ? []
+    : upd.timeline.flatMap((t) => {
+        const note = noteFor(t.note, notePaths);
+        return note ? [`- ${t.date}: ${t.fact.replace(/\s+/g, " ").trim()} ([note](${relative(dirname(path), notePaths.get(note)!)}))`] : [];
+      });
   const prevTimeline = prev ? splitCompiled(prev.body).timeline : [];
   const body = appendTimeline(`${head}\n\n## Timeline\n${prevTimeline.join("\n")}\n`, lines);
   return { path, text: renderPage({ frontmatter, body: `\n${body}` }) };
@@ -271,6 +318,8 @@ export interface ConsolidateRun {
   rewrite?: string[];
   /** Persist the rewritten pages (one commit / one encrypted batch); returns a commit id if any. */
   write(pages: { path: string; text: string }[], message: string): Promise<string | null>;
+  /** More pages a note is about than its front matter lists (EntityFinder), by note ref. */
+  extraRefs?: Map<string, string[]>;
 }
 
 export interface ConsolidateOutcome {
@@ -305,7 +354,8 @@ export async function consolidatePages(run: ConsolidateRun): Promise<Consolidate
 
   const byTarget = new Map<string, { notes: Page[]; known: boolean }>();
   for (const n of fresh) {
-    for (const r of noteRefs(n)) {
+    // Its front matter's pages, and the ones findEntities named for a work note that lists none.
+    for (const r of new Set([...noteRefs(n), ...(run.extraRefs?.get(n.ref) ?? [])])) {
       if (mode === "personal" && !store.getByRef(r)) continue;
       byTarget.set(r, { notes: [...(byTarget.get(r)?.notes ?? []), n], known: false });
     }
@@ -334,7 +384,11 @@ export async function consolidatePages(run: ConsolidateRun): Promise<Consolidate
         title: n.title,
         summary: n.summary,
         body: n.body.slice(0, 4000),
-        ...(n.frontmatter.recorded_by === ref ? { role: "recorder" as const } : {}),
+        ...(n.frontmatter.kind === "correction"
+          ? { role: "correction" as const }
+          : n.frontmatter.recorded_by === ref
+            ? { role: "recorder" as const }
+            : {}),
       })),
     };
     try {
@@ -390,6 +444,38 @@ export function jobResult(o: ConsolidateOutcome, model: string, meta: { runId: s
   return JobResult.parse(result);
 }
 
+/**
+ * The organizations and topics of new work notes that name none: one structured call each, the
+ * names matched to pages the wiki has (EntityIndex), else a new page's ref. The note itself stays
+ * as it is (notes are never rewritten); its pages get it in this run.
+ */
+export async function findEntities(store: WikiStore, notes: Page[], finder: EntityFinder) {
+  const out = { refs: new Map<string, string[]>(), requests: 0, failed: 0, usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
+  const index = new EntityIndex(store);
+  const known = [...store.ofType("org"), ...store.ofType("topic")].slice(0, 200).map((p) => ({ ref: p.ref, title: p.title }));
+  for (const n of notes) {
+    const fm = n.frontmatter;
+    const listed = (k: string) => Array.isArray(fm[k]) && (fm[k] as unknown[]).length > 0;
+    if (fm.kind !== "session" || listed("orgs") || listed("topics")) continue;
+    out.requests++;
+    try {
+      const { entities, usage } = await finder.find({ title: n.title, summary: n.summary, body: n.body.slice(0, 8000), known });
+      out.usage.input_tokens += usage.input_tokens;
+      out.usage.output_tokens += usage.output_tokens;
+      out.usage.cache_read_tokens += usage.cache_read_tokens;
+      const f = FoundEntities.parse(entities);
+      const refs = [...f.orgs.map((name) => `orgs/${slugify(name)}`), ...f.topics.map((name) => `topics/${slugify(name)}`)]
+        .filter((r) => /^(orgs|topics)\/[a-z0-9][a-z0-9-]{0,79}$/.test(r))
+        .map((r) => index.canonical(r))
+        .filter((r): r is string => r !== null);
+      if (refs.length) out.refs.set(n.ref, [...new Set(refs)]);
+    } catch {
+      out.failed++;
+    }
+  }
+  return out;
+}
+
 /** Team server's nightly job: the core plus git, the state file and the result JSON on disk. */
 export async function consolidate(
   wiki: TeamWiki,
@@ -400,6 +486,8 @@ export async function consolidate(
     maxPages?: number;
     overview?: OverviewWriter;
     decisions?: DecisionFiler;
+    /** Finds the organizations and topics of work notes whose front matter names none. */
+    finder?: EntityFinder;
     /** Pages to rewrite from their latest notes even without new ones (`cli.ts rewrite`). */
     rewrite?: string[];
     /** Write the overview even when no page changed (after seeding). */
@@ -414,7 +502,9 @@ export async function consolidate(
   const dedup = await dedupe(wiki).catch((err: Error) => ({ error: err.message }));
   const merged = "merged" in dedup ? dedup.merged : [];
   const freshNotes = wiki.store.ofType("note").filter((n) => typeof n.frontmatter.id === "string" && !done.has(n.frontmatter.id));
+  const found = opts.finder ? await findEntities(wiki.store, freshNotes, opts.finder) : null;
   const outcome = await consolidatePages({
+    extraRefs: found?.refs,
     store: wiki.store,
     updater,
     done,
@@ -429,6 +519,13 @@ export async function consolidate(
         })
       ).commit,
   });
+  if (found) {
+    outcome.requests += found.requests;
+    outcome.usage.input_tokens += found.usage.input_tokens;
+    outcome.usage.output_tokens += found.usage.output_tokens;
+    outcome.usage.cache_read_tokens += found.usage.cache_read_tokens;
+    if (found.requests) outcome.checks.push({ name: "entities", ok: found.failed === 0, detail: `${found.refs.size} of ${found.requests} work notes named pages${found.failed ? `, ${found.failed} failed` : ""}` });
+  }
   if ("error" in dedup) outcome.checks.push({ name: "dedup", ok: false, detail: dedup.error.slice(0, 200) });
   else if (dedup.merged.length || dedup.touched) {
     const dropped = [...dedup.relinked.values()].filter((v) => v === null).length;
@@ -474,7 +571,7 @@ export async function consolidate(
   if (opts.overview && (opts.forceOverview || outcome.pagesUpdated > 0 || merged.length > 0 || (outcome.fresh > 0 && outcome.failedNotes.size === 0) || (!wiki.store.getByRef("overview") && wiki.store.size > 0))) {
     try {
       const today = new Date().toISOString().slice(0, 10);
-      const { overview, usage } = await opts.overview.write(overviewInput(wiki.store, { kind: "team", title: `${wiki.teamName} wiki`, today }));
+      const { overview, usage } = await opts.overview.write(overviewInput(wiki.store, { kind: "team", title: `${wiki.teamName} brain`, today }));
       outcome.requests++;
       outcome.usage.input_tokens += usage.input_tokens;
       outcome.usage.output_tokens += usage.output_tokens;

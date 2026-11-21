@@ -194,8 +194,14 @@ export function selfRefs(stores: ContextStore[]): Set<string> {
   return out;
 }
 
+/** For agents (the MCP context): "wiki" is the technical word there. */
 export function storeLabel(s: ContextStore): string {
   return s.scope === "personal" ? "personal wiki" : `${s.team!.name} team wiki`;
+}
+
+/** For people (the apps): the product is a brain (design/glossary.md in the team wiki). */
+export function brainLabel(s: ContextStore): string {
+  return s.scope === "personal" ? "Your brain" : `${s.team!.name} brain`;
 }
 
 export function storeId(s: ContextStore, ref: string): string {
