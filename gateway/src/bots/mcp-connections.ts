@@ -23,7 +23,8 @@ import { Agent, fetch as pinnedFetch } from "undici";
 import { randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { auth, extractWWWAuthenticateParams, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import { auth, discoverOAuthServerInfo, extractWWWAuthenticateParams, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import { CATALOG, CATEGORIES, type CatalogEntry } from "./mcp-catalog.ts";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { isPrivateAddress } from "@brain/wiki";
 import { api, type Control } from "../control.ts";
@@ -78,6 +79,8 @@ interface Stored {
   amb: boolean;
   addedAt: number;
   checkedAt: number;
+  /** The catalogue entry it was connected from (mcp-catalog.ts), for its logo. */
+  catalog?: string;
   /** Signed in at the service (OAuth) instead of a key: Ambient as its client, and the sign-in it holds. */
   oauth?: SignInState;
   /** The sign-in ran out and couldn't be renewed: the person signs in again. */
@@ -86,6 +89,8 @@ interface Stored {
 
 /** What a sign-in holds: Ambient as the service's client, its tokens, and the proof for the code in between. */
 interface SignInState {
+  /** How Ambient shows the service who it is at the token endpoint: "none" where the service takes clients without a secret, else with the secret it gave. */
+  method?: string;
   client?: OAuthClientInformationMixed;
   tokens?: OAuthTokens;
   verifier?: string;
@@ -98,6 +103,7 @@ interface Pending extends SignInState {
   url: string;
   /** Renewing an existing connection's sign-in. */
   connectionId?: string;
+  catalog?: string;
   exp: number;
 }
 
@@ -113,6 +119,8 @@ export interface McpConnection {
   signIn: "key" | "oauth" | "none";
   /** The sign-in ran out: sign in again (POST …/:id/sign-in). */
   needsSignIn: boolean;
+  /** The catalogue entry it came from, or null for one added by its address. */
+  catalog: string | null;
   tools: { name: string; description: string }[];
   bots: string[];
   amb: boolean;
@@ -128,7 +136,7 @@ function view(c: Stored): McpConnection {
   } catch {
     // Kept as it was stored.
   }
-  return { id: c.id, name: c.name, slug: c.slug, host, hasKey: !!c.key, signIn: c.oauth ? "oauth" : c.key ? "key" : "none", needsSignIn: !!c.needsSignIn, tools: c.tools.map((t) => ({ name: t.name, description: t.description })), bots: c.bots, amb: c.amb, addedAt: c.addedAt };
+  return { id: c.id, name: c.name, slug: c.slug, host, hasKey: !!c.key, signIn: c.oauth ? "oauth" : c.key ? "key" : "none", needsSignIn: !!c.needsSignIn, catalog: c.catalog ?? null, tools: c.tools.map((t) => ({ name: t.name, description: t.description })), bots: c.bots, amb: c.amb, addedAt: c.addedAt };
 }
 
 /** Whether a failure says "not let in": the SDK's own error for it, a 401 or 403, or the words an OAuth server uses. */
@@ -169,7 +177,7 @@ class SignIn implements OAuthClientProvider {
   }
 
   get clientMetadata(): OAuthClientMetadata {
-    return { client_name: "Ambient", redirect_uris: [this.o.redirectUrl], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" };
+    return { client_name: "Ambient", redirect_uris: [this.o.redirectUrl], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: this.box.method ?? "none" };
   }
 
   state(): string {
@@ -220,6 +228,8 @@ export class McpConnections {
       fetchImpl?: typeof fetch;
       /** Tests: a stand-in server on 127.0.0.1, and http. */
       allowLocal?: boolean;
+      /** Tests: the catalogue (mcp-catalog.ts otherwise). */
+      catalog?: CatalogEntry[];
       /** Tests: how a name is looked up (the system's resolver otherwise). */
       lookup?: (host: string) => Promise<{ address: string; family: number }[]>;
       now?: () => number;
@@ -414,12 +424,39 @@ export class McpConnections {
     return (await this.all(owner)).map(view);
   }
 
+  private get entries(): CatalogEntry[] {
+    return this.d.catalog ?? CATALOG;
+  }
+
+  /**
+   * The services offered by name, in their categories, each with the owner's connection to it
+   * when there is one (so the app shows "Connected" and where to go).
+   */
+  async catalog(owner: Owner): Promise<{ categories: { id: string; name: string }[]; services: (CatalogEntry & { host: string; connection: { id: string; needsSignIn: boolean } | null })[] }> {
+    const mine = await this.all(owner);
+    const services = this.entries.map((entry) => {
+      const c = mine.find((x) => x.catalog === entry.id) ?? mine.find((x) => x.url.replace(/\/$/, "") === entry.url.replace(/\/$/, ""));
+      return { ...entry, host: new URL(entry.url).host, connection: c ? { id: c.id, needsSignIn: !!c.needsSignIn } : null };
+    });
+    return { categories: CATEGORIES.filter((c) => services.some((x) => x.category === c.id)), services };
+  }
+
   /**
    * Connects a server: its address is checked, it's asked for its tools, and it's kept. Nobody has
    * it yet. A server that wants a sign-in instead of a key isn't kept yet: `signIn` is the link to
    * the service's own page, and the connection appears once the person allowed it there.
    */
-  async add(owner: Owner, input: { name: string; url: string; key?: string; header?: string }): Promise<{ connection: McpConnection } | { signIn: { url: string } }> {
+  async add(owner: Owner, given: { name?: string; url?: string; key?: string; header?: string; catalog?: string }): Promise<{ connection: McpConnection } | { signIn: { url: string } }> {
+    // By name from the catalogue: its address and name come from there.
+    const entry = given.catalog ? this.entries.find((x) => x.id === given.catalog) : undefined;
+    if (given.catalog && !entry) throw new McpConnectionError("no_such_service", "Ambient doesn't offer that service by name. Add it by its address.", 404);
+    const input = { ...given, name: given.name?.trim() || entry?.name || "", url: given.url?.trim() || entry?.url || "" };
+    if (entry) {
+      const have = (await this.all(owner)).find((c) => c.catalog === entry.id);
+      // Connected already: the same connection, not a second one.
+      if (have && !have.needsSignIn) return { connection: view(have) };
+      if (have?.oauth) return { signIn: await this.signInAgain(owner, have.id) };
+    }
     const name = input.name.trim().slice(0, NAME_MAX);
     if (!name) throw new McpConnectionError("bad_request", "Give it a name.");
     const url = (await this.checkUrl(input.url)).toString();
@@ -435,14 +472,14 @@ export class McpConnections {
     } catch (err) {
       // No key given and the server wants one: it may take a sign-in at its own page instead.
       if (!key && err instanceof McpConnectionError && err.code === "refused") {
-        const link = await this.beginSignIn(owner, { name, url }).catch((e: Error) => (console.warn(`[mcp] no sign-in offered: ${e.message}`), null));
+        const link = await this.beginSignIn(owner, { name, url, ...(entry ? { catalog: entry.id } : {}) }).catch((e: Error) => (console.warn(`[mcp] no sign-in offered: ${e.message}`), null));
         if (link) return { signIn: { url: link } };
         throw new McpConnectionError("refused", "The server wants a key, and offers no sign-in Ambient can use. Add its key.", 400);
       }
       throw err;
     }
     const now = this.now();
-    const stored: Stored = { id: randomBytes(8).toString("hex"), name, slug, url, ...(key ? { key } : {}), ...(header ? { header } : {}), tools, bots: [], amb: false, addedAt: now, checkedAt: now };
+    const stored: Stored = { id: randomBytes(8).toString("hex"), name, slug, url, ...(key ? { key } : {}), ...(header ? { header } : {}), ...(entry ? { catalog: entry.id } : {}), tools, bots: [], amb: false, addedAt: now, checkedAt: now };
     await this.write(owner, stored);
     return { connection: view(stored) };
   }
@@ -462,14 +499,21 @@ export class McpConnections {
    * lets clients do that, and returns the link to its sign-in page. What's needed to finish is
    * kept by `state` for half an hour. Throws when the service offers no such sign-in.
    */
-  private async beginSignIn(owner: Owner, what: { name: string; url: string; connectionId?: string; client?: OAuthClientInformationMixed }): Promise<string> {
-    const pending: Pending = { state: randomBytes(24).toString("base64url"), name: what.name, url: what.url, ...(what.connectionId ? { connectionId: what.connectionId } : {}), ...(what.client ? { client: what.client } : {}), exp: this.now() + PENDING_TTL_MS };
+  private async beginSignIn(owner: Owner, what: { name: string; url: string; connectionId?: string; catalog?: string; client?: OAuthClientInformationMixed; method?: string }): Promise<string> {
+    const pending: Pending = { state: randomBytes(24).toString("base64url"), name: what.name, url: what.url, ...(what.connectionId ? { connectionId: what.connectionId } : {}), ...(what.catalog ? { catalog: what.catalog } : {}), ...(what.client ? { client: what.client } : {}), ...(what.method ? { method: what.method } : {}), exp: this.now() + PENDING_TTL_MS };
     const provider = new SignIn(pending, { redirectUrl: this.redirectUrl, state: pending.state, interactive: true, save: async () => undefined });
     // What the server says when it turns a request away: where its sign-in is described, and
     // which permissions to ask for (Notion: "default", Linear: "read write").
     const hint = await this.guarded()(what.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) })
       .then((res) => (res.status === 401 ? extractWWWAuthenticateParams(res) : {}))
       .catch(() => ({}) as { resourceMetadataUrl?: URL; scope?: string });
+    // Most services take a client without a secret; some only ones with (Figma, GitLab, Supabase):
+    // there Ambient registers as one that gets a secret, which stays sealed with the sign-in.
+    if (!pending.method) {
+      const info = await discoverOAuthServerInfo(what.url, { fetchFn: this.guarded(), ...(hint.resourceMetadataUrl ? { resourceMetadataUrl: hint.resourceMetadataUrl } : {}) }).catch(() => null);
+      const methods = info?.authorizationServerMetadata?.token_endpoint_auth_methods_supported;
+      pending.method = !methods || methods.includes("none") ? "none" : methods.includes("client_secret_post") ? "client_secret_post" : "client_secret_basic";
+    }
     const result = await auth(provider, { serverUrl: what.url, fetchFn: this.guarded(), ...(hint.resourceMetadataUrl ? { resourceMetadataUrl: hint.resourceMetadataUrl } : {}), ...(hint.scope ? { scope: hint.scope } : {}) });
     if (result !== "REDIRECT" || !provider.link) throw new McpConnectionError("no_sign_in", "The service didn't offer a sign-in.", 400);
     await this.writePending(owner, pending);
@@ -481,7 +525,7 @@ export class McpConnections {
   async signInAgain(owner: Owner, id: string): Promise<{ url: string }> {
     const c = await this.need(owner, id);
     if (!c.oauth) throw new McpConnectionError("not_a_sign_in", `${c.name} is connected with a key, not a sign-in.`, 400);
-    return { url: await this.beginSignIn(owner, { name: c.name, url: c.url, connectionId: c.id, ...(c.oauth.client ? { client: c.oauth.client } : {}) }) };
+    return { url: await this.beginSignIn(owner, { name: c.name, url: c.url, connectionId: c.id, ...(c.oauth.client ? { client: c.oauth.client } : {}), ...(c.oauth.method ? { method: c.oauth.method } : {}) }) };
   }
 
   /**
@@ -496,7 +540,7 @@ export class McpConnections {
     // Used once, whatever comes of it.
     await this.setStateOwner(state, null);
     await this.writePending(owner, pending, true);
-    const box: SignInState = { ...(pending.client ? { client: pending.client } : {}), ...(pending.verifier ? { verifier: pending.verifier } : {}) };
+    const box: SignInState = { ...(pending.method ? { method: pending.method } : {}), ...(pending.client ? { client: pending.client } : {}), ...(pending.verifier ? { verifier: pending.verifier } : {}) };
     const provider = new SignIn(box, { redirectUrl: this.redirectUrl, state, interactive: false, save: async () => undefined });
     try {
       const result = await auth(provider, { serverUrl: pending.url, authorizationCode: code, fetchFn: this.guarded() });
@@ -504,12 +548,12 @@ export class McpConnections {
     } catch (err) {
       throw new McpConnectionError("sign_in_failed", `The service didn't complete the sign-in: ${(err as Error).message.slice(0, 200)}.`, 400);
     }
-    const oauth: SignInState = { ...(box.client ? { client: box.client } : {}), tokens: box.tokens };
+    const oauth: SignInState = { ...(box.method ? { method: box.method } : {}), ...(box.client ? { client: box.client } : {}), tokens: box.tokens };
     const now = this.now();
     const before = pending.connectionId ? await this.read(owner, pending.connectionId) : null;
     const base: Stored = before?.id
       ? { ...before }
-      : { id: randomBytes(8).toString("hex"), name: pending.name, slug: await this.freeSlug(owner, pending.name), url: pending.url, tools: [], bots: [], amb: false, addedAt: now, checkedAt: now };
+      : { id: randomBytes(8).toString("hex"), name: pending.name, slug: await this.freeSlug(owner, pending.name), url: pending.url, ...(pending.catalog ? { catalog: pending.catalog } : {}), tools: [], bots: [], amb: false, addedAt: now, checkedAt: now };
     const { needsSignIn: _was, ...rest } = base;
     const stored: Stored = { ...rest, oauth, checkedAt: now };
     stored.tools = await this.fetchTools(stored, () => this.write(owner, stored));
