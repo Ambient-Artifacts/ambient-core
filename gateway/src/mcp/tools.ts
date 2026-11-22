@@ -150,14 +150,15 @@ function oneLine(text: string, n: number): string {
 /**
  * Anything that goes to a team carries the name of the Claude project it was written in. A
  * project with "privat"/"private" in its name (any case, anywhere: "HR - Privat", "private:
- * Verrechnung") is private: nothing from it goes to a team. The client says which project it is;
+ * Verrechnung") is private: nothing from it goes to a team. In Claude Code the project is the
+ * working folder's path, so a folder anywhere under "…/Privat/…" is private too. The client says which project it is;
  * MCP has no field for it, so this catches a model that overlooked the rule, it isn't proof.
  */
 export const ProjectArg = z
   .string()
   .max(120)
   .optional()
-  .describe('The name of the Claude project this conversation is in, exactly as shown; "none" outside a project. Needed whenever something goes to a team.');
+  .describe('The name of the Claude project this conversation is in, exactly as shown; "none" outside a project. In Claude Code, which has no Claude projects: the full path of the folder it works in (its working directory). Needed whenever something goes to a team.');
 
 export function privateProject(name: string | undefined): boolean {
   return !!name && /priva/i.test(name);
@@ -177,8 +178,9 @@ function projectRefusal(project: string | undefined): string | null {
 const TEAM_DEFAULT_INSTRUCTIONS = `
 Where writes go: save_note and log_work go to the user's team brain, unless this conversation is in a
 private project (its name contains "privat" or "private"): there they stay in the personal wiki. Always
-pass project: the Claude project's exact name, or "none" outside a project. For reading, choose
-personal, team or both, whatever answers the question.`;
+pass project: the Claude project's exact name, or "none" outside a project. In Claude Code the project
+is the folder it works in: pass its full path, and a folder with "privat" or "private" anywhere in the
+path is private. For reading, choose personal, team or both, whatever answers the question.`;
 
 /** "[00:01:05] Lena: text" lines of a stored transcript, as a team note's segments. */
 function transcriptSegments(text: string): { t0: number; t1: number; text: string; speaker?: string }[] {
