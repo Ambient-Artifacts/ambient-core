@@ -360,6 +360,7 @@ export const BOT_TEMPLATES: BotTemplate[] = [
           ? "- Report anything outside the usual range of the last four weeks."
           : "- Report only big changes: a number at half or double its usual value, a number that went to zero, or three days in a row moving the same way.",
         "- Before you report, look for the plain cause: a holiday, a release (the brain's recent notes and decisions), a tracking change, an outage. Say which you checked.",
+        "- When something is off and you're in Slack, post it there too (post_to_slack): one short message with the figure, what it's usually, and the likely cause. A normal day isn't news for a channel.",
         "",
         "What you never do: change anything in those services, guess a figure you couldn't read, or report a normal day.",
         "",

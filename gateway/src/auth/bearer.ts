@@ -19,7 +19,7 @@ export interface Principal {
   /** Teams readable on this resource (team:read): all memberships on /mcp, one on /t/<slug>/mcp. */
   teams: Team[];
   /** A bot's run (mcp/bot-principal.ts): the brain as an employee's AI app has it, no more. */
-  bot?: { routineId: string; name: string };
+  bot?: { routineId: string; name: string; teamId?: string | null };
 }
 
 export class AuthError extends Error {

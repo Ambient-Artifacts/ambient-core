@@ -1493,3 +1493,14 @@ Every message in Amb's chat goes through one function (`AmbientChat.add`), which
 Amb reacts to a person's text as people do. It starts its answer with `[react: 👍]` (exactly one emoji; `splitReaction` in `bots/ambient.ts`), and the channel puts that emoji on their last message (Linq `POST /v3/messages/{id}/reactions`): one of Messages' six tapbacks where it is one (❤️ 👍 👎 😂 ‼️ ❓), a custom emoji otherwise. A reaction alone is a whole answer; with words after it, the words follow as a text. The chat keeps the words, or the emoji when that was all. In the app there are no reactions: the brackets are taken off the same way.
 
 Only Amb decides: nothing reacts by itself (a timer that put 👀 on slow answers was taken out, 2026-11-21). To show it's on something before its answer comes, Amb calls its `react_on_imessage` tool (one emoji, on their last text) while it's still working. A person's own tapbacks on Amb's messages aren't read yet.
+
+## A bot's own news in Slack
+
+A bot answers a Slack message in its thread (above). News of its own (an alert, a result from a scheduled run) goes to **one channel its owner chose**, and nowhere else:
+
+- **Which channel.** Every channel the bot is mentioned in is remembered (`AppRecord.channels`). Its news channel is the one chosen (`PUT /v1/app/routines/:id/slack/news`, or `slack_for_bot` with `news_channel`), by default the first it was mentioned in; `null` / `"none"` keeps its news in the Ambient app.
+- **The bot is told.** Each run of a bot with a Slack app starts with a line saying it's in Slack as `@name`, and where its news goes (`slackLines` in `bots/folder.ts`). Before this a scheduled run had the token but no idea it was in Slack (the Anomaly watcher said it couldn't post, 2026-11-22).
+- **How it posts.** Its tool `post_to_slack` (on the gateway's MCP, bots only): the gateway posts as the bot, outside any thread, and remembers the post. Questions to its owner and failures don't go there.
+- **Replies under its post** reach it without an @mention (`message.channels`, `message.groups`): only threads under a post of its own, and only from whoever installed it, as with mentions.
+- **A channel that's gone** (it was removed, the channel is archived): the post is refused with the reason, kept as `news.broken` for its page until another channel is chosen or a post works; the run is told no channel is chosen meanwhile.
+- **Channel names** need `channels:read` / `groups:read`. Apps made before that keep working by channel id; `POST /v1/app/routines/:id/slack/allow` (or `slack_for_bot` with `allow_again`) updates the app's manifest and returns the link to tap Allow once more.

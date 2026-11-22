@@ -418,6 +418,8 @@ export class RoutineService {
   githubToken?: (owner: Owner, routineId: string) => Promise<string | null>;
   /** A bot's own Slack app's token, for its run as SLACK_BOT_TOKEN (bots/slack-apps.ts). */
   slackToken?: (owner: Owner, routineId: string) => Promise<string | null>;
+  /** What a bot in Slack is told at the start of a run: its handle and where its news goes; null: not in Slack. */
+  slackFor?: (owner: Owner, routineId: string) => Promise<{ handle: string; workspace: string | null; news: string | null } | null>;
   /** The MCP servers a bot was given (bots/mcp-connections.ts): the name its tools carry and its address at the gateway. */
   mcpFor?: (owner: Owner, routineId: string) => Promise<{ name: string; path: string }[]>;
   /** A bot said something at the end of a run (its result): Slack answers the thread that asked. */
@@ -1190,7 +1192,8 @@ export class RoutineService {
       const thread = await this.threadSince(owner, r.id, previous?.startedAt ?? 0, pendingId);
       const github = this.githubFor ? await this.githubFor(owner, r.id).catch(() => null) : null;
       const wakes = this.wakesFor ? await this.wakesFor({ id: r.id, teamId: r.teamId, createdBy: r.createdBy, timezone: r.schedule.timezone }).catch(() => null) : null;
-      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github, wakes, scheduled: r.schedule.every !== "needed" });
+      const slack = this.slackFor ? await this.slackFor(owner, r.id).catch(() => null) : null;
+      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github, wakes, slack, scheduled: r.schedule.every !== "needed" });
       prompt = woken.prompt;
       resume = woken.resume;
       workspace = woken.workspace;

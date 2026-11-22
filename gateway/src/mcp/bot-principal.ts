@@ -23,6 +23,7 @@ export const BOT_TOOLS = new Set([
   "transcript",
   "suggest_correction",
   "log_work",
+  "post_to_slack",
 ]);
 
 /** A bot run's principal from its run token; null when the header holds another kind of token. */
@@ -32,7 +33,7 @@ export async function botPrincipal(d: { control: Control; directory: Directory }
   const run = await d.control.q(api.bots.runOwner, { runTokenHash: sha256Hex(token) });
   if (!run) throw new AuthError(401, "invalid_token", "This bot's run is over.", true);
   const uid = String(run.createdBy);
-  const bot = { routineId: String(run.routineId), name: run.name };
+  const bot = { routineId: String(run.routineId), name: run.name, teamId: run.teamId ? String(run.teamId) : null };
   if (run.teamId) {
     const team = (await d.control.q(api.teams.byId, { teamId: run.teamId as never })) as unknown as Team | null;
     if (!team || team.status !== "active") throw new AuthError(403, "insufficient_scope", "This bot's team isn't active.");
