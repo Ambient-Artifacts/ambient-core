@@ -193,7 +193,7 @@ function session(id: string): TeamNoteV1 {
     kind: "session",
     consent: { mode: "solo", confirmed_at: "2026-10-21T10:00:00+02:00" },
     entry_page: {
-      frontmatter: { title: "Pricing page rewrite", summary: "Rewrote the pricing page.", people: ["people/lena-vogel"], work: { tool: "Claude", repo: "acme/web" } },
+      frontmatter: { title: "Pricing page rewrite", summary: "Rewrote the pricing page.", people: ["people/lena-vogel"], projects: ["projects/pricing-site"], work: { tool: "Claude", repo: "acme/web" } },
       body_md: "# Pricing page rewrite\n\nRewrote the pricing page.\n\n## Decisions\n- Monthly plans only\n",
     },
     transcript: null,
@@ -222,8 +222,10 @@ describe("a folder for Ambient in a repo another tool keeps", () => {
     const out = await ingestNote(wiki, session("01JFENCED00000000000000001"), { rawDir: raw, recordedBySlug: "people/lena-vogel" });
     expect(out.path).toMatch(/^ambient\/sessions\/2026-10\/.*\.md$/);
     const text = readFileSync(join(dir, out.path), "utf8");
-    // Links reach the team's own pages from inside the folder.
+    // Links reach the team's own pages from inside the folder; pages the repo doesn't have are named only.
     expect(text).toContain("- [Lena Vogel](../../../people/lena-vogel.md)");
+    expect(text).toContain("\n- Pricing Site\n");
+    expect(text).not.toContain("projects/pricing-site.md");
 
     const pushed = mkdtempSync(join(tmp, "check-"));
     sh(["-c", "protocol.file.allow=always", "clone", "-q", theirs.url, pushed]);

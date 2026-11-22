@@ -237,11 +237,15 @@ export async function ingestNote(
     path = path.replace(/-[0-9a-z_-]{6}\.md$/, `-${note.note_id.toLowerCase()}.md`);
     if (wiki.store.getByRef(path.replace(/\.md$/, ""))) throw new IngestError(409, "a different note already has this address");
   }
-  // Links to the note's pages in this wiki's layout (the phone's own links point elsewhere).
+  // Links to the note's pages in this wiki's layout (the phone's own links point elsewhere). In a repo
+  // another tool keeps (a fence), Ambient never makes people, org or project pages, and the repo may not
+  // use those folders at all (ALEAS has clients/, no projects/): a page that isn't there is named, not linked.
   const related = (["people", "orgs", "projects", "topics"] as const).flatMap((k) =>
     (frontmatter[k] as string[]).map((ref) => {
-      const name = wiki.store.getByRef(ref)?.title ?? ref.split("/").pop()!.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-      return `- [${name.replace(/[[\]]/g, "")}](${posix.relative(posix.dirname(path), `${ref}.md`)})`;
+      const existing = wiki.store.getByRef(ref);
+      const name = (existing?.title ?? ref.split("/").pop()!.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")).replace(/[[\]]/g, "");
+      if (!existing && wiki.fence) return `- ${name}`;
+      return `- [${name}](${posix.relative(posix.dirname(path), `${ref}.md`)})`;
     }),
   );
   const own = cleanBody(note.entry_page.body_md).replace(/\n## Related\n[\s\S]*?(?=\n## |$)/, "").trimEnd();
