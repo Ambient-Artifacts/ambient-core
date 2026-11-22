@@ -9,6 +9,8 @@
 //   Slack   ──▶ /v1/hooks/slack/<hook> (an @mention, a DM) ──▶ the bot's thread, a run starts
 //   a run's answer (its reply or its result) ──▶ back into that Slack thread
 //   a run ──▶ SLACK_BOT_TOKEN in its environment (it posts as itself, e.g. a nightly digest)
+//   a run with news ──▶ postNews() ──▶ the one channel its owner chose (its tool, post_to_slack)
+//   a reply in the thread under such a post ──▶ the bot's thread, as an @mention would
 //
 // Slack's partners can skip the Allow step (managed_apps:install); that scope isn't open to
 // developers, so one tap per bot stays.
@@ -37,8 +39,33 @@ const TARGETS_MAX = 10;
 const NAME_MAX = 35;
 /** A Slack message's text is cut at 40,000; long answers go out in parts well below that. */
 const PART_MAX = 3_500;
-export const SLACK_SCOPES = ["app_mentions:read", "chat:write", "channels:history", "groups:history", "im:history", "im:read", "im:write", "reactions:write", "users:read"];
-export const SLACK_EVENTS = ["app_mention", "message.im"];
+/** `channels:read` and `groups:read`: the names of the channels it's in (for "Posts news in #anomalies"). */
+export const SLACK_SCOPES = ["app_mentions:read", "chat:write", "channels:history", "channels:read", "groups:history", "groups:read", "im:history", "im:read", "im:write", "reactions:write", "users:read"];
+/** `message.channels` and `message.groups`: replies in the thread under a post of its own reach it without an @mention. */
+export const SLACK_EVENTS = ["app_mention", "message.im", "message.channels", "message.groups"];
+/** Channels remembered per bot, and posts of its own whose threads it listens to. */
+const CHANNELS_MAX = 20;
+const POSTS_MAX = 30;
+/** Slack's reasons a channel can't be posted to anymore. */
+const GONE = new Set(["not_in_channel", "channel_not_found", "is_archived"]);
+
+/** A Slack channel a bot is in: its id, and its name once Slack told it. */
+export interface SlackChannel {
+  id: string;
+  name?: string;
+}
+
+/** Where a bot's own news goes in Slack, for its page in the app. */
+export interface SlackNews {
+  /** The channel it posts news in; null: only in the Ambient app. */
+  channel: SlackChannel | null;
+  /** The channels it was mentioned in: what can be chosen. */
+  channels: SlackChannel[];
+  /** It may read channel names (apps from before that need one more Allow). */
+  names: boolean;
+  /** Why the last post didn't go out (it was removed, the channel is archived), until another is chosen or one works. */
+  broken: string | null;
+}
 
 interface Workspace {
   token: string;
@@ -62,6 +89,15 @@ interface AppRecord {
   teamName?: string;
   /** The Slack user who installed it: the one it takes instructions from. */
   installer?: string;
+  /** What Slack granted at the last Allow (none stored: an app from before channel names). */
+  scopes?: string[];
+  /** The channels it was mentioned in, oldest first. */
+  channels?: SlackChannel[];
+  /** Where its news goes: a channel's id; "": only the app; unset: the first channel it was mentioned in. */
+  news?: string;
+  newsBroken?: string;
+  /** Posts of its own (news), whose threads it listens to. */
+  posts?: { channel: string; ts: string; at: number }[];
 }
 
 /** A Slack message waiting for its answer: the thread, and the run that took it (once one has). */
@@ -259,9 +295,106 @@ export class SlackApps {
   // ---- a bot's app ----
 
   /** What the app shows for a bot: whether the workspace is connected, and its app. */
-  async status(owner: Owner, routineId: string): Promise<{ workspace: boolean; app: { appId: string; installed: boolean; botUserId: string | null; teamName: string | null } | null }> {
+  async status(owner: Owner, routineId: string): Promise<{ workspace: boolean; app: { appId: string; installed: boolean; botUserId: string | null; teamName: string | null } | null; news: SlackNews | null }> {
     const [ws, app] = await Promise.all([this.get<Workspace>(owner, WORKSPACE, "workspace"), this.get<AppRecord>(owner, APP, routineId)]);
-    return { workspace: !!ws, app: app ? { appId: app.appId, installed: !!app.botToken, botUserId: app.botUserId ?? null, teamName: app.teamName ?? null } : null };
+    return { workspace: !!ws, app: app ? { appId: app.appId, installed: !!app.botToken, botUserId: app.botUserId ?? null, teamName: app.teamName ?? null } : null, news: app?.botToken ? this.newsOf(app) : null };
+  }
+
+  // ---- its own news: one channel, chosen by its owner (docs/bots.md, "Slack") ----
+
+  private static canName(app: AppRecord): boolean {
+    return app.scopes?.includes("channels:read") ?? false;
+  }
+
+  /** The channel its news goes to: the one chosen, else the first it was mentioned in; null: only the app. */
+  private static newsChannel(app: AppRecord): SlackChannel | null {
+    if (app.news === "") return null;
+    const id = app.news ?? app.channels?.[0]?.id;
+    return id ? (app.channels?.find((c) => c.id === id) ?? { id }) : null;
+  }
+
+  private newsOf(app: AppRecord): SlackNews {
+    return { channel: SlackApps.newsChannel(app), channels: app.channels ?? [], names: SlackApps.canName(app), broken: app.newsBroken ?? null };
+  }
+
+  /** "#anomalies", or "the channel you were first mentioned in" while its name isn't known. */
+  private static label(c: SlackChannel): string {
+    return c.name ? `#${c.name}` : "the Slack channel you were mentioned in";
+  }
+
+  /** What a run is told about Slack (folder.ts, wake): its handle, its workspace, where its news goes. Null: not in Slack. */
+  async forRun(owner: Owner, routineId: string): Promise<{ handle: string; workspace: string | null; news: string | null } | null> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.botToken) return null;
+    const c = SlackApps.newsChannel(app);
+    return { handle: app.name, workspace: app.teamName ?? null, news: c && !app.newsBroken ? SlackApps.label(c) : null };
+  }
+
+  /** Chooses where its news goes: one of the channels it was mentioned in, or null for only the app. */
+  async setNews(owner: Owner, routineId: string, channel: string | null): Promise<SlackNews> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.botToken) throw new SlackError("not_in_slack", "This bot isn't in Slack yet.", 400);
+    if (channel !== null && !app.channels?.some((c) => c.id === channel)) throw new SlackError("no_such_channel", "It hasn't been mentioned in that channel. Invite it there and mention it once, then choose it.", 400);
+    const { newsBroken: _was, ...rest } = app;
+    const next: AppRecord = { ...rest, news: channel ?? "" };
+    await this.put(owner, APP, routineId, next);
+    return this.newsOf(next);
+  }
+
+  /**
+   * The bot posts news of its own (its tool, post_to_slack): into the one channel its owner chose,
+   * as itself, outside any thread. The post is remembered, so replies in its thread reach it.
+   * Refused when no channel is chosen; when Slack says the channel is gone, that's kept for its page.
+   */
+  async postNews(owner: Owner, routineId: string, text: string): Promise<{ channel: SlackChannel }> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.botToken) throw new SlackError("not_in_slack", "You're not in Slack: what you report is in the Ambient app.", 400);
+    const channel = SlackApps.newsChannel(app);
+    if (!channel) throw new SlackError("no_channel", "No Slack channel is chosen for your news, so it stays in the Ambient app. Your owner chooses one on your Slack page.", 400);
+    let first: string | undefined;
+    for (const part of splitText(markdownToSlack(text))) {
+      const out = await this.call<{ ts?: string }>("chat.postMessage", app.botToken, { channel: channel.id, text: part, unfurl_links: false });
+      if (!out.ok) {
+        if (GONE.has(out.error ?? "")) await this.put(owner, APP, routineId, { ...app, newsBroken: out.error });
+        throw new SlackError("slack_failed", GONE.has(out.error ?? "") ? `You can't post in ${SlackApps.label(channel)} anymore (${out.error}). It stays in the Ambient app; your owner sees that on your Slack page.` : `Slack didn't take the message (${out.error ?? "no reason"}).`, 502);
+      }
+      first ??= out.ts;
+    }
+    const { newsBroken: _was, ...rest } = app;
+    const posts = first ? [...(app.posts ?? []), { channel: channel.id, ts: first, at: this.now() }].slice(-POSTS_MAX) : (app.posts ?? []);
+    await this.put(owner, APP, routineId, { ...rest, posts });
+    return { channel };
+  }
+
+  /** A channel it was mentioned in: kept, with its name when Slack gives it. */
+  private async remember(owner: Owner, routineId: string, app: AppRecord, channelId: string): Promise<AppRecord> {
+    const known = app.channels?.find((c) => c.id === channelId);
+    if (known && (known.name || !SlackApps.canName(app))) return app;
+    let name: string | undefined;
+    if (SlackApps.canName(app) && app.botToken) {
+      const out = await this.call<{ channel?: { name?: string } }>("conversations.info", app.botToken, { channel: channelId }, { form: true }).catch(() => null);
+      name = out?.ok ? out.channel?.name : undefined;
+    }
+    if (known && !name) return app;
+    const others = (app.channels ?? []).filter((c) => c.id !== channelId);
+    const channels = known ? (app.channels ?? []).map((c) => (c.id === channelId ? { id: channelId, ...(name ? { name } : {}) } : c)) : [...others, { id: channelId, ...(name ? { name } : {}) }].slice(-CHANNELS_MAX);
+    const next = { ...app, channels };
+    await this.put(owner, APP, routineId, next);
+    return next;
+  }
+
+  /**
+   * An app from before channel names: its manifest gets today's permissions and events, and the
+   * link asks for Allow once more. The bot stays in Slack meanwhile.
+   */
+  async reallow(owner: Owner, bot: { id: string; name: string }, uid: string): Promise<{ url: string }> {
+    const app = await this.get<AppRecord>(owner, APP, bot.id);
+    if (!app) throw new SlackError("no_app", "This bot has no Slack app yet.", 404);
+    const ws = await this.configToken(owner);
+    const hook = this.sign("hook", refOf(owner, bot.id));
+    const out = await this.call("apps.manifest.update", ws.token, { app_id: app.appId, manifest: JSON.stringify(this.manifest(app.name, hook)) }, { form: true });
+    if (!out.ok) throw new SlackError("slack_failed", `Slack didn't update the app (${out.error ?? "no reason"}).`, 502);
+    return { url: this.installUrl(owner, bot.id, uid, app, ws.teamId) };
   }
 
   /** The manifest Slack gets: the bot's name, Ambient's addresses, what it may read and say. */
@@ -320,14 +453,14 @@ export class SlackApps {
     const owner = ownerOf(s);
     const app = await this.get<AppRecord>(owner, APP, s.r);
     if (!app) throw new SlackError("no_app", "This bot's Slack app is gone. Tap Add to Slack again in Ambient.", 404);
-    const out = await this.call<{ access_token?: string; bot_user_id?: string; team?: { id?: string; name?: string }; authed_user?: { id?: string } }>(
+    const out = await this.call<{ access_token?: string; scope?: string; bot_user_id?: string; team?: { id?: string; name?: string }; authed_user?: { id?: string } }>(
       "oauth.v2.access",
       null,
       { client_id: app.clientId, client_secret: app.clientSecret, code, redirect_uri: `${this.base()}/v1/slack/installed` },
       { form: true },
     );
     if (!out.ok || !out.access_token || !out.bot_user_id || !out.authed_user?.id) throw new SlackError("slack_failed", `Slack didn't install it (${out.error ?? "no reason"}). Tap Add to Slack again in Ambient.`, 502);
-    const done: AppRecord = { ...app, botToken: out.access_token, botUserId: out.bot_user_id, teamId: out.team?.id, teamName: out.team?.name, installer: out.authed_user.id };
+    const done: AppRecord = { ...app, botToken: out.access_token, botUserId: out.bot_user_id, teamId: out.team?.id, teamName: out.team?.name, installer: out.authed_user.id, scopes: (out.scope ?? "").split(",").map((x) => x.trim()).filter(Boolean) };
     await this.put(owner, APP, s.r, done);
     return { name: app.name, botUserId: out.bot_user_id, teamName: out.team?.name ?? null };
   }
@@ -407,10 +540,20 @@ export class SlackApps {
 
   private async onEvent(owner: Owner, routineId: string, app: AppRecord, e: SlackEvent): Promise<void> {
     const dm = e.type === "message" && e.channel_type === "im";
-    if (e.type !== "app_mention" && !dm) return;
+    // A reply in the thread under a post of its own counts as written to it. One that also
+    // mentions it comes as an app_mention too, and is taken there.
+    const underOwnPost =
+      e.type === "message" && !dm && !!e.thread_ts && (app.posts ?? []).some((p) => p.channel === e.channel && p.ts === e.thread_ts) && !(e.text ?? "").includes(`<@${app.botUserId}>`);
+    if (e.type !== "app_mention" && !dm && !underOwnPost) return;
     // Its own messages, other bots', edits and joins: not for it.
     if (e.bot_id || e.subtype || !e.user || !e.channel || !e.ts || !app.botToken) return;
     if (e.user === app.botUserId) return;
+    // A channel it's mentioned in is one it can post its news in.
+    if (e.type === "app_mention") {
+      const before = app;
+      app = await this.remember(owner, routineId, before, e.channel).catch(() => before);
+    }
+    if (!app.botToken) return;
     const thread = e.thread_ts ?? e.ts;
     // It takes instructions from whoever installed it (its runs hold its owner's secrets).
     if (!app.installer || e.user !== app.installer) {
@@ -424,7 +567,7 @@ export class SlackApps {
     const text = (e.text ?? "").replace(new RegExp(`<@${app.botUserId}>`, "g"), "").trim();
     if (!text) return;
     const who = await this.nameOf(app.botToken, e.user);
-    const where = dm ? "in a direct message" : "in a channel";
+    const where = dm ? "in a direct message" : underOwnPost ? "in the thread under your post" : "in a channel";
     const body = `${who} wrote to you on Slack (${where}): ${slackToPlain(text)}\n\n(Your answer goes back to that Slack thread on its own.)`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();

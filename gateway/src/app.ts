@@ -426,6 +426,7 @@ export function createApp(deps: AppDeps) {
   const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
   folders.slack = slack;
   routines.slackToken = (owner, id) => slack.botToken(owner, id);
+  routines.slackFor = (owner, id) => slack.forRun(owner, id);
   routines.onBotSaid = (owner, id, text, final, runId) => slack.said(owner, id, text, final, { id: runId });
   routines.onBotRunStarted = (owner, id, runId, hash) => slack.runStarted(owner, id, runId, hash);
   bots.onSaid = (owner, id, text, hash) => slack.said(owner, id, text, false, { hash });

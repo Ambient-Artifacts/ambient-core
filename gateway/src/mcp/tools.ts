@@ -285,6 +285,31 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     (server as unknown as { registerTool: (...a: unknown[]) => unknown }).registerTool = (name: unknown, ...rest: unknown[]) =>
       BOT_TOOLS.has(String(name)) ? register(name, ...rest) : undefined;
   }
+  // A bot in Slack posts news of its own in the one channel its owner chose (bots/slack-apps.ts).
+  if (principal.bot && folders?.slack) {
+    const slack = folders.slack;
+    const bot = principal.bot;
+    const owner = bot.teamId ? ({ kind: "team", teamId: bot.teamId } as const) : ({ kind: "user", uid: principal.uid } as const);
+    server.registerTool(
+      "post_to_slack",
+      {
+        title: "Post your news in Slack",
+        description:
+          "Posts a message of your own in Slack, as yourself, in the one channel your owner chose for your news. For news worth the channel: an alert, a result people wait for. Not for answers to a Slack message (those go back to their thread on their own), not for routine \"nothing new\" reports, questions to your owner (ask_owner) or failures. Short, plain, the most important first.",
+        inputSchema: { text: z.string().min(1).max(8_000) },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ text: said }: { text: string }) => {
+        try {
+          const out = await slack.postNews(owner, bot.routineId, said);
+          const where = out.channel.name ? `#${out.channel.name}` : "your Slack channel";
+          return { content: [{ type: "text" as const, text: `Posted in ${where}. Replies in that thread reach you.` }], structuredContent: { posted: true, channel: out.channel } };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
+        }
+      },
+    );
+  }
   const warnings: string[] = [];
 
   /**

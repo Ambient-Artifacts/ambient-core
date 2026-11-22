@@ -1136,19 +1136,36 @@ function registerSlackTools(
     {
       title: "Put a bot in Slack",
       description:
-        "Give a bot its own Slack app, so in Slack it's its own @handle: mentioned in a channel or messaged directly, it answers in the thread, and its runs get SLACK_BOT_TOKEN to post as itself. Ambient creates the app; give the user the returned link as a Markdown link, [Add <bot> to Slack](<url>): they tap Allow once (it works for an hour). Then they invite it to a channel (/invite @<bot>). It takes instructions only from whoever tapped Allow. Needs Slack connected first (connect_slack). remove: true deletes its Slack app. Only when the user asked.",
-      inputSchema: { bot: z.string().max(64).describe("The bot (its id)."), remove: z.boolean().optional() },
+        "Give a bot its own Slack app, so in Slack it's its own @handle: mentioned in a channel or messaged directly, it answers in the thread, and it posts news of its own (an alert, a result) in one channel its owner chooses (news_channel; by default the first channel it was mentioned in). Ambient creates the app; give the user the returned link as a Markdown link, [Add <bot> to Slack](<url>): they tap Allow once (it works for an hour). Then they invite it to a channel (/invite @<bot>). It takes instructions only from whoever tapped Allow. Needs Slack connected first (connect_slack). remove: true deletes its Slack app. Only when the user asked.",
+      inputSchema: {
+        bot: z.string().max(64).describe("The bot (its id)."),
+        remove: z.boolean().optional(),
+        news_channel: z.string().max(40).optional().describe('Where the bot posts news of its own (an alert, a result): the id of a channel it was mentioned in (see `news.channels`), or "none" for only the Ambient app.'),
+        allow_again: z.boolean().optional().describe("For a bot put in Slack before channel names were read: updates its app and returns a link to tap Allow once more."),
+      },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async ({ bot, remove }) =>
+    async ({ bot, remove, news_channel, allow_again }) =>
       guard(async () => {
         const f = await routines.folderOf(actor, bot, true);
         if (remove) {
           const gone = await slack.remove(f.owner, f.routineId);
           return result(gone ? `${f.name}'s Slack app is deleted.` : `${f.name} has no Slack app.`);
         }
+        if (news_channel !== undefined) {
+          const news = await slack.setNews(f.owner, f.routineId, news_channel === "none" ? null : news_channel);
+          return result(news.channel ? `${f.name} posts its news in ${news.channel.name ? `#${news.channel.name}` : news.channel.id}.` : `${f.name}'s news stays in the Ambient app.`, { news });
+        }
+        if (allow_again) {
+          const out = await slack.reallow(f.owner, { id: f.routineId, name: f.name }, actor.uid);
+          return result(`[Allow ${f.name} in Slack again](${out.url}): one tap, so it can read the names of its channels and hear replies under its own posts.`, out);
+        }
         const out = await slack.add(f.owner, { id: f.routineId, name: f.name }, actor.uid);
-        if (out.installed) return result(`${f.name} is in Slack already. Mention @${f.name} in a channel it's invited to, or message it directly.`, out);
+        if (out.installed) {
+          const st = await slack.status(f.owner, f.routineId);
+          const where = st.news?.channel ? ` Its own news goes to ${st.news.channel.name ? `#${st.news.channel.name}` : "the channel it was first mentioned in"}.` : " Its own news stays in the Ambient app (no channel chosen).";
+          return result(`${f.name} is in Slack already. Mention @${f.name} in a channel it's invited to, or message it directly.${where}`, { ...out, news: st.news });
+        }
         return result(`[Add ${f.name} to Slack](${out.url}): tap Allow. Then invite it to a channel with /invite @${f.name}.`, out);
       }),
   );

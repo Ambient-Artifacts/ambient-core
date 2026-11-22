@@ -20,6 +20,11 @@ let lena: AppSession;
 let host: string;
 let bot = "";
 let manifest: Record<string, unknown> = {};
+/** What Slack grants at Allow: an app from before channel names got none of the read scopes. */
+let granted = "app_mentions:read,chat:write";
+/** Slack's refusal for the next posts (a channel it was removed from). */
+let postError = "";
+let posted = 0;
 
 const call = (method: string, path: string, body?: unknown) => appCall(s, lena.access_token, method, path, body);
 const hostCall = async (token: string, method: string, path: string, body?: unknown) => {
@@ -64,11 +69,18 @@ beforeAll(async () => {
         case "oauth.v2.access":
           if (args.code === "no-user") return json({ ok: true, access_token: "xoxb-x", bot_user_id: "U_BOT", team: { id: "T1", name: "Miora" } });
           if (args.code !== "good-code" || args.client_secret !== "client-secret") return json({ ok: false, error: "invalid_code" });
-          return json({ ok: true, access_token: "xoxb-chatty", bot_user_id: "U_BOT", team: { id: "T1", name: "Miora" }, authed_user: { id: "U_LENA" } });
+          return json({ ok: true, access_token: "xoxb-chatty", scope: granted, bot_user_id: "U_BOT", team: { id: "T1", name: "Miora" }, authed_user: { id: "U_LENA" } });
+        case "apps.manifest.update":
+          manifest = JSON.parse(args.manifest!) as Record<string, unknown>;
+          return json({ ok: true, app_id: "A1" });
+        case "conversations.info":
+          return json({ ok: true, channel: { id: args.channel, name: args.channel === "C7" ? "anomalies" : "general" } });
+        case "chat.postMessage":
+          if (postError) return json({ ok: false, error: postError });
+          return json({ ok: true, ts: `1800000000.000${++posted}` });
         case "users.info":
           return json({ ok: true, user: { real_name: "Lena Vogel", profile: { display_name: "Lena" } } });
         case "reactions.add":
-        case "chat.postMessage":
         case "apps.manifest.delete":
         case "apps.icon.set":
           return json({ ok: true });
@@ -123,7 +135,7 @@ describe("a bot's own Slack app", () => {
       display_information: { name: "Chatty" },
       features: { bot_user: { display_name: "Chatty" } },
       oauth_config: { redirect_urls: [`${s.origin}/v1/slack/installed`] },
-      settings: { event_subscriptions: { bot_events: ["app_mention", "message.im"] } },
+      settings: { event_subscriptions: { bot_events: ["app_mention", "message.im", "message.channels", "message.groups"] } },
     });
     expect(hookPath()).toMatch(/^\/v1\/hooks\/slack\/[\w-]+\.[\w-]+$/);
     url = String(out.json.url);
@@ -221,6 +233,118 @@ describe("a bot's own Slack app", () => {
     await sendEvent({ type: "event_callback", event_id: "Ev6", event: { type: "message", channel_type: "im", user: "U_BOT", bot_id: "B1", text: "echo", channel: "D1", ts: "1700000000.0006" } });
     await s.folders.slack!.idle();
     expect(posts().length).toBe(before + 1);
+  });
+
+  type News = { channel: { id: string; name?: string } | null; channels: { id: string; name?: string }[]; names: boolean; broken: string | null };
+  const news = async () => (await call("GET", `/v1/app/routines/${bot}/slack`)).json.news as News;
+  /** A run of the bot's, with the gateway's MCP as the run sees it. */
+  const asBot = async () => {
+    const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string; routine: { prompt: string }; resume: { message: string } | null };
+    const mcp = await mcpClient(`${s.origin}/mcp`, start.runToken);
+    return { start, mcp, end: async () => (await mcp.close(), await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "" }), await s.folders.slack!.idle()) };
+  };
+
+  it("posts news of its own in the channel it was first mentioned in, and hears replies under that post", async () => {
+    // Mentioned in C9 above: that's where its news goes, by its id while the name can't be read.
+    expect(await news()).toMatchObject({ channel: { id: "C9" }, names: false, broken: null });
+    expect((await news()).channels[0]).toEqual({ id: "C9" });
+    const run = await asBot();
+    // The run is told it's in Slack and how to post.
+    expect(run.start.routine.prompt).toContain("You're in Slack as @Chatty (Miora)");
+    expect(run.start.routine.prompt).toContain("post_to_slack");
+    const before = posts().length;
+    const out = await run.mcp.callTool({ name: "post_to_slack", arguments: { text: "**Sign-ups dropped** to 4 yesterday." } });
+    expect(text(out)).toContain("Posted in your Slack channel");
+    expect(posts()).toHaveLength(before + 1);
+    const post = posts().at(-1)!;
+    expect(post.auth).toBe("Bearer xoxb-chatty");
+    expect(post.args).toMatchObject({ channel: "C9", text: "*Sign-ups dropped* to 4 yesterday." });
+    expect(post.args.thread_ts).toBeUndefined();
+    // The bot's own tools only: nothing of its owner's.
+    const names = (await run.mcp.listTools()).tools.map((t) => t.name);
+    expect(names).toContain("post_to_slack");
+    expect(names).not.toContain("slack_for_bot");
+    await run.end();
+    // A reply in the thread under its post reaches it without a mention; one elsewhere doesn't.
+    const ts = `1800000000.000${posted}`;
+    await sendEvent({ type: "event_callback", event_id: "EvN1", event: { type: "message", channel_type: "channel", user: "U_LENA", text: "since when?", channel: "C9", ts: "1800000001.0001", thread_ts: ts } });
+    await sendEvent({ type: "event_callback", event_id: "EvN2", event: { type: "message", channel_type: "channel", user: "U_LENA", text: "lunch anyone?", channel: "C9", ts: "1800000002.0001" } });
+    await sendEvent({ type: "event_callback", event_id: "EvN3", event: { type: "message", channel_type: "channel", user: "U_LENA", text: "unrelated thread", channel: "C9", ts: "1800000003.0001", thread_ts: "1700000000.9999" } });
+    await s.folders.slack!.idle();
+    const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[];
+    expect(thread.some((m) => m.text.includes("Lena wrote to you on Slack (in the thread under your post): since when?"))).toBe(true);
+    expect(thread.some((m) => m.text.includes("lunch anyone?") || m.text.includes("unrelated thread"))).toBe(false);
+    // Its answer to that goes back under its post.
+    const answering = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await hostCall(host, "POST", `/v1/host/runs/${answering.run.id}`, { status: "succeeded", summary: "Since Friday." });
+    await s.folders.slack!.idle();
+    expect(posts().at(-1)!.args).toMatchObject({ channel: "C9", thread_ts: ts, text: "Since Friday." });
+  });
+
+  it("its owner picks the channel, or none; a channel that's gone is said, not retried silently", async () => {
+    await sendEvent({ type: "event_callback", event_id: "EvN4", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> you're in here now", channel: "C7", ts: "1800000004.0001" } });
+    await s.folders.slack!.idle();
+    const drain = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await hostCall(host, "POST", `/v1/host/runs/${drain.run.id}`, { status: "succeeded", summary: "Hello." });
+    await s.folders.slack!.idle();
+    expect((await news()).channels.map((c) => c.id)).toEqual(["C9", "C7"]);
+    // Still the first one until another is chosen; a channel it was never in can't be.
+    expect((await news()).channel).toMatchObject({ id: "C9" });
+    expect((await call("PUT", `/v1/app/routines/${bot}/slack/news`, { channel: "CX" })).status).toBe(400);
+    expect(((await call("PUT", `/v1/app/routines/${bot}/slack/news`, { channel: "C7" })).json.news as News).channel).toMatchObject({ id: "C7" });
+    // None: the tool says so, and nothing goes to Slack.
+    await call("PUT", `/v1/app/routines/${bot}/slack/news`, { channel: null });
+    expect((await news()).channel).toBe(null);
+    let run = await asBot();
+    expect(run.start.routine.prompt).toContain("No channel is chosen for news of your own");
+    let before = posts().length;
+    const refused = await run.mcp.callTool({ name: "post_to_slack", arguments: { text: "anything" } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("No Slack channel is chosen");
+    expect(posts()).toHaveLength(before);
+    await run.end();
+    // Removed from the channel: the bot hears why, and its page says it until one works or another is chosen.
+    await call("PUT", `/v1/app/routines/${bot}/slack/news`, { channel: "C7" });
+    postError = "not_in_channel";
+    run = await asBot();
+    const gone = await run.mcp.callTool({ name: "post_to_slack", arguments: { text: "an alert" } });
+    postError = "";
+    expect(gone.isError).toBe(true);
+    expect(text(gone)).toContain("can't post");
+    expect((await news()).broken).toBe("not_in_channel");
+    await run.end();
+    run = await asBot();
+    expect(run.start.routine.prompt).toContain("No channel is chosen for news of your own");
+    await run.end();
+    // Choosing again clears it.
+    expect(((await call("PUT", `/v1/app/routines/${bot}/slack/news`, { channel: "C7" })).json.news as News).broken).toBe(null);
+  });
+
+  it("an app from before channel names is brought up to date with one more Allow, and then names its channels", async () => {
+    const allow = await call("POST", `/v1/app/routines/${bot}/slack/allow`);
+    expect(allow.status).toBe(200);
+    expect(calls.find((c) => c.method === "apps.manifest.update")!.args.app_id).toBe("A1");
+    expect((manifest.oauth_config as { scopes: { bot: string[] } }).scopes.bot).toEqual(expect.arrayContaining(["channels:read", "groups:read"]));
+    const link = new URL(String(allow.json.url));
+    expect(link.searchParams.get("scope")).toContain("channels:read");
+    granted = "app_mentions:read,chat:write,channels:read,groups:read";
+    const back = await fetch(`${s.origin}/v1/slack/installed?code=good-code&state=${encodeURIComponent(link.searchParams.get("state")!)}`, { redirect: "manual" });
+    expect(back.status).toBeLessThan(400);
+    // What it had (its channels, its choice) is kept, and names can be read now.
+    expect(await news()).toMatchObject({ channel: { id: "C7" }, names: true });
+    await sendEvent({ type: "event_callback", event_id: "EvN5", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> hi again", channel: "C7", ts: "1800000005.0001" } });
+    await s.folders.slack!.idle();
+    const drain = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; routine: { prompt: string }; resume: { message: string } | null };
+    await hostCall(host, "POST", `/v1/host/runs/${drain.run.id}`, { status: "succeeded", summary: "Hi." });
+    await s.folders.slack!.idle();
+    expect((await news()).channel).toEqual({ id: "C7", name: "anomalies" });
+    // From the owner's AI: the same choice, by the same function.
+    const pat = String((await call("POST", "/v1/app/pats", { label: "Claude" })).json.token);
+    const mcp = await mcpClient(`${s.origin}/mcp`, pat);
+    expect(text(await mcp.callTool({ name: "slack_for_bot", arguments: { bot, news_channel: "none" } }))).toContain("stays in the Ambient app");
+    expect(text(await mcp.callTool({ name: "slack_for_bot", arguments: { bot, news_channel: "C7" } }))).toContain("posts its news in #anomalies");
+    expect(text(await mcp.callTool({ name: "slack_for_bot", arguments: { bot } }))).toContain("Its own news goes to #anomalies");
+    await mcp.close();
   });
 
   it("takes its face as its icon, and leaves Slack when it's taken out", async () => {

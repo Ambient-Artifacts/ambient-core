@@ -521,6 +521,31 @@ export function botAppRoutes(
       slackFail(res, err);
     }
   });
+  // Where its own news goes in Slack: one of the channels it was mentioned in, or null for only the app.
+  r.put("/v1/app/routines/:id/slack/news", d.auth, d.json, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    const body = z.object({ channel: z.string().max(40).nullable() }).safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send channel: a channel's id, or null for only the Ambient app." });
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      res.json({ news: await sl.setNews(f.owner, f.routineId, body.data.channel) });
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  // An app from before channel names: its permissions are brought up to date, and Allow is asked once more.
+  r.post("/v1/app/routines/:id/slack/allow", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      const a = await actor(res);
+      const f = await d.routines.folderOf(a, id(req), true);
+      res.json(await sl.reallow(f.owner, { id: f.routineId, name: f.name }, a.uid));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
   r.put("/v1/app/routines/:id/slack/icon", d.auth, express.raw({ type: ["image/png", "application/octet-stream"], limit: "4mb" }), async (req, res) => {
     const sl = d.slack?.();
     if (!sl) return notEnabled(res);
