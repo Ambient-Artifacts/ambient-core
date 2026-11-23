@@ -1131,9 +1131,14 @@ a bot's run ──▶ POST /v1/bot/mcp/:id (its run token) ──▶ the gateway
   name (Notion, Linear, Jira and Confluence, Stripe, Sentry and about forty more), each with its
   own MCP server's address, what a bot can do with it, a category and how it's signed in to.
   Connecting one takes its id alone (`{ "catalog": "notion" }`): no address to find. An entry is
-  there when its server answers over Streamable HTTP and either needs no sign-in or offers MCP's
-  OAuth with dynamic client registration and PKCE; services that want an app registered by hand
-  first (Asana, HubSpot, Slack, Box, GitHub) aren't. A connection remembers its entry (`catalog`),
+  there when its server answers over Streamable HTTP and either needs no sign-in, offers MCP's
+  OAuth with dynamic client registration and PKCE, or takes a token the person makes at the
+  service (`signIn: "key"`, with `key: { url, help }`: where to make it and what to give it).
+  GitHub is one of those (`api.githubcopilot.com/mcp/` with a fine-grained token): that's how Amb
+  gets GitHub, since the bots' GitHub App tokens are only for bot runs. Connecting one without a
+  token answers 400 `needs_key` with where to make it; nothing is tried at the service. Services
+  that want an app registered by hand and take no personal token (Asana, HubSpot, Slack, Box)
+  aren't there. A connection remembers its entry (`catalog`),
   which is how the app finds its logo; the app holds the logos, by id. Asking for a service that's
   connected gives that connection back, never a second one.
 - **Clients with a secret.** Most services take Ambient as a client without a secret. Where the
@@ -1148,11 +1153,11 @@ The app's API (with `?team=<slug>` for a team's):
   `{ id, name, slug, host, hasKey, signIn: "key" | "oauth" | "none", needsSignIn, catalog, tools: [{ name, description }], bots: [routine id], amb, addedAt }`;
   never its key, its sign-in or its whole address.
 - `GET /v1/app/mcp-catalog` → `{ "categories": [{ id, name }], "services": [{ id, name, url, host,
-  about, category, signIn: "oauth" | "none", connection: { id, needsSignIn } | null }] }`.
-- `POST /v1/app/mcp-connections` with `{ catalog }` (a service's id), or `{ name, url, key?, header? }`
+  about, category, signIn: "oauth" | "none" | "key", key?: { url, help }, connection: { id, needsSignIn } | null }] }`.
+- `POST /v1/app/mcp-connections` with `{ catalog }` (a service's id; `{ catalog, key }` for a `"key"` one), or `{ name, url, key?, header? }`
   for any other server → 201 `{ "connection" }`, or
   200 `{ "signIn": { "url" } }` when the server wants a sign-in (open the link; the connection is
-  in the list once it's allowed there); 400 `bad_url`, `refused` (the key), `unreachable`,
+  in the list once it's allowed there); 400 `bad_url`, `refused` (the key), `needs_key`, `unreachable`,
   `redirected`.
 - `POST /v1/app/mcp-connections/:id/sign-in` → `{ "signIn": { "url" } }`: a new sign-in for a
   connection whose sign-in ran out.
