@@ -655,7 +655,14 @@ export class SlackApps {
       return { ...r, targets: [...kept, { channel: e.channel!, ts: thread, at: now }].slice(-TARGETS_MAX) };
     });
     void this.call("reactions.add", app.botToken, { channel: e.channel, timestamp: e.ts, name: "eyes" }).catch(() => undefined);
-    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}), ...(lane ? { lane } : {}) });
+    // Its place, for the thread's card in the app: the channel, what the thread is about, a link.
+    let place: { label: string; url?: string } | undefined;
+    if (lane) {
+      const root = earlier[0]?.text ?? said;
+      const link = await this.call<{ permalink?: string }>("chat.getPermalink", app.botToken, { channel: e.channel, message_ts: thread }, { form: true }).catch(() => null);
+      place = { label: `${channelName ? `#${channelName}` : "Slack"} › ${snippet(root)}`, ...(link?.ok && link.permalink ? { url: link.permalink } : {}) };
+    }
+    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}), ...(lane ? { lane } : {}), ...(place ? { place } : {}) });
     const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Slack", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
     if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
     if (out.ok && !out.enabled) await this.post(app.botToken, e.channel, thread, "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", true);
@@ -1049,6 +1056,12 @@ interface SlackEvent {
   channel?: string;
   ts?: string;
   thread_ts?: string;
+}
+
+/** What a thread is about, in a few words (its first message). */
+export function snippet(text: string, max = 48): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t || "a thread";
 }
 
 /** Slack's markup in a message, as plain text for the bot (<url|label>, <#C1|name>, &amp;). */

@@ -107,6 +107,8 @@ beforeAll(async () => {
               { user: "U_LENA", text: "<@U_BOT> can you check again?", ts: "1700000000.7" },
             ],
           });
+        case "chat.getPermalink":
+          return json({ ok: true, permalink: `https://acme.slack.example/archives/${args.channel}/p${String(args.message_ts).replace(".", "")}` });
         case "chat.update":
           return json({ ok: true });
         case "reactions.add":
@@ -447,6 +449,13 @@ describe("a bot's own Slack app", () => {
     expect(start.resume?.message).not.toContain("The thread so far");
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "March too.", sessionId: "thread-session-1" });
     await s.folders.slack!.idle();
+    // In the app, the thread's messages and the bot's answers there carry its place: one card.
+    const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { role: string; text: string; lane: string | null; place: { label: string; url: string | null } | null }[];
+    const inLane = thread.filter((m) => m.lane === "slack:C7:1700000000.5");
+    // The mention in the test before was in this thread too: three asks, three answers.
+    expect(inLane.map((m) => m.role)).toEqual(["user", "bot", "user", "bot", "user", "bot"]);
+    expect(inLane[0]!.place).toEqual({ label: "#anomalies › the export is broken again", url: "https://acme.slack.example/archives/C7/p17000000005" });
+    expect(inLane[1]!.place?.label).toBe("#anomalies › the export is broken again");
     // Its DM is the main lane: it resumes the bot's last conversation, as before.
     await sendEvent({ type: "event_callback", event_id: "EvL3", event: { type: "message", channel_type: "im", user: "U_LENA", text: "one more thing", channel: "D5", ts: "1800000040.0001" } });
     await s.folders.slack!.idle();

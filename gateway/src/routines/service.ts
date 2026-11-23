@@ -425,7 +425,7 @@ export class RoutineService {
   /** A bot's conversation lanes (bots/bot-lanes.ts): a thread's session, resumed when it writes again. */
   botLanes?: import("../bots/bot-lanes.ts").BotLanes;
   /** Which lane a running bot's run is answering (its session is kept for that lane when it ends). */
-  private runLanes = new Map<string, { owner: Owner; routineId: string; lane: string }>();
+  private runLanes = new Map<string, { owner: Owner; routineId: string; lane: string; place?: { label: string; url?: string } }>();
   /** The MCP servers a bot was given (bots/mcp-connections.ts): the name its tools carry and its address at the gateway. */
   mcpFor?: (owner: Owner, routineId: string) => Promise<{ name: string; path: string }[]>;
   /** A bot said something at the end of a run (its result): Slack answers the thread that asked. */
@@ -1181,7 +1181,7 @@ export class RoutineService {
       let sessionId = out.resume.sessionId;
       if (body.lane && this.botLanes) {
         sessionId = (await this.botLanes.get(owner, r.id, body.lane).catch(() => null))?.session ?? null;
-        this.runLanes.set(String(out.runId), { owner, routineId: r.id, lane: body.lane });
+        this.runLanes.set(String(out.runId), { owner, routineId: r.id, lane: body.lane, ...(body.place ? { place: body.place } : {}) });
       }
       resume = {
         sessionId,
@@ -1247,7 +1247,9 @@ export class RoutineService {
     const sealed = clipped ? await this.d.keys.seal(owner, "routine:run", clipped) : undefined;
     // A bot's thread gets the result too (Convex decides whether it's news).
     // Substance of its own (a draft, a report): shown even when the run also asked something.
-    const message = who.bot && clipped ? { ...(await sealMessage(this.d.keys, owner, { text: clipped })), hash: resultHash(clipped), keep: clipped.length > KEEP_RESULT_CHARS } : undefined;
+    // An answer to a thread belongs to that thread's card in the app.
+    const lane = this.runLanes.get(runId);
+    const message = who.bot && clipped ? { ...(await sealMessage(this.d.keys, owner, { text: clipped, ...(lane ? { lane: lane.lane, ...(lane.place ? { place: lane.place } : {}) } : {}) })), hash: resultHash(clipped), keep: clipped.length > KEEP_RESULT_CHARS } : undefined;
     const out = await this.d.control.m(api.routines.finishRun, {
       hostId: host.id as never,
       runId,
@@ -1263,7 +1265,6 @@ export class RoutineService {
     });
     if (!out.ok) throw refused(out.error);
     // The session it answered a thread in is that thread's from now on.
-    const lane = this.runLanes.get(runId);
     if (lane) {
       this.runLanes.delete(runId);
       if (result.sessionId && this.botLanes) await this.botLanes.put(lane.owner, lane.routineId, lane.lane, { session: result.sessionId, seen: this.now() }).catch((err: Error) => console.warn(`[bots] a thread's session wasn't kept: ${err.message}`));

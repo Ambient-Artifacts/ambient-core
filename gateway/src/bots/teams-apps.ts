@@ -25,7 +25,7 @@ import type { MasterKey } from "../crypto.ts";
 import { BotClient, InboundError, type Activity } from "../msteams/botframework.ts";
 import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
-import { splitText } from "./slack-apps.ts";
+import { snippet, splitText } from "./slack-apps.ts";
 import { pngSize, teamsPackage } from "./teams-package.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
 import { download, FILES_BYTES_MAX, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile, type ThreadMessage } from "../channels/channel-files.ts";
@@ -788,7 +788,16 @@ export class TeamsApps {
       return { ...r, targets: [...kept, { conv: target, at: now }].slice(-TARGETS_MAX) };
     });
     void client.typing(a.serviceUrl, target).catch(() => undefined);
-    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}), ...(lane ? { lane } : {}) });
+    // Its place, for the thread's card in the app: the channel, what the thread is about, a link.
+    let place: { label: string; url?: string } | undefined;
+    if (lane) {
+      const channelId = a.channelData?.channel?.id;
+      const group = a.channelData?.team?.aadGroupId;
+      const rootId = root ?? a.id;
+      const url = kind === "channel" && channelId && rootId ? `https://teams.microsoft.com/l/message/${encodeURIComponent(channelId)}/${encodeURIComponent(rootId)}?tenantId=${encodeURIComponent(app.tenantId)}${group ? `&groupId=${encodeURIComponent(group)}` : ""}&parentMessageId=${encodeURIComponent(rootId)}` : undefined;
+      place = { label: `${placeLabel || (kind === "groupChat" ? "Group chat" : "Teams")} › ${snippet(earlier[0]?.text ?? said)}`, ...(url ? { url } : {}) };
+    }
+    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}), ...(lane ? { lane } : {}), ...(place ? { place } : {}) });
     const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Teams", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
     if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
     if (out.ok && !out.enabled) await client.send(a.serviceUrl, target, { text: "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", textFormat: "markdown" });

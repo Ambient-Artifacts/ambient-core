@@ -36,6 +36,9 @@ export interface ThreadMessage {
   fix: ClaudeFix | null;
   /** Files sent with it (attachments.ts), fetched from /v1/app/routines/:id/thread/files/:file. */
   files: FileRef[];
+  /** A Slack or Teams thread it belongs to (its lane): the app shows it as that thread's card. */
+  lane: string | null;
+  place: { label: string; url: string | null } | null;
 }
 
 interface MessageRow {
@@ -128,6 +131,8 @@ export class BotService {
       answered: m.kind === "question" ? m.answeredAt !== null : null,
       fix: claudeFix(m.kind, body.text, computer),
       files: body.files ?? [],
+      lane: body.lane ?? null,
+      place: body.place ? { label: body.place.label, url: body.place.url ?? null } : null,
     };
   }
 
