@@ -455,8 +455,21 @@ export function createApp(deps: AppDeps) {
     answer: (uid, id, answer, via) => answerDecision(uid, id, answer, via),
     teamTurn: (teamId, asker, conversation, text, files) => teamAmb.turn(teamId, asker, conversation, text, files),
   };
+  // A click on a question's button or card (or a reply to it in its thread) answers it as its
+  // owner would in the bot's thread, while that question is still the open one.
+  const answerBotQuestion = async (uid: string, routineId: string, questionId: string, text: string): Promise<"answered" | "gone" | { error: string }> => {
+    const actor = await actorFor(uid);
+    const t = await bots.thread(actor, routineId, 200, { markSeen: false }).catch(() => null);
+    if (!t || t.openQuestion?.id !== questionId) return "gone";
+    try {
+      await bots.post(actor, routineId, text);
+      return "answered";
+    } catch (err) {
+      return { error: (err as Error).message };
+    }
+  };
   // Bots' own Slack apps (docs/bots.md, "Slack"): one app per bot, made by Ambient, one tap to install.
-  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, amb: ambDoors, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
+  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, amb: ambDoors, answer: answerBotQuestion, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
   folders.slack = slack;
   reach.add(slack.ambChannel());
   routines.slackToken = (owner, id) => slack.botToken(owner, id);
@@ -474,19 +487,7 @@ export function createApp(deps: AppDeps) {
         emailOf: async (uid) => (await directory.user(uid))?.email ?? null,
         attachments,
         amb: ambDoors,
-        // A click on a question's card (or a reply to it) answers it as its owner would in the
-        // bot's thread, while that question is still the open one.
-        answer: async (uid, routineId, questionId, text) => {
-          const actor = await actorFor(uid);
-          const t = await bots.thread(actor, routineId, 200, { markSeen: false }).catch(() => null);
-          if (!t || t.openQuestion?.id !== questionId) return "gone";
-          try {
-            await bots.post(actor, routineId, text);
-            return "answered";
-          } catch (err) {
-            return { error: (err as Error).message };
-          }
-        },
+        answer: answerBotQuestion,
         fetchImpl: deps.teamsApps?.fetchImpl ?? deps.fetchImpl,
         login: deps.teamsApps?.login,
         graph: deps.teamsApps?.graph,
@@ -506,7 +507,7 @@ export function createApp(deps: AppDeps) {
     await Promise.all([slack.runStarted(owner, id, runId, hash), teamsApps?.runStarted(owner, id, runId, hash)]);
   };
   bots.onSaid = (owner, id, text, hash, question, files) => {
-    slack.said(owner, id, text, false, { hash }, files?.map((f) => ({ name: f.name, type: f.type, data: f.data })));
+    slack.said(owner, id, text, false, { hash }, files?.map((f) => ({ name: f.name, type: f.type, data: f.data })), question);
     teamsApps?.said(owner, id, text, false, { hash }, question, files?.map((f) => ({ ref: f.ref, data: f.data })));
   };
   bots.onTookSlack = async (owner, id, hash) => {

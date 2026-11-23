@@ -1728,6 +1728,19 @@ export function slackHookRouter(slack: () => SlackApps | undefined): Router {
     });
     res.status(out.status).json(out.body);
   });
+  // A click on a button (a question's answer), signed like the events.
+  r.post("/v1/hooks/slack/:hook/interact", express.raw({ type: "*/*", limit: "1mb" }), async (req, res) => {
+    const sl = slack();
+    const hook = String(req.params.hook);
+    if (!sl) return res.status(404).json({ error: "not_found" });
+    if (!perHook(hook)) return res.status(429).json({ error: "slow_down" });
+    const header = (n: string) => (typeof req.headers[n] === "string" ? (req.headers[n] as string) : undefined);
+    const out = await sl.interact(hook, { signature: header("x-slack-signature"), timestamp: header("x-slack-request-timestamp") }, Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0)).catch((err: Error) => {
+      console.warn(`[slack] a click wasn't handled: ${err.message}`);
+      return { status: 200, body: {} };
+    });
+    res.status(out.status).json(out.body);
+  });
   r.get("/v1/slack/installed", async (req, res) => {
     const sl = slack();
     res.setHeader("cache-control", "no-store");

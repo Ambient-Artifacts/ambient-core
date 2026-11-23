@@ -109,6 +109,26 @@ interface AppRecord {
   newsBroken?: string;
   /** Posts of its own (news), whose threads it listens to. */
   posts?: { channel: string; ts: string; at: number }[];
+  /** Who added it in Ambient: a click on its question's button answers as them. */
+  adderUid?: string;
+  /** Which manifest it has (2: buttons, Slack's interactivity). */
+  manifestV?: number;
+}
+
+/** The manifest's version: an app with an older one is brought up to date before it needs it. */
+const MANIFEST_V = 2;
+/** A question's buttons and replies answer it for this long. */
+const ASK_FOR_MS = 24 * 3600_000;
+
+/** A question of a bot's in a Slack thread, until it's answered. */
+interface Ask {
+  q: string;
+  channel: string;
+  thread: string;
+  /** The message with the buttons, to replace once it's answered. */
+  msgTs?: string;
+  text: string;
+  at: number;
 }
 
 /** A Slack message waiting for its answer: the thread, and the run that took it (once one has). */
@@ -124,6 +144,7 @@ interface Replies {
   targets: Target[];
   /** The bot's current run (its id and its token's hash), so its replies find their threads. */
   run?: { id: string; hash: string };
+  asks?: Ask[];
 }
 
 /** What a hook or an install's state names: the bot and its owner. */
@@ -174,6 +195,8 @@ export class SlackApps {
       now?: () => number;
       /** Amb in Slack: its chat, and whose account a direct message is (channels/amb-doors.ts). */
       amb?: AmbDoorDeps;
+      /** Answers a bot's open question as `uid` (a click on its button, or a reply); "gone" when it isn't open any more. */
+      answer?: (uid: string, routineId: string, questionId: string, text: string) => Promise<"answered" | "gone" | { error: string }>;
     },
   ) {}
 
@@ -413,6 +436,7 @@ export class SlackApps {
     const hook = this.sign("hook", refOf(owner, bot.id));
     const out = await this.call("apps.manifest.update", ws.token, { app_id: app.appId, manifest: JSON.stringify(this.manifest(app.name, hook, bot.id)) }, { form: true });
     if (!out.ok) throw new SlackError("slack_failed", `Slack didn't update the app (${out.error ?? "no reason"}).`, 502);
+    await this.put(owner, APP, bot.id, { ...app, manifestV: MANIFEST_V });
     return { url: this.installUrl(owner, bot.id, uid, app, ws.teamId) };
   }
 
@@ -429,6 +453,8 @@ export class SlackApps {
       oauth_config: { redirect_urls: [`${this.base()}/v1/slack/installed`], scopes: { bot: scopesFor(id) } },
       settings: {
         event_subscriptions: { request_url: `${this.base()}/v1/hooks/slack/${hook}`, bot_events: SLACK_EVENTS },
+        // Buttons (a question's answers): Slack sends the click here, signed like the events.
+        interactivity: { is_enabled: true, request_url: `${this.base()}/v1/hooks/slack/${hook}/interact` },
         org_deploy_enabled: false,
         socket_mode_enabled: false,
         token_rotation_enabled: false,
@@ -451,7 +477,7 @@ export class SlackApps {
         const why = out.errors?.map((e) => `${e.pointer ?? ""} ${e.message ?? ""}`.trim()).join("; ");
         throw new SlackError("slack_failed", `Slack didn't make the app (${out.error ?? "no reason"}${why ? `: ${why}` : ""}).`, 502);
       }
-      app = { appId: out.app_id, clientId: out.credentials.client_id, clientSecret: out.credentials.client_secret, signingSecret: out.credentials.signing_secret, name: bot.name };
+      app = { appId: out.app_id, clientId: out.credentials.client_id, clientSecret: out.credentials.client_secret, signingSecret: out.credentials.signing_secret, name: bot.name, adderUid: uid, manifestV: MANIFEST_V };
       await this.put(owner, APP, bot.id, app);
     }
     return { url: this.installUrl(owner, bot.id, uid, app, ws.teamId), installed: false };
@@ -480,7 +506,7 @@ export class SlackApps {
       { form: true },
     );
     if (!out.ok || !out.access_token || !out.bot_user_id || !out.authed_user?.id) throw new SlackError("slack_failed", `Slack didn't install it (${out.error ?? "no reason"}). Tap Add to Slack again in Ambient.`, 502);
-    const done: AppRecord = { ...app, botToken: out.access_token, botUserId: out.bot_user_id, teamId: out.team?.id, teamName: out.team?.name, installer: out.authed_user.id, scopes: (out.scope ?? "").split(",").map((x) => x.trim()).filter(Boolean) };
+    const done: AppRecord = { ...app, adderUid: app.adderUid ?? s.u, botToken: out.access_token, botUserId: out.bot_user_id, teamId: out.team?.id, teamName: out.team?.name, installer: out.authed_user.id, scopes: (out.scope ?? "").split(",").map((x) => x.trim()).filter(Boolean) };
     await this.put(owner, APP, s.r, done);
     return { name: app.name, botUserId: out.bot_user_id, teamName: out.team?.name ?? null };
   }
@@ -587,6 +613,13 @@ export class SlackApps {
       return;
     }
     const text = (e.text ?? "").replace(new RegExp(`<@${app.botUserId}>`, "g"), "").trim();
+    // A reply where its question waits answers it (Answered, or refused with the reason: done).
+    if (text && !(e.files ?? []).length) {
+      const r = await this.get<Replies>(owner, REPLY, routineId);
+      const now = this.now();
+      const waiting = [...(r?.asks ?? [])].reverse().find((x) => x.channel === e.channel && x.thread === thread && now - x.at < ASK_FOR_MS);
+      if (waiting && (await this.answerAsk(owner, routineId, app, waiting, slackToPlain(text), await this.nameOf(app.botToken, e.user))) !== "gone") return;
+    }
     const offered = (e.files ?? []).filter((f) => f.mode !== "tombstone" && f.mode !== "external");
     if (!text && !offered.length) return;
     const who = await this.nameOf(app.botToken, e.user);
@@ -617,6 +650,105 @@ export class SlackApps {
     const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Slack", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
     if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
     if (out.ok && !out.enabled) await this.post(app.botToken, e.channel, thread, "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", true);
+  }
+
+  // ---- buttons (Slack's interactivity) ----
+
+  /** An app from before buttons gets today's manifest (no new permission, so no Allow). */
+  private async ensureManifest(owner: Owner, routineId: string, app: AppRecord): Promise<AppRecord> {
+    if ((app.manifestV ?? 1) >= MANIFEST_V) return app;
+    const ws = await this.configToken(owner).catch(() => null);
+    if (!ws) return app;
+    const out = await this.call("apps.manifest.update", ws.token, { app_id: app.appId, manifest: JSON.stringify(this.manifest(app.name, this.sign("hook", refOf(owner, routineId)), routineId)) }, { form: true });
+    if (!out.ok) {
+      console.warn(`[slack] couldn't bring ${app.name}'s app up to date: ${out.error}`);
+      return app;
+    }
+    const next = { ...app, manifestV: MANIFEST_V };
+    await this.put(owner, APP, routineId, next);
+    return next;
+  }
+
+  /** A click on a button (`hook` from its interactivity URL), checked with that app's signing secret. */
+  async interact(hook: string, headers: { signature?: string; timestamp?: string }, raw: Buffer): Promise<{ status: number; body: unknown }> {
+    const ref = this.verify<Ref>("hook", hook);
+    if (!ref) return { status: 404, body: { error: "not_found" } };
+    const owner = ownerOf(ref);
+    const app = await this.get<AppRecord>(owner, APP, ref.r);
+    if (!app?.botToken) return { status: 404, body: { error: "not_found" } };
+    if (!this.signed(app.signingSecret, headers, raw)) return { status: 401, body: { error: "bad_signature" } };
+    let payload: SlackAction;
+    try {
+      payload = JSON.parse(new URLSearchParams(raw.toString("utf8")).get("payload") ?? "{}") as SlackAction;
+    } catch {
+      return { status: 400, body: { error: "bad_request" } };
+    }
+    if (payload.type !== "block_actions") return { status: 200, body: {} };
+    this.track(this.onAction(owner, ref.r, app, payload));
+    return { status: 200, body: {} };
+  }
+
+  private async onAction(owner: Owner, routineId: string, app: AppRecord, p: SlackAction): Promise<void> {
+    const token = app.botToken!;
+    const action = p.actions?.[0];
+    const channel = p.channel?.id ?? p.container?.channel_id;
+    const msgTs = p.message?.ts ?? p.container?.message_ts;
+    const user = p.user?.id;
+    if (!action?.value || !channel || !msgTs || !user) return;
+    let v: { k?: string; q?: string; d?: string; o?: string };
+    try {
+      v = JSON.parse(action.value) as typeof v;
+    } catch {
+      return;
+    }
+    const thread = p.message?.thread_ts ?? msgTs;
+    const say = (text: string) => this.post(token, channel, thread === msgTs && p.channel?.id?.startsWith("D") ? "" : thread, text, true).catch(() => undefined);
+    const question = p.message?.text ?? "";
+    // Amb's decision (its own app): answered as whoever clicked, by their email.
+    if (v.k === "d" && routineId === AMB && v.d && v.o) {
+      const email = await this.emailOf(token, user);
+      const account = email && this.d.amb ? await this.d.amb.accountByEmail(owner, email).catch(() => null) : null;
+      if (!account || !this.d.amb?.answer) return void (await say("I don't know who you are in Ambient, so I can't take that answer."));
+      try {
+        await this.d.amb.answer(account.uid, v.d, v.o, "slack");
+        await this.replaceButtons(token, channel, msgTs, question, v.o, account.name);
+      } catch (err) {
+        if (/already answered|no such decision/i.test((err as Error).message)) await this.replaceButtons(token, channel, msgTs, question, null, null);
+        else await say((err as Error).message);
+      }
+      return;
+    }
+    // A bot's question: only the person who added it answers.
+    if (v.k === "q" && v.q && v.o) {
+      if (!app.installer || user !== app.installer) return void (await say(app.installer ? `Only <@${app.installer}> answers my questions.` : "I don't know who added me, so I can't take answers."));
+      const ask: Ask = { q: v.q, channel, thread, msgTs, text: question, at: this.now() };
+      await this.answerAsk(owner, routineId, app, ask, v.o, await this.nameOf(token, user));
+    }
+  }
+
+  /** Answers the bot's question as the person who added it; the buttons then say what was answered. */
+  private async answerAsk(owner: Owner, routineId: string, app: AppRecord, ask: Ask, text: string, by: string): Promise<"answered" | "gone" | "failed"> {
+    const token = app.botToken!;
+    const out = app.adderUid && this.d.answer ? await this.d.answer(app.adderUid, routineId, ask.q, text).catch((err: Error) => ({ error: err.message })) : { error: "This bot doesn't know whose answers to take. Add it to Slack again from Ambient." };
+    if (out === "answered" || out === "gone") {
+      await this.replies(owner, routineId, (cur) => ({ ...cur, asks: (cur.asks ?? []).filter((x) => x.q !== ask.q) }));
+      if (ask.msgTs) await this.replaceButtons(token, ask.channel, ask.msgTs, ask.text, out === "answered" ? text : null, out === "answered" ? by : null);
+      return out;
+    }
+    await this.post(token, ask.channel, ask.thread, out.error, true).catch(() => undefined);
+    return "failed";
+  }
+
+  private async replaceButtons(token: string, channel: string, ts: string, question: string, answer: string | null, by: string | null): Promise<void> {
+    const out = await this.call("chat.update", token, { channel, ts, text: question || "Question", blocks: answeredBlocks(question, answer, by) });
+    if (!out.ok) console.warn(`[slack] couldn't replace the buttons: ${out.error}`);
+  }
+
+  /** A question with its answers as buttons, into a thread (or a DM with `thread` ""). Returns the message's ts. */
+  private async postQuestion(token: string, channel: string, thread: string, text: string, choices: string[], value: (choice: string) => Record<string, string>): Promise<string | undefined> {
+    const out = await this.call<{ ts?: string }>("chat.postMessage", token, { channel, ...(thread ? { thread_ts: thread } : {}), text: text.slice(0, 3000), blocks: questionBlocks(text, choices, value), unfurl_links: false });
+    if (!out.ok) throw new SlackError("slack_failed", `Slack didn't take the question (${out.error ?? "no reason"}).`, 502);
+    return out.ts;
   }
 
   // ---- Amb in Slack (channels/amb-doors.ts) ----
@@ -703,6 +835,13 @@ export class SlackApps {
         if (text.trim()) await this.post(found.token, found.l.channel, "", text);
         for (const f of opts.files ?? []) await this.upload(found.app, found.l.channel, "", { name: f.name, type: f.type, data: f.bytes.toString("base64") });
       },
+      // Amb's decisions with their answers as buttons; a click files the answer as that person.
+      ask: async (uid: string, text: string, question: { decisionId: string; choices: string[] }) => {
+        const found = await link(uid);
+        if (!found) throw new SlackError("not_linked", "Not linked to Slack.", 400);
+        const app = await this.ensureManifest(ownerOf(found.l), AMB, found.app);
+        await this.postQuestion(app.botToken ?? found.token, found.l.channel, "", text, question.choices, (o) => ({ k: "d", d: question.decisionId, o }));
+      },
     };
   }
 
@@ -754,7 +893,7 @@ export class SlackApps {
     await before;
     try {
       const raw = await this.get<Replies>(owner, REPLY, routineId);
-      const cur: Replies = { targets: Array.isArray(raw?.targets) ? raw.targets : [], ...(raw?.run ? { run: raw.run } : {}) };
+      const cur: Replies = { targets: Array.isArray(raw?.targets) ? raw.targets : [], ...(raw?.run ? { run: raw.run } : {}), ...(Array.isArray(raw?.asks) ? { asks: raw.asks } : {}) };
       const next = change(cur);
       if (next) await this.put(owner, REPLY, routineId, next);
       return next ?? cur;
@@ -770,7 +909,7 @@ export class SlackApps {
    */
   async runStarted(owner: Owner, routineId: string, runId: string, tokenHash: string): Promise<void> {
     if (!(await this.get<AppRecord>(owner, APP, routineId))?.botToken) return;
-    await this.replies(owner, routineId, (r) => ({ run: { id: runId, hash: tokenHash }, targets: r.targets.map((t) => (t.runId ? t : { ...t, runId })) }));
+    await this.replies(owner, routineId, (r) => ({ ...r, run: { id: runId, hash: tokenHash }, targets: r.targets.map((t) => (t.runId ? t : { ...t, runId })) }));
   }
 
   /** A running bot took Slack messages from its thread mid-run (its inbox): they're its to answer. */
@@ -788,7 +927,7 @@ export class SlackApps {
    * run is named by its id (its result) or its token's hash (while it runs). Its end (`final`)
    * closes its threads.
    */
-  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }, files: { name: string; type: string; data: string }[] = []): void {
+  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }, files: { name: string; type: string; data: string }[] = [], question?: { id: string; text: string; choices: string[] }): void {
     this.track(
       (async () => {
         const r = await this.get<Replies>(owner, REPLY, routineId);
@@ -799,12 +938,49 @@ export class SlackApps {
         if (!mine.length) return;
         const app = await this.get<AppRecord>(owner, APP, routineId);
         if (!app?.botToken) return;
-        if (text.trim()) for (const t of mine) await this.post(app.botToken, t.channel, t.ts, text);
+        if (question) {
+          // Its question with its answers as buttons; a click or a reply in the thread answers it.
+          const current = await this.ensureManifest(owner, routineId, app);
+          const asks: Ask[] = [];
+          for (const t of mine) {
+            const msgTs = await this.postQuestion(current.botToken!, t.channel, t.ts, question.text, question.choices, (o) => ({ k: "q", q: question.id, o }));
+            asks.push({ q: question.id, channel: t.channel, thread: t.ts, ...(msgTs ? { msgTs } : {}), text: question.text, at: this.now() });
+          }
+          const now = this.now();
+          await this.replies(owner, routineId, (cur) => ({ ...cur, asks: [...(cur.asks ?? []).filter((a) => now - a.at < ASK_FOR_MS), ...asks].slice(-TARGETS_MAX) }));
+        } else if (text.trim()) for (const t of mine) await this.post(app.botToken, t.channel, t.ts, text);
         for (const f of files) for (const t of mine) await this.upload(app, t.channel, t.ts, f);
-        if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}) }));
+        if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}), ...(cur.asks ? { asks: cur.asks } : {}) }));
       })(),
     );
   }
+}
+
+/** A click on a button, as Slack sends it. */
+interface SlackAction {
+  type?: string;
+  user?: { id?: string };
+  channel?: { id?: string };
+  container?: { channel_id?: string; message_ts?: string };
+  message?: { ts?: string; thread_ts?: string; text?: string };
+  actions?: { action_id?: string; value?: string }[];
+}
+
+/** A question as Block Kit: the text, a button per answer, and that a reply in the thread works too. */
+export function questionBlocks(text: string, choices: string[], value: (choice: string) => Record<string, string>): unknown[] {
+  return [
+    { type: "section", text: { type: "mrkdwn", text: markdownToSlack(text).slice(0, 3000) } },
+    ...(choices.length ? [{ type: "actions", elements: choices.slice(0, 25).map((c, i) => ({ type: "button", action_id: `choice-${i}`, text: { type: "plain_text", text: c.slice(0, 75) }, value: JSON.stringify(value(c)).slice(0, 2000) })) }] : []),
+    { type: "context", elements: [{ type: "mrkdwn", text: choices.length ? "Or reply in this thread." : "Reply in this thread." }] },
+  ];
+}
+
+/** The question once it's answered (`answer` null: answered elsewhere, or no longer asked). */
+export function answeredBlocks(question: string, answer: string | null, by: string | null): unknown[] {
+  return [
+    ...(question ? [{ type: "section", text: { type: "mrkdwn", text: markdownToSlack(question).slice(0, 3000) } }] : []),
+    { type: "context", elements: [{ type: "mrkdwn", text: answer ? `✓ *${answer.replace(/[*_~`]/g, "").slice(0, 300)}*${by ? ` · ${by}` : ""}` : "Already answered, or no longer asked." }] },
+  ];
 }
 
 /** A person's Slack door to Amb: whose workspace app, and their direct message with it. */

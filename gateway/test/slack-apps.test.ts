@@ -97,6 +97,8 @@ beforeAll(async () => {
           return json({ ok: true, upload_url: `${slackBase}/upload/F1`, file_id: "F1" });
         case "files.completeUploadExternal":
           return json({ ok: true, files: [{ id: "F1" }] });
+        case "chat.update":
+          return json({ ok: true });
         case "reactions.add":
         case "apps.manifest.delete":
         case "apps.icon.set":
@@ -402,6 +404,49 @@ describe("a bot's own Slack app", () => {
     expect(uploads).toEqual([{ bytes: PNG.length, type: "image/png" }]);
     expect(calls.find((c) => c.method === "files.completeUploadExternal")!.args).toMatchObject({ channel_id: "D1", thread_ts: "1800000011.0001" });
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Done." });
+    await s.folders.slack!.idle();
+  });
+
+  it("asks with buttons: a click answers as its owner, the buttons then say so; a reply in the thread answers too", async () => {
+    await sendEvent({ type: "event_callback", event_id: "EvQ1", event: { type: "message", channel_type: "im", user: "U_LENA", text: "ship the release?", channel: "D5", ts: "1800000030.0001" } });
+    await s.folders.slack!.idle();
+    const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string };
+    const q = String((await hostCall(start.runToken, "POST", "/v1/bot/ask", { question: "Ship **2.3** today?", choices: ["Yes", "Not yet"] })).json.id);
+    await s.folders.slack!.idle();
+    // Bots from before buttons get today's manifest first (no Allow needed).
+    expect((manifest.settings as { interactivity?: { is_enabled: boolean; request_url: string } }).interactivity).toMatchObject({ is_enabled: true });
+    const interactPath = new URL((manifest.settings as { interactivity: { request_url: string } }).interactivity.request_url).pathname;
+    const question = posts().at(-1)!;
+    expect(question.args).toMatchObject({ channel: "D5", thread_ts: "1800000030.0001" });
+    const blocks = question.args.blocks as unknown as { type: string; elements?: { text: { text: string }; value: string }[] }[];
+    expect(blocks[1]!.elements!.map((e) => e.text.text)).toEqual(["Yes", "Not yet"]);
+    const click = async (user: string, value: string) => {
+      const body = new URLSearchParams({ payload: JSON.stringify({ type: "block_actions", user: { id: user }, channel: { id: "D5" }, message: { ts: "1800000031.0001", thread_ts: "1800000030.0001", text: "Ship 2.3 today?" }, actions: [{ action_id: "choice-0", value }] }) }).toString();
+      const ts = String(Math.floor(Date.now() / 1000));
+      const sig = `v0=${createHmac("sha256", SIGNING).update(`v0:${ts}:${body}`).digest("hex")}`;
+      const res = await fetch(`${s.origin}${interactPath}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-slack-signature": sig, "x-slack-request-timestamp": ts }, body });
+      await s.folders.slack!.idle();
+      return res.status;
+    };
+    // Someone else clicks: told who answers; still open.
+    expect(await click("U_MAX", blocks[1]!.elements![0]!.value)).toBe(200);
+    expect(String(posts().at(-1)!.args.text)).toContain("Only <@U_LENA> answers my questions");
+    expect((await hostCall(start.runToken, "GET", `/v1/bot/questions/${q}`)).json).toEqual({ answer: null, author: null });
+    // Lena clicks Yes.
+    expect(await click("U_LENA", blocks[1]!.elements![0]!.value)).toBe(200);
+    expect((await hostCall(start.runToken, "GET", `/v1/bot/questions/${q}`)).json).toEqual({ answer: "Yes", author: "Lena Vogel" });
+    const update = calls.filter((c) => c.method === "chat.update").at(-1)!;
+    expect(JSON.stringify(update.args)).toContain("✓ *Yes*");
+    // A forged click: refused.
+    const forged = await fetch(`${s.origin}${interactPath}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-slack-signature": "v0=00", "x-slack-request-timestamp": String(Math.floor(Date.now() / 1000)) }, body: "payload=%7B%7D" });
+    expect(forged.status).toBe(401);
+    // The next question, answered by a reply in the thread.
+    const q2 = String((await hostCall(start.runToken, "POST", "/v1/bot/ask", { question: "Release notes channel?", choices: [] })).json.id);
+    await s.folders.slack!.idle();
+    await sendEvent({ type: "event_callback", event_id: "EvQ2", event: { type: "message", channel_type: "im", user: "U_LENA", text: "#releases", channel: "D5", ts: "1800000032.0001", thread_ts: "1800000030.0001" } });
+    await s.folders.slack!.idle();
+    expect((await hostCall(start.runToken, "GET", `/v1/bot/questions/${q2}`)).json).toEqual({ answer: "#releases", author: "Lena Vogel" });
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Shipped." });
     await s.folders.slack!.idle();
   });
 
