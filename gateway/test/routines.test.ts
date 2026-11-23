@@ -156,6 +156,10 @@ describe("routines from the app", () => {
   it("run now: the computer sees the request, the run is manual, and its summary comes back", async () => {
     expect((await appCall(s, lena, "POST", `/v1/app/routines/${id}/run`)).status).toBe(200);
     expect((await hostCall(host, "POST", "/v1/host/sync", {})).json.routines).toMatchObject([{ id, runRequested: true }]);
+    // The app is told since when, so it can stop showing "working" for a run that never starts.
+    const asked = ((await appCall(s, lena, "GET", "/v1/app/routines")).json.routines as { id: string; runRequested: boolean; runRequestedAt: number | null }[]).find((r) => r.id === id);
+    expect(asked?.runRequested).toBe(true);
+    expect(typeof asked?.runRequestedAt).toBe("number");
 
     const start = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
     expect(start.json).toMatchObject({ run: { trigger: "manual" }, routine: { id, folder: "~/git/blog" } });
@@ -163,6 +167,7 @@ describe("routines from the app", () => {
     expect((start.json.routine as { prompt: string }).prompt).toContain("Draft next Monday's post.");
     const runId = (start.json.run as { id: string }).id;
     expect((await hostCall(host, "POST", "/v1/host/sync", {})).json.routines).toMatchObject([{ id, runRequested: false }]);
+    expect(((await appCall(s, lena, "GET", "/v1/app/routines")).json.routines as { id: string; runRequestedAt: number | null }[]).find((r) => r.id === id)?.runRequestedAt).toBeNull();
 
     const done = await hostCall(host, "POST", `/v1/host/runs/${runId}`, { status: "succeeded", exitCode: 0, summary: "Opened PR #2.", costUsd: 0.81, turns: 12 });
     expect(done.status).toBe(204);
