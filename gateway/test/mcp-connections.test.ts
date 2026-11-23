@@ -438,6 +438,7 @@ describe("services by name: the catalogue", () => {
       { id: "docs", name: "Docs", url: `${base()}/open`, about: "Looks things up", category: "look-up", signIn: "none" },
       { id: "issues", name: "Issues", url: `${base()}/oauth?for=issues`, about: "Issues and projects", category: "work", signIn: "oauth" },
       { id: "designs", name: "Designs", url: `${base()}/oauth?for=designs`, about: "Designs and comments", category: "work", signIn: "oauth" },
+      { id: "code", name: "Code", url: `${serviceUrl}?for=code`, about: "Repos and pull requests", category: "build", signIn: "key", key: { url: "https://code.example.com/tokens", help: "A token with read and write." } },
     ];
   });
 
@@ -454,8 +455,8 @@ describe("services by name: the catalogue", () => {
 
   it("lists the services in their categories, each with the owner's connection when there is one", async () => {
     const cat = await catalog();
-    expect(cat.categories.map((c) => c.id)).toEqual(["work", "look-up"]);
-    expect(cat.services.map((x) => [x.id, x.signIn, x.connection])).toEqual([["docs", "none", null], ["issues", "oauth", null], ["designs", "oauth", null]]);
+    expect(cat.categories.map((c) => c.id)).toEqual(["work", "build", "look-up"]);
+    expect(cat.services.map((x) => [x.id, x.signIn, x.connection])).toEqual([["docs", "none", null], ["issues", "oauth", null], ["designs", "oauth", null], ["code", "key", null]]);
     expect(cat.services[0]!.host).toBe(new URL(serviceUrl).host);
   });
 
@@ -470,6 +471,28 @@ describe("services by name: the catalogue", () => {
     expect((await catalog()).services[0]!.connection).toEqual({ id: c.id, needsSignIn: false });
     expect((await call("POST", "/v1/app/mcp-connections", { catalog: "nope" })).status).toBe(404);
     expect((await call("POST", "/v1/app/mcp-connections", {})).status).toBe(400);
+  });
+
+  it("a service reached with a token: without one it says where to make it, with one it connects", async () => {
+    const hitsBefore = hits;
+    const none = await call("POST", "/v1/app/mcp-connections", { catalog: "code" });
+    expect(none.status).toBe(400);
+    expect(none.json).toMatchObject({ error: "needs_key" });
+    expect(String(none.json.message)).toContain("https://code.example.com/tokens");
+    // Nothing was tried at the service, and no sign-in was offered.
+    expect(hits).toBe(hitsBefore);
+    expect((await call("POST", "/v1/app/mcp-connections", { catalog: "code", key: "wrong" })).json).toMatchObject({ error: "refused" });
+    const out = await call("POST", "/v1/app/mcp-connections", { catalog: "code", key: KEY });
+    expect(out.status).toBe(201);
+    expect(out.json.connection).toMatchObject({ name: "Code", catalog: "code", signIn: "key", hasKey: true });
+    expect(JSON.stringify(out.json)).not.toContain(KEY);
+    expect((await catalog()).services.find((x) => x.id === "code")!.connection).toMatchObject({ needsSignIn: false });
+  });
+
+  it("the real catalogue's token services say where the token is made", () => {
+    const keyed = CATALOG.filter((x) => x.signIn === "key");
+    expect(keyed.map((x) => x.id)).toContain("github");
+    for (const x of keyed) expect(x.key?.url.startsWith("https://") && x.key.help.length > 0, x.id).toBe(true);
   });
 
   it("a service with a sign-in connects by its id and one visit to its page", async () => {

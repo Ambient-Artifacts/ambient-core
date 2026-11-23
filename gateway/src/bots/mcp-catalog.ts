@@ -1,9 +1,11 @@
 // The services Ambient offers by name (docs/bots.md, "MCP connections"): each one's own MCP
 // server, so connecting it is one tap and a sign-in at the service, with no address to find. An
-// entry is here when its server answers over Streamable HTTP and either needs no sign-in or
-// offers MCP's OAuth with dynamic client registration and PKCE (checked against each server's
-// public metadata, 2026-11-21). Services that want an app registered by hand first (Asana,
-// HubSpot, Slack, Box, GitHub) aren't here; anything else connects by its address.
+// entry is here when its server answers over Streamable HTTP and either needs no sign-in, offers
+// MCP's OAuth with dynamic client registration and PKCE (checked against each server's public
+// metadata, 2026-11-21), or takes a token the person makes at the service (`signIn: "key"`, with
+// where to make it: GitHub, 2026-11-23). Services that want an app registered by hand first and
+// take no personal token (Asana, HubSpot, Slack, Box) aren't here; anything else connects by its
+// address.
 //
 // The app holds the logos, by `id`; a new entry shows with its initials until the app has one.
 
@@ -17,8 +19,13 @@ export interface CatalogEntry {
   /** What a bot can do with it, in a few words. */
   about: string;
   category: CatalogCategory;
-  /** "oauth": a sign-in at the service's own page; "none": open to anyone. */
-  signIn: "oauth" | "none";
+  /**
+   * "oauth": a sign-in at the service's own page; "none": open to anyone; "key": a token the
+   * person makes at the service and pastes (`key` says where and what).
+   */
+  signIn: "oauth" | "none" | "key";
+  /** For "key": the page where the token is made, and what to give it, in a sentence. */
+  key?: { url: string; help: string };
 }
 
 export const CATEGORIES: { id: CatalogCategory; name: string }[] = [
@@ -31,6 +38,8 @@ export const CATEGORIES: { id: CatalogCategory; name: string }[] = [
 ];
 
 const e = (id: string, name: string, url: string, about: string, category: CatalogCategory, signIn: "oauth" | "none" = "oauth"): CatalogEntry => ({ id, name, url, about, category, signIn });
+/** A service reached with a token the person makes there (its OAuth needs an app registered by hand). */
+const k = (id: string, name: string, url: string, about: string, category: CatalogCategory, key: { url: string; help: string }): CatalogEntry => ({ id, name, url, about, category, signIn: "key", key });
 
 export const CATALOG: CatalogEntry[] = [
   e("notion", "Notion", "https://mcp.notion.com/mcp", "Read, search and write pages and databases", "work"),
@@ -60,6 +69,11 @@ export const CATALOG: CatalogEntry[] = [
   e("square", "Square", "https://mcp.squareup.com/mcp", "Orders, payments and catalog", "money"),
   e("ramp", "Ramp", "https://ramp-mcp-remote.ramp.com/mcp", "Spend, cards and bills", "money"),
 
+  // GitHub's own MCP server: its OAuth takes no clients registered on the fly, a personal token works.
+  k("github", "GitHub", "https://api.githubcopilot.com/mcp/", "Repos, issues and pull requests", "build", {
+    url: "https://github.com/settings/personal-access-tokens/new",
+    help: "A fine-grained token for the repos it may work on, with Contents, Issues and Pull requests set to read and write (read only if it should only look).",
+  }),
   e("sentry", "Sentry", "https://mcp.sentry.dev/mcp", "Errors, issues and releases", "build"),
   e("vercel", "Vercel", "https://mcp.vercel.com", "Projects, deployments and logs", "build"),
   e("netlify", "Netlify", "https://netlify-mcp.netlify.app/mcp", "Sites, deploys and forms", "build"),
