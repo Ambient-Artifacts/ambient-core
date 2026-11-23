@@ -441,6 +441,19 @@ export function createApp(deps: AppDeps) {
         verifier: deps.teamsApps?.verifier ?? new InboundVerifier(deps.teamsApps?.fetchImpl ?? deps.fetchImpl),
         startNow: (hostId, routineId) => computers.start(hostId, routineId),
         emailOf: async (uid) => (await directory.user(uid))?.email ?? null,
+        // A click on a question's card (or a reply to it) answers it as its owner would in the
+        // bot's thread, while that question is still the open one.
+        answer: async (uid, routineId, questionId, text) => {
+          const actor = await actorFor(uid);
+          const t = await bots.thread(actor, routineId, 200, { markSeen: false }).catch(() => null);
+          if (!t || t.openQuestion?.id !== questionId) return "gone";
+          try {
+            await bots.post(actor, routineId, text);
+            return "answered";
+          } catch (err) {
+            return { error: (err as Error).message };
+          }
+        },
         fetchImpl: deps.teamsApps?.fetchImpl ?? deps.fetchImpl,
         login: deps.teamsApps?.login,
         graph: deps.teamsApps?.graph,
@@ -458,9 +471,9 @@ export function createApp(deps: AppDeps) {
   routines.onBotRunStarted = async (owner, id, runId, hash) => {
     await Promise.all([slack.runStarted(owner, id, runId, hash), teamsApps?.runStarted(owner, id, runId, hash)]);
   };
-  bots.onSaid = (owner, id, text, hash) => {
+  bots.onSaid = (owner, id, text, hash, question) => {
     slack.said(owner, id, text, false, { hash });
-    teamsApps?.said(owner, id, text, false, { hash });
+    teamsApps?.said(owner, id, text, false, { hash }, question);
   };
   bots.onTookSlack = async (owner, id, hash) => {
     await Promise.all([slack.runTook(owner, id, hash), teamsApps?.runTook(owner, id, hash)]);

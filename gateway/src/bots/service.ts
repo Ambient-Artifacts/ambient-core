@@ -64,7 +64,8 @@ export class BotService {
   /** What happened in a bot's thread, for automations (docs/bots.md, "Automations"). */
   onEvent?: (e: AutomationEvent) => void;
   /** The bot said something while it runs (a reply, a question): Slack answers the thread that asked. */
-  onSaid?: (owner: Owner, routineId: string, text: string, tokenHash: string) => void;
+  /** With `question`: the run asks its owner (ask_owner); its id and choices (Teams shows a card). */
+  onSaid?: (owner: Owner, routineId: string, text: string, tokenHash: string, question?: { id: string; text: string; choices: string[]; details?: string }) => void;
   /** The run (its token's hash) took Slack messages mid-run: they're its to answer. */
   onTookSlack?: (owner: Owner, routineId: string, tokenHash: string) => Promise<void>;
 
@@ -248,7 +249,7 @@ export class BotService {
     const sealed = await sealMessage(this.d.routines.keys, owner, { text, choices: picks, ...(work ? { details: work } : {}), files });
     const out = await this.d.routines.control.m(api.bots.ask, { runTokenHash, iv: sealed.iv, ct: sealed.ct, now: this.now() });
     if (!out.ok) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
-    this.onSaid?.(owner, String(out.routineId), [text, ...(picks.length ? [picks.map((p) => `• ${p}`).join("\n")] : []), "(Answer here or in Ambient.)"].join("\n\n"), runTokenHash);
+    this.onSaid?.(owner, String(out.routineId), [text, ...(picks.length ? [picks.map((p) => `• ${p}`).join("\n")] : []), "(Answer here or in Ambient.)"].join("\n\n"), runTokenHash, { id: String(out.questionId), text, choices: picks, ...(work ? { details: work } : {}) });
     this.onEvent?.({ kind: "bot_asked", uid: String(out.notify), routineId: String(out.routineId), bot: who.name, text, questionId: String(out.questionId) });
     // Ambient looks first (DecisionService): it answers for the owner, or brings it to them.
     if (this.d.onQuestion) {

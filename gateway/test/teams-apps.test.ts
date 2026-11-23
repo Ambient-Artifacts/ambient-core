@@ -30,6 +30,7 @@ let catalogStatus = 201;
 let armNotYet = 1;
 let published: Map<string, Buffer> | null = null;
 let sent: { conv: string; body: Record<string, unknown> }[] = [];
+let updated: { conv: string; id: string; body: Record<string, unknown> }[] = [];
 
 const idToken = (claims: Record<string, unknown>) => `x.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.y`;
 const json = (status: number, v: unknown) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
@@ -92,6 +93,10 @@ const microsoft: typeof fetch = async (input, init) => {
     if (auth !== "Bearer bot-token") return json(401, {});
     const conv = decodeURIComponent(url.pathname.split("/")[4]!);
     const b = JSON.parse(String(body)) as Record<string, unknown>;
+    if (method === "PUT") {
+      updated.push({ conv, id: decodeURIComponent(url.pathname.split("/")[6]!), body: b });
+      return json(200, { id: "updated" });
+    }
     if (b.type === "message") sent.push({ conv, body: b });
     return json(201, { id: `msg-${sent.length}` });
   }
@@ -271,6 +276,49 @@ describe("a bot's own Teams app", () => {
     await hostCall(host, "POST", `/v1/host/runs/${next.run.id}`, { status: "succeeded", summary: "Nightly audit done." });
     await s.folders.teams!.idle();
     expect(sent).toHaveLength(before);
+  });
+
+  it("asks with a card: a button answers as its owner, the card shows the answer, others can't", async () => {
+    sent = [];
+    await send(activity({ text: "can we ship the release?" }));
+    const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string };
+    const asked = await hostCall(start.runToken, "POST", "/v1/bot/ask", { question: "Ship 2.3 today?", choices: ["Yes", "Not yet"], details: "PR #12 is green." });
+    expect(asked.status, JSON.stringify(asked.json)).toBe(200);
+    const q = String(asked.json.id);
+    await s.folders.teams!.idle();
+    const card = sent.at(-1)!;
+    expect(card.conv).toBe("a:dm-lena");
+    const content = (card.body.attachments as { contentType: string; content: { body: { text?: string }[]; actions: { title: string; data: Record<string, string> }[] } }[])[0]!;
+    expect(content.contentType).toBe("application/vnd.microsoft.card.adaptive");
+    expect(content.content.body[0]!.text).toBe("Ship 2.3 today?");
+    expect(content.content.body[1]!.text).toBe("PR #12 is green.");
+    expect(content.content.actions.map((x) => x.title)).toEqual(["Yes", "Not yet", "Send"]);
+    expect(content.content.actions[0]!.data).toEqual({ ambient: "answer", q, o: "Yes" });
+    const cardId = `msg-${sent.length}`;
+    // Someone else clicks: told who answers, and it stays open.
+    await send(activity({ from: { id: "29:x", name: "Max", aadObjectId: STRANGER }, value: { ambient: "answer", q, o: "Yes" }, replyToId: cardId }));
+    expect(String(sent.at(-1)!.body.text)).toBe("Only Lena Vogel answers my questions.");
+    expect((await hostCall(start.runToken, "GET", `/v1/bot/questions/${q}`)).json).toEqual({ answer: null, author: null });
+    // Its owner clicks Yes: the run gets the answer, and the card says so.
+    updated = [];
+    await send(activity({ value: { ambient: "answer", q, o: "Yes" }, replyToId: cardId }));
+    expect((await hostCall(start.runToken, "GET", `/v1/bot/questions/${q}`)).json).toEqual({ answer: "Yes", author: "Lena Vogel" });
+    expect(updated[0]).toMatchObject({ conv: "a:dm-lena", id: cardId });
+    expect(JSON.stringify(updated[0]!.body)).toContain("✓ Yes");
+    expect(JSON.stringify(updated[0]!.body)).not.toContain("Action.Submit");
+    // A second click: already answered, nothing posted to the bot.
+    await send(activity({ value: { ambient: "answer", q, o: "Not yet" }, replyToId: cardId }));
+    expect(JSON.stringify(updated.at(-1)!.body)).toContain("Already answered");
+    expect((await hostCall(start.runToken, "GET", `/v1/bot/questions/${q}`)).json).toEqual({ answer: "Yes", author: "Lena Vogel" });
+    // A typed reply in the chat answers the next question.
+    const again = await hostCall(start.runToken, "POST", "/v1/bot/ask", { question: "Which channel for the notes?", choices: [] });
+    const q2 = String(again.json.id);
+    await s.folders.teams!.idle();
+    await send(activity({ text: "<p>#releases please</p>" }));
+    expect((await hostCall(start.runToken, "GET", `/v1/bot/questions/${q2}`)).json).toEqual({ answer: "#releases please", author: "Lena Vogel" });
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Shipped." });
+    await s.folders.teams!.idle();
+    expect(sent.at(-1)).toMatchObject({ conv: "a:dm-lena", body: { text: "Shipped." } });
   });
 
   it("posts news in the channel it was mentioned in, and hears replies under that post", async () => {

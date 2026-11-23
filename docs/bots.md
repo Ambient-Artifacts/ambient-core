@@ -1117,6 +1117,13 @@ registration and a free Azure Bot (F0) in the company's Azure subscription
 - **The answer.** As in Slack: only the run that took a Teams message answers it, into that chat
   or channel thread (`<channel>;messageid=<root>`), as Markdown, in parts of at most 3,500
   characters.
+- **Its questions as cards.** When a run that took a Teams message asks its owner (`ask_owner`),
+  the question goes to that chat or thread as an Adaptive Card: the question, what it's about, a
+  button per choice and a box to write something else ("Send"). A click (`Action.Submit`, data
+  `{ ambient: "answer", q, o }`) or a reply typed in that chat or thread answers it as its owner
+  would in the bot's thread (the person who added it in Ambient), while it's still the open
+  question; the card is then replaced by the answer ("✓ Yes · Answered by Lena"), or by "Already
+  answered" when it was settled elsewhere. Anyone else who clicks is told who answers.
 - **News of its own.** One channel, chosen by its owner (`PUT /v1/app/routines/:id/teams/news`
   `{ "channel": id | null }`; by default the first channel it was mentioned in), posted with its
   tool `post_to_teams` as a new post; replies under that post reach it.
@@ -1128,7 +1135,7 @@ registration and a free Azure Bot (F0) in the company's Azure subscription
   its app registration, and forgets it here.
 - **Where it's kept.** Sealed records (kinds `teams:tenant`, `teams:app`, `teams:reply`), nothing
   new in Convex. The bot's secret never leaves the gateway.
-- **Not yet:** decisions as Adaptive Cards with buttons (a question goes as text), files, Amb in
+- **Not yet:** decisions Amb brings to the person (they reach the app and iMessage), files, Amb in
   Teams, a new secret before the two years are up, and installing it for the owner without the
   Add tap.
 

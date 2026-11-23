@@ -35,6 +35,9 @@ const STATE_TTL_MS = 15 * 60_000;
 /** An answer goes back to Teams only for a message this recent (a later scheduled run doesn't). */
 const REPLY_FOR_MS = 6 * 60 * 60_000;
 const TARGETS_MAX = 10;
+/** A question's card answers for this long (a run waits a few minutes, then is woken by the answer). */
+const ASK_FOR_MS = 24 * 3600_000;
+const ADAPTIVE_CARD = "application/vnd.microsoft.card.adaptive";
 const CHANNELS_MAX = 20;
 const POSTS_MAX = 30;
 /** A bot's secret lasts two years (Microsoft's longest); a new one is made well before it runs out. */
@@ -120,6 +123,8 @@ interface AppRecord {
   /** Who it takes instructions from: an Entra user (object id) and their name. */
   installer?: string;
   installerName?: string;
+  /** Their Ambient account: a click on a question's card answers as them. */
+  adderUid?: string;
   /** Where Teams is reached for this tenant (the serviceUrl of the last activity). */
   serviceUrl?: string;
   /** Set when its owner first opened a chat with it. */
@@ -139,9 +144,20 @@ interface Target {
   runId?: string;
 }
 
+/** A question of the bot's in a Teams chat or thread (a card), until it's answered. */
+interface Ask {
+  q: string;
+  conv: string;
+  /** The card's message, to replace once it's answered. */
+  activityId?: string;
+  text: string;
+  at: number;
+}
+
 interface Replies {
   targets: Target[];
   run?: { id: string; hash: string };
+  asks?: Ask[];
 }
 
 interface Ref {
@@ -193,6 +209,8 @@ export class TeamsApps {
       startNow?: (hostId: string, routineId: string) => void;
       /** A person's sign-in email: who a bot they add listens to in Teams is found by it. */
       emailOf?: (uid: string) => Promise<string | null>;
+      /** Answers a bot's open question as `uid` (a click on its card, or a reply); "gone" when it isn't open any more. */
+      answer?: (uid: string, routineId: string, questionId: string, text: string) => Promise<"answered" | "gone" | { error: string }>;
       fetchImpl?: typeof fetch;
       /** Microsoft's addresses (tests: stand-ins). */
       login?: string;
@@ -519,8 +537,9 @@ export class TeamsApps {
         if (r.status === 200 && r.json.id) who = { id: r.json.id, name: r.json.displayName ?? email };
       }
       who ??= { id: t.admin.oid, name: t.admin.name };
-      await save({ ...app, installer: who.id, installerName: who.name });
+      await save({ ...app, installer: who.id, installerName: who.name, adderUid: uid });
     }
+    if (!app.adderUid) await save({ ...app, adderUid: uid });
     return { url: this.openUrl(app), chatUrl: `https://teams.microsoft.com/l/chat/0/0?users=28:${app.appId}`, ready: true, installed: !!app.installedAt, installer: app.installerName! };
   }
 
@@ -700,9 +719,22 @@ export class TeamsApps {
     }
     if (a.type !== "message") return;
     if (a.from.id === a.recipient.id) return;
+    // A click on a question's card: the answer, from its owner only.
+    const submit = cardSubmit(a.value);
+    if (submit) {
+      await this.onCardAnswer(owner, routineId, app, a, submit);
+      return;
+    }
     const mentioned = (a.entities ?? []).some((e) => e.type === "mention" && e.mentioned?.id === a.recipient.id);
     const [conv, root] = a.conversation.id.split(";messageid=") as [string, string | undefined];
     const underOwnPost = kind === "channel" && !mentioned && !!root && (app.posts ?? []).some((p) => p.conv === conv && p.id === root);
+    // A reply where its question waits (the chat, or the card's thread) answers it.
+    const waiting = a.from.aadObjectId === app.installer ? await this.waitingAsk(owner, routineId, a.conversation.id) : null;
+    if (waiting) {
+      const typed = teamsToPlain(a.text ?? "");
+      // Answered (or refused, with the reason said): done. Gone: it was a new message after all.
+      if (typed && (await this.answerAsk(owner, routineId, app, waiting, typed, a.from.name ?? "you", a.serviceUrl)) !== "gone") return;
+    }
     if (kind !== "personal" && !mentioned && !underOwnPost) return;
     if (kind === "channel" && mentioned) app = await this.remember(owner, routineId, app, conv, a).catch(() => app);
     const target = kind === "channel" ? `${conv};messageid=${root ?? a.id}` : a.conversation.id;
@@ -733,6 +765,46 @@ export class TeamsApps {
     if (out.ok && !out.enabled) await client.send(a.serviceUrl, target, { text: "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", textFormat: "markdown" });
   }
 
+  /** The question waiting in this chat or thread, if any (24 hours at most). */
+  private async waitingAsk(owner: Owner, routineId: string, conv: string): Promise<Ask | null> {
+    const r = await this.get<Replies>(owner, REPLY, routineId);
+    const now = this.now();
+    return [...(r?.asks ?? [])].reverse().find((x) => x.conv === conv && now - x.at < ASK_FOR_MS) ?? null;
+  }
+
+  /** A click on a card's button (or its "Send"): checked, answered, and the card shows the answer. */
+  private async onCardAnswer(owner: Owner, routineId: string, app: AppRecord, a: Activity, submit: { q: string; text: string }): Promise<void> {
+    const client = this.client(app);
+    if (!app.installer || a.from.aadObjectId !== app.installer) {
+      await client.send(a.serviceUrl, a.conversation.id, { text: `Only ${app.installerName ?? "the person who added me"} answers my questions.`, textFormat: "markdown" }).catch(() => undefined);
+      return;
+    }
+    const r = await this.get<Replies>(owner, REPLY, routineId);
+    const ask = (r?.asks ?? []).find((x) => x.q === submit.q && x.conv === a.conversation.id) ?? { q: submit.q, conv: a.conversation.id, ...(a.replyToId ? { activityId: a.replyToId } : {}), text: "", at: this.now() };
+    if (!ask.activityId && a.replyToId) ask.activityId = a.replyToId;
+    if (!submit.text) return;
+    await this.answerAsk(owner, routineId, app, ask, submit.text, a.from.name ?? "you", a.serviceUrl);
+  }
+
+  /** Answers the question as the bot's owner; the card then says what was answered, or that it's gone. */
+  private async answerAsk(owner: Owner, routineId: string, app: AppRecord, ask: Ask, text: string, by: string, serviceUrl: string): Promise<"answered" | "gone" | "failed"> {
+    const client = this.client(app);
+    const uid = app.adderUid;
+    const out = uid && this.d.answer ? await this.d.answer(uid, routineId, ask.q, text).catch((err: Error) => ({ error: err.message })) : { error: "This bot doesn't know whose answers to take. Add it to Teams again from Ambient." };
+    const forget = () => this.replies(owner, routineId, (cur) => ({ ...cur, asks: (cur.asks ?? []).filter((x) => !(x.q === ask.q && x.conv === ask.conv)) }));
+    if (out === "answered" || out === "gone") {
+      await forget();
+      if (ask.activityId) {
+        const card = out === "answered" ? answeredCard(ask.text, text, by) : answeredCard(ask.text, null, null);
+        await client.update(serviceUrl, ask.conv, ask.activityId, { attachments: [{ contentType: ADAPTIVE_CARD, content: card }] }).catch(() => undefined);
+      }
+      if (out === "gone" && !ask.activityId) await client.send(serviceUrl, ask.conv, { text: "That question is already answered.", textFormat: "markdown" }).catch(() => undefined);
+      return out;
+    }
+    await client.send(serviceUrl, ask.conv, { text: out.error, textFormat: "markdown" }).catch(() => undefined);
+    return "failed";
+  }
+
   /** A channel it was mentioned in: kept with its name and team, so its news can go there. */
   private async remember(owner: Owner, routineId: string, app: AppRecord, conv: string, a: Activity): Promise<AppRecord> {
     const id = a.channelData?.channel?.id ?? conv;
@@ -757,7 +829,7 @@ export class TeamsApps {
     await before;
     try {
       const raw = await this.get<Replies>(owner, REPLY, routineId);
-      const cur: Replies = { targets: Array.isArray(raw?.targets) ? raw.targets : [], ...(raw?.run ? { run: raw.run } : {}) };
+      const cur: Replies = { targets: Array.isArray(raw?.targets) ? raw.targets : [], ...(raw?.run ? { run: raw.run } : {}), ...(Array.isArray(raw?.asks) ? { asks: raw.asks } : {}) };
       const next = change(cur);
       if (next) await this.put(owner, REPLY, routineId, next);
       return next ?? cur;
@@ -770,7 +842,7 @@ export class TeamsApps {
   /** A bot's run starts: the Teams messages waiting for an answer are now its to answer. */
   async runStarted(owner: Owner, routineId: string, runId: string, tokenHash: string): Promise<void> {
     if (!(await this.get<AppRecord>(owner, APP, routineId))?.catalogId) return;
-    await this.replies(owner, routineId, (r) => ({ run: { id: runId, hash: tokenHash }, targets: r.targets.map((t) => (t.runId ? t : { ...t, runId })) }));
+    await this.replies(owner, routineId, (r) => ({ ...r, run: { id: runId, hash: tokenHash }, targets: r.targets.map((t) => (t.runId ? t : { ...t, runId })) }));
   }
 
   /** A running bot took Teams messages from its thread mid-run (its inbox). */
@@ -783,7 +855,7 @@ export class TeamsApps {
   }
 
   /** A run said something: it goes to the Teams threads that run took, and nowhere else. */
-  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }): void {
+  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }, question?: { id: string; text: string; choices: string[]; details?: string }): void {
     this.track(
       (async () => {
         const r = await this.get<Replies>(owner, REPLY, routineId);
@@ -795,8 +867,17 @@ export class TeamsApps {
         const app = await this.get<AppRecord>(owner, APP, routineId);
         if (!app?.secret || !app.serviceUrl) return;
         const client = this.client(app);
-        if (text.trim()) for (const t of mine) for (const part of splitText(text)) await client.send(app.serviceUrl, t.conv, { text: part, textFormat: "markdown" });
-        if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}) }));
+        if (question) {
+          // Its question as a card: a button per choice, and a box to write something else.
+          const asks: Ask[] = [];
+          for (const t of mine) {
+            const activityId = await client.send(app.serviceUrl, t.conv, { attachments: [{ contentType: ADAPTIVE_CARD, content: questionCard(question) }], summary: `${app.name} asks: ${question.text}`.slice(0, 200) });
+            asks.push({ q: question.id, conv: t.conv, ...(activityId ? { activityId } : {}), text: question.text, at: this.now() });
+          }
+          const now = this.now();
+          await this.replies(owner, routineId, (cur) => ({ ...cur, asks: [...(cur.asks ?? []).filter((a) => now - a.at < ASK_FOR_MS && !mine.some((t) => t.conv === a.conv)), ...asks].slice(-TARGETS_MAX) }));
+        } else if (text.trim()) for (const t of mine) for (const part of splitText(text)) await client.send(app.serviceUrl, t.conv, { text: part, textFormat: "markdown" });
+        if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}), ...(cur.asks ? { asks: cur.asks } : {}) }));
       })(),
     );
   }
@@ -833,4 +914,46 @@ export function teamsToPlain(text: string): string {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** What a card's button sends back (Action.Submit's data, with the text box's value). */
+function cardSubmit(value: unknown): { q: string; text: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { ambient?: unknown; q?: unknown; o?: unknown; other?: unknown };
+  if (v.ambient !== "answer" || typeof v.q !== "string" || v.q.length > 64) return null;
+  const text = typeof v.o === "string" && v.o.trim() ? v.o.trim() : typeof v.other === "string" ? v.other.trim() : "";
+  return { q: v.q, text: text.slice(0, 4000) };
+}
+
+/** A bot's question as an Adaptive Card: the question, what it's about, a button per choice, and a box. */
+export function questionCard(q: { id: string; text: string; choices: string[]; details?: string }): Record<string, unknown> {
+  const body: Record<string, unknown>[] = [{ type: "TextBlock", text: q.text, wrap: true, weight: "Bolder" }];
+  if (q.details) body.push({ type: "TextBlock", text: q.details.length > 1500 ? `${q.details.slice(0, 1500)}…` : q.details, wrap: true, isSubtle: true, size: "Small" });
+  body.push({ type: "Input.Text", id: "other", placeholder: q.choices.length ? "Or write something else" : "Your answer", isMultiline: true, maxLength: 4000 });
+  return {
+    type: "AdaptiveCard",
+    $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+    version: "1.5",
+    body,
+    actions: [
+      ...q.choices.map((c) => ({ type: "Action.Submit", title: c, data: { ambient: "answer", q: q.id, o: c } })),
+      { type: "Action.Submit", title: "Send", data: { ambient: "answer", q: q.id } },
+    ],
+  };
+}
+
+/** The card once it's answered (`answer` null: answered elsewhere, or no longer asked). */
+export function answeredCard(question: string, answer: string | null, by: string | null): Record<string, unknown> {
+  return {
+    type: "AdaptiveCard",
+    $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+    version: "1.5",
+    body: [
+      ...(question ? [{ type: "TextBlock", text: question, wrap: true, weight: "Bolder" }] : []),
+      answer
+        ? { type: "TextBlock", text: `✓ ${answer}`, wrap: true, color: "Good" }
+        : { type: "TextBlock", text: "Already answered, or no longer asked.", wrap: true, isSubtle: true },
+      ...(answer && by ? [{ type: "TextBlock", text: `Answered by ${by}`, wrap: true, isSubtle: true, size: "Small" }] : []),
+    ],
+  };
 }
