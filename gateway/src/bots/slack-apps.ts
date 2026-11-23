@@ -187,6 +187,8 @@ export class SlackApps {
       origin: string;
       /** A bot's computer starts its run now (not at its next check-in). */
       startNow?: (hostId: string, routineId: string) => void;
+      /** A bot's conversation lanes: a thread's session, and how far it has read (bots/bot-lanes.ts). */
+      lanes?: import("./bot-lanes.ts").BotLanes;
       /** Where files sent with a message are kept (the bot's thread). */
       attachments?: Attachments;
       fetchImpl?: typeof fetch;
@@ -639,8 +641,12 @@ export class SlackApps {
     );
     const files: FileRef[] = incoming.length && this.d.attachments ? await this.d.attachments.save(owner, { routineId }, incoming) : [];
     const said = text ? slackToPlain(text) : `sent ${files.length === 1 ? "a file" : "files"}`;
-    // The thread it's in: what people said there before, also to each other.
-    const before = e.thread_ts && e.thread_ts !== e.ts ? await this.threadLines(app, e.channel, e.thread_ts, e.ts) : "";
+    // A channel thread is a lane of its own (a DM is the main lane): resumed when it writes again,
+    // with only what people said there since it last answered; new, with the whole thread so far.
+    const lane = dm ? undefined : `slack:${e.channel}:${thread}`;
+    const known = lane ? await this.d.lanes?.get(owner, routineId, lane).catch(() => null) : null;
+    const earlier = e.thread_ts && e.thread_ts !== e.ts ? await this.threadMessages(app, e.channel, e.thread_ts, e.ts) : [];
+    const before = known?.session ? threadSoFar(earlier.filter((m) => m.at > (known.seen ?? 0) && m.who !== "you"), "Said in the thread since you last answered:") : threadSoFar(earlier);
     const body = `${who} wrote to you on Slack (${where}): ${said}${leftLine(left)}${before}\n\n(Your answer goes back to that Slack thread on its own.)`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();
@@ -649,7 +655,7 @@ export class SlackApps {
       return { ...r, targets: [...kept, { channel: e.channel!, ts: thread, at: now }].slice(-TARGETS_MAX) };
     });
     void this.call("reactions.add", app.botToken, { channel: e.channel, timestamp: e.ts, name: "eyes" }).catch(() => undefined);
-    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}) });
+    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}), ...(lane ? { lane } : {}) });
     const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Slack", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
     if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
     if (out.ok && !out.enabled) await this.post(app.botToken, e.channel, thread, "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", true);

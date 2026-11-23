@@ -430,6 +430,32 @@ describe("a bot's own Slack app", () => {
     await s.folders.slack!.idle();
   });
 
+  it("keeps a thread as a lane: the next mention there resumes that thread's session, with only what's new", async () => {
+    await sendEvent({ type: "event_callback", event_id: "EvL1", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> and the totals?", channel: "C7", ts: "1700000000.8", thread_ts: "1700000000.5" } });
+    await s.folders.slack!.idle();
+    let start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; resume: { sessionId: string | null; message: string } | null };
+    // A thread it answered before lanes has no session of its own yet: it starts fresh, with the thread.
+    expect(start.resume?.sessionId ?? null).toBe(null);
+    expect(start.resume?.message).toContain("The thread so far");
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Totals look right.", sessionId: "thread-session-1" });
+    await s.folders.slack!.idle();
+    await sendEvent({ type: "event_callback", event_id: "EvL2", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> thanks, and March?", channel: "C7", ts: "1700000000.9", thread_ts: "1700000000.5" } });
+    await s.folders.slack!.idle();
+    start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as typeof start;
+    expect(start.resume?.sessionId).toBe("thread-session-1");
+    expect(start.resume?.message).toContain("thanks, and March?");
+    expect(start.resume?.message).not.toContain("The thread so far");
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "March too.", sessionId: "thread-session-1" });
+    await s.folders.slack!.idle();
+    // Its DM is the main lane: it resumes the bot's last conversation, as before.
+    await sendEvent({ type: "event_callback", event_id: "EvL3", event: { type: "message", channel_type: "im", user: "U_LENA", text: "one more thing", channel: "D5", ts: "1800000040.0001" } });
+    await s.folders.slack!.idle();
+    start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as typeof start;
+    expect(start.resume?.message).toContain("one more thing");
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Ok." });
+    await s.folders.slack!.idle();
+  });
+
   it("asks with buttons: a click answers as its owner, the buttons then say so; a reply in the thread answers too", async () => {
     await sendEvent({ type: "event_callback", event_id: "EvQ1", event: { type: "message", channel_type: "im", user: "U_LENA", text: "ship the release?", channel: "D5", ts: "1800000030.0001" } });
     await s.folders.slack!.idle();

@@ -39,6 +39,7 @@ import { SlackApps } from "./bots/slack-apps.ts";
 import { TeamsApps } from "./bots/teams-apps.ts";
 import { TeamAmb } from "./bots/team-amb.ts";
 import { SessionBackups } from "./bots/session-backups.ts";
+import { BotLanes } from "./bots/bot-lanes.ts";
 import { sha256Hex } from "./crypto.ts";
 import type { AmbDoorDeps } from "./channels/amb-doors.ts";
 import { BotFolder } from "./bots/folder.ts";
@@ -287,6 +288,9 @@ export function createApp(deps: AppDeps) {
   // Ambient, the master bot: Claude with the person's own MCP server, every scope, as /mcp gives it.
   // Ambient on a person's own computer (their Claude plan) when one is connected; the server's key otherwise.
   const computers = new AmbientComputers({ pats, scopes: MCP_SCOPES });
+  // A bot's conversation lanes (bots/bot-lanes.ts): each Slack or Teams thread resumes its own session.
+  const botLanes = new BotLanes({ control, keys: routines.keys });
+  routines.botLanes = botLanes;
   // Lanes' sessions, backed up (product/conversations.md): a wiped or replaced computer resumes them.
   const sessionBackups = new SessionBackups({ control, keys: routines.keys });
   startNow = (hostId, routineId) => computers.start(hostId, routineId);
@@ -488,7 +492,7 @@ export function createApp(deps: AppDeps) {
     }
   };
   // Bots' own Slack apps (docs/bots.md, "Slack"): one app per bot, made by Ambient, one tap to install.
-  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, amb: ambDoors, answer: answerBotQuestion, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
+  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, amb: ambDoors, answer: answerBotQuestion, lanes: botLanes, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
   folders.slack = slack;
   reach.add(slack.ambChannel());
   routines.slackToken = (owner, id) => slack.botToken(owner, id);
@@ -506,6 +510,7 @@ export function createApp(deps: AppDeps) {
         emailOf: async (uid) => (await directory.user(uid))?.email ?? null,
         attachments,
         amb: ambDoors,
+        lanes: botLanes,
         answer: answerBotQuestion,
         fetchImpl: deps.teamsApps?.fetchImpl ?? deps.fetchImpl,
         login: deps.teamsApps?.login,

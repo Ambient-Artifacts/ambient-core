@@ -1197,6 +1197,12 @@ serves depends on where it's written to, decided in code, never by the model:
   the same path before it resumes. A computer may only send or fetch a lane it was given a turn of
   in the last 2 hours. Forget chat removes the person's backups.
 - **"new chat"** typed alone in iMessage, Slack or Teams starts over, as New chat in the app.
+- **A bot's threads are lanes too** (`gateway/src/bots/bot-lanes.ts`). A message from a Slack or
+  Teams channel thread (or a group chat) carries its lane; the run it starts resumes that lane's
+  session (none yet: fresh, with handoffs and the whole thread), and when the run ends its session
+  is kept for the lane, with how far it has read, so the next message there brings only what's new.
+  The app and DMs are the bot's main lane (the bot's last conversation, as before). Scheduled runs
+  and GitHub wake-ups are work: fresh with handoffs, no lane.
 - **A thread is read as a thread.** Tagged inside a Slack or Teams thread, a bot or Amb gets what
   was said there before, also what people said to each other (Slack: `conversations.replies`;
   Teams: Graph with the bot's own app and its resource-specific consent), by name, its own

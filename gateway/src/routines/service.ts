@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { BotInput, ModelChoice, RoutineSchedule, botLook, botSettings, modelRuntime, botState, describeSchedule, nextRun, onCalendar, storedModel, unseenNews, type BotColor, type BotSettings, type BotShape, type BotState, type BotWear } from "@brain/spec";
-import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix } from "../bots/messages.ts";
+import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix, type MessageBody } from "../bots/messages.ts";
 import { api, type Control } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Team } from "../directory.ts";
@@ -422,6 +422,10 @@ export class RoutineService {
   slackFor?: (owner: Owner, routineId: string) => Promise<{ handle: string; workspace: string | null; news: string | null } | null>;
   /** What a bot in Teams is told at the start of a run: its name and where its news goes; null: not in Teams. */
   teamsFor?: (owner: Owner, routineId: string) => Promise<{ handle: string; news: string | null } | null>;
+  /** A bot's conversation lanes (bots/bot-lanes.ts): a thread's session, resumed when it writes again. */
+  botLanes?: import("../bots/bot-lanes.ts").BotLanes;
+  /** Which lane a running bot's run is answering (its session is kept for that lane when it ends). */
+  private runLanes = new Map<string, { owner: Owner; routineId: string; lane: string }>();
   /** The MCP servers a bot was given (bots/mcp-connections.ts): the name its tools carry and its address at the gateway. */
   mcpFor?: (owner: Owner, routineId: string) => Promise<{ name: string; path: string }[]>;
   /** A bot said something at the end of a run (its result): Slack answers the thread that asked. */
@@ -1170,10 +1174,17 @@ export class RoutineService {
     }
     let resume: { sessionId: string | null; message: string; files?: FileRef[] } | null = null;
     if (r.bot && out.resume) {
-      const body = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch(() => ({ text: "", files: undefined }));
+      const body: MessageBody = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch((): MessageBody => ({ text: "" }));
       const who = out.resume.authorName ?? "Your owner";
+      // A thread's message resumes that thread's session (or starts fresh with handoffs); the main
+      // lane's (the app, a DM) resumes the bot's last conversation, as before lanes.
+      let sessionId = out.resume.sessionId;
+      if (body.lane && this.botLanes) {
+        sessionId = (await this.botLanes.get(owner, r.id, body.lane).catch(() => null))?.session ?? null;
+        this.runLanes.set(String(out.runId), { owner, routineId: r.id, lane: body.lane });
+      }
       resume = {
-        sessionId: out.resume.sessionId,
+        sessionId,
         message:
           out.resume.kind === "answer"
             ? `${who} answered your question: ${body.text}`
@@ -1251,6 +1262,12 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    // The session it answered a thread in is that thread's from now on.
+    const lane = this.runLanes.get(runId);
+    if (lane) {
+      this.runLanes.delete(runId);
+      if (result.sessionId && this.botLanes) await this.botLanes.put(lane.owner, lane.routineId, lane.lane, { session: result.sessionId, seen: this.now() }).catch((err: Error) => console.warn(`[bots] a thread's session wasn't kept: ${err.message}`));
+    }
     // A bot's handoff and memory for its next run (docs/bots.md, "How a bot wakes up").
     if (who.bot && this.d.folder) {
       const w = who as unknown as { routineId: string; startedAt: number; name: string };

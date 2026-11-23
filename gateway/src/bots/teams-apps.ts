@@ -219,6 +219,8 @@ export class TeamsApps {
       startNow?: (hostId: string, routineId: string) => void;
       /** A person's sign-in email: who a bot they add listens to in Teams is found by it. */
       emailOf?: (uid: string) => Promise<string | null>;
+      /** A bot's conversation lanes: a thread's session, and how far it has read (bots/bot-lanes.ts). */
+      lanes?: import("./bot-lanes.ts").BotLanes;
       /** Where files sent with a message are kept (the bot's thread), and read back for a link. */
       attachments?: Attachments;
       /** Answers a bot's open question as `uid` (a click on its card, or a reply); "gone" when it isn't open any more. */
@@ -774,7 +776,11 @@ export class TeamsApps {
     const { files: incoming, left } = await takeFiles(offered);
     const files: FileRef[] = incoming.length && this.d.attachments ? await this.d.attachments.save(owner, { routineId }, incoming) : [];
     const said = text || `sent ${files.length === 1 ? "a file" : "files"}`;
-    const before = kind === "channel" && root ? await this.threadLines(app, a, root) : "";
+    // A channel thread or group chat is a lane of its own (a direct chat is the main lane).
+    const lane = kind === "personal" ? undefined : `teams:${target}`;
+    const known = lane ? await this.d.lanes?.get(owner, routineId, lane).catch(() => null) : null;
+    const earlier = kind === "channel" && root ? await this.threadMessages(app, a, root) : [];
+    const before = known?.session ? threadSoFar(earlier.filter((m) => m.at > (known.seen ?? 0) && m.who !== "you"), "Said in the thread since you last answered:") : threadSoFar(earlier);
     const body = `${who} wrote to you on Microsoft Teams (${where}): ${said}${leftLine(left)}${before}\n\n(Your answer goes back to that Teams thread on its own.)`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();
@@ -782,7 +788,7 @@ export class TeamsApps {
       return { ...r, targets: [...kept, { conv: target, at: now }].slice(-TARGETS_MAX) };
     });
     void client.typing(a.serviceUrl, target).catch(() => undefined);
-    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}) });
+    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}), ...(lane ? { lane } : {}) });
     const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Teams", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
     if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
     if (out.ok && !out.enabled) await client.send(a.serviceUrl, target, { text: "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", textFormat: "markdown" });
