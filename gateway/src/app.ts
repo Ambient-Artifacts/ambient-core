@@ -32,10 +32,11 @@ import { EventHub, PollingRevisionSource, Revisions, type RevisionSource } from 
 import { hostRouter } from "./routines/route.ts";
 import { BotService } from "./bots/service.ts";
 import { AmbientChat } from "./bots/ambient.ts";
-import { ambientHostRouter, botRunRouter, githubHookRouter, linqHookRouter, slackHookRouter } from "./bots/route.ts";
+import { ambientHostRouter, botRunRouter, githubHookRouter, linqHookRouter, slackHookRouter, teamsHookRouter } from "./bots/route.ts";
 import { GitHubEvents } from "./bots/github.ts";
 import { GitHubApps } from "./bots/github-apps.ts";
 import { SlackApps } from "./bots/slack-apps.ts";
+import { TeamsApps } from "./bots/teams-apps.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
@@ -110,6 +111,8 @@ export interface AppDeps {
   githubFetch?: typeof fetch;
   /** Tests: bots' Slack apps against a stand-in Slack Web API. */
   slack?: { apiBase?: string; fetchImpl?: typeof fetch };
+  /** Tests: bots' Teams apps against a stand-in Microsoft (sign-in, Graph, Azure, Bot Framework). */
+  teamsApps?: { fetchImpl?: typeof fetch; login?: string; graph?: string; arm?: string; verifier?: import("./bots/teams-apps.ts").ActivityVerifier; retryMs?: number };
   /** Tests: MCP servers on 127.0.0.1 over http may be connected. */
   mcpConnections?: { allowLocal?: boolean };
   /** Tests: Amb's iMessage line against a stand-in Linq API. */
@@ -427,10 +430,41 @@ export function createApp(deps: AppDeps) {
   folders.slack = slack;
   routines.slackToken = (owner, id) => slack.botToken(owner, id);
   routines.slackFor = (owner, id) => slack.forRun(owner, id);
-  routines.onBotSaid = (owner, id, text, final, runId) => slack.said(owner, id, text, final, { id: runId });
-  routines.onBotRunStarted = (owner, id, runId, hash) => slack.runStarted(owner, id, runId, hash);
-  bots.onSaid = (owner, id, text, hash) => slack.said(owner, id, text, false, { hash });
-  bots.onTookSlack = (owner, id, hash) => slack.runTook(owner, id, hash);
+  // Bots' own Microsoft Teams apps (docs/bots.md, "Microsoft Teams"): made in the company's own tenant.
+  const teamsApps = config.teamsApps
+    ? new TeamsApps({
+        control,
+        keys: routineKeys,
+        master: config.masterKey,
+        origin: config.origin,
+        config: config.teamsApps,
+        verifier: deps.teamsApps?.verifier ?? new InboundVerifier(deps.teamsApps?.fetchImpl ?? deps.fetchImpl),
+        startNow: (hostId, routineId) => computers.start(hostId, routineId),
+        emailOf: async (uid) => (await directory.user(uid))?.email ?? null,
+        fetchImpl: deps.teamsApps?.fetchImpl ?? deps.fetchImpl,
+        login: deps.teamsApps?.login,
+        graph: deps.teamsApps?.graph,
+        arm: deps.teamsApps?.arm,
+        retryMs: deps.teamsApps?.retryMs,
+      })
+    : undefined;
+  folders.teams = teamsApps;
+  routines.teamsFor = teamsApps ? (owner, id) => teamsApps.forRun(owner, id) : undefined;
+  // A bot's words go to the Slack and Teams threads its run took (each knows its own).
+  routines.onBotSaid = (owner, id, text, final, runId) => {
+    slack.said(owner, id, text, final, { id: runId });
+    teamsApps?.said(owner, id, text, final, { id: runId });
+  };
+  routines.onBotRunStarted = async (owner, id, runId, hash) => {
+    await Promise.all([slack.runStarted(owner, id, runId, hash), teamsApps?.runStarted(owner, id, runId, hash)]);
+  };
+  bots.onSaid = (owner, id, text, hash) => {
+    slack.said(owner, id, text, false, { hash });
+    teamsApps?.said(owner, id, text, false, { hash });
+  };
+  bots.onTookSlack = async (owner, id, hash) => {
+    await Promise.all([slack.runTook(owner, id, hash), teamsApps?.runTook(owner, id, hash)]);
+  };
   if (!deps.ambient?.noHeartbeat) {
     heartbeat.start();
     automations.start();
@@ -444,6 +478,7 @@ export function createApp(deps: AppDeps) {
   app.use(botRunRouter({ bots, history: folders.history, wakes }));
   app.use(githubHookRouter(() => folders.github, () => folders.githubApp));
   app.use(slackHookRouter(() => folders.slack));
+  app.use(teamsHookRouter(() => folders.teams));
   app.use(linqHookRouter(() => folders.imessage));
   app.use(mcpSignInRouter(() => folders.mcp));
   app.use(mcpRelayRouter({ connections: () => folders.mcp, control, ambUid: (token) => computers.uidOfToken(token), version: VERSION }));

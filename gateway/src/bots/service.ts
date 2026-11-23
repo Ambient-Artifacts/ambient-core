@@ -311,8 +311,8 @@ export class BotService {
       const body = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => null);
       if (body?.text) messages.push({ text: body.text, who: m.authorName ?? (m.role === "ambient" ? "Ambient" : "Your owner"), at: m.createdAt });
     }
-    // A Slack message among them: this run answers it in Slack.
-    if (this.onTookSlack && out.messages.some((m) => m.authorName === "Slack")) {
+    // A Slack or Teams message among them: this run answers it there.
+    if (this.onTookSlack && out.messages.some((m) => m.authorName === "Slack" || m.authorName === "Teams")) {
       const who = await this.d.routines.control.q(api.bots.runOwner, { runTokenHash });
       if (who) await this.onTookSlack(owner, String(who.routineId), runTokenHash).catch((err: Error) => console.warn(`[slack] ${err.message}`));
     }

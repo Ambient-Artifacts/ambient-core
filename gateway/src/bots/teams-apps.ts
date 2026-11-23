@@ -1,0 +1,836 @@
+// A bot's own Microsoft Teams app (docs/bots.md, "Microsoft Teams"): one Teams app per bot, so
+// each has its own name and face in Teams, made by Ambient in the company's own Microsoft tenant.
+// Microsoft stopped new multi-tenant bots on 2025-07-31, so a bot can't be Ambient's: it is the
+// company's, a single-tenant app registration and a free Azure Bot (F0) in its own subscription.
+//
+//   an admin ──▶ POST /v1/app/teams/connect ──▶ Microsoft sign-in (once per company: admin consent
+//                for Ambient's setup app) ──▶ /v1/teams/connected ──▶ tenant, Azure subscription,
+//                resource group "ambient-bots", refresh token, sealed
+//   a bot    ──▶ POST /v1/app/routines/:id/teams ──▶ (as that admin) app registration + secret +
+//                service principal ──▶ Azure Bot + its Teams channel, pointing at its hook ──▶
+//                the app package (manifest, face) ──▶ the company's Teams app catalog ──▶ a link
+//                that opens it in Teams (one tap: Add)
+//   Teams    ──▶ /v1/hooks/teams/<signed hook> (a message, an @mention) ──▶ checked as the Bot
+//                Framework's for this bot ──▶ the bot's thread, a run starts
+//   a run's answer (its reply or its result) ──▶ back into that Teams chat or channel thread
+//   a run with news ──▶ postNews() ──▶ the one channel its owner chose (its tool, post_to_teams)
+//   a reply in the thread under such a post ──▶ the bot's thread, as an @mention would
+//
+// Everything is kept in the sealed records (no table of its own): the tenant per owner, each bot's
+// app (its secret too) and where its answers go. The hook in a bot's endpoint is signed and names
+// the bot, so an activity finds its app without a lookup, and is then checked for that app's id.
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { api, type Control } from "../control.ts";
+import type { MasterKey } from "../crypto.ts";
+import { BotClient, InboundError, type Activity } from "../msteams/botframework.ts";
+import type { Owner, RoutineKeys } from "../routines/keys.ts";
+import { sealMessage } from "./messages.ts";
+import { splitText } from "./slack-apps.ts";
+import { pngSize, teamsPackage } from "./teams-package.ts";
+
+const TENANT = "teams:tenant";
+const APP = "teams:app";
+const REPLY = "teams:reply";
+const STATE_TTL_MS = 15 * 60_000;
+/** An answer goes back to Teams only for a message this recent (a later scheduled run doesn't). */
+const REPLY_FOR_MS = 6 * 60 * 60_000;
+const TARGETS_MAX = 10;
+const CHANNELS_MAX = 20;
+const POSTS_MAX = 30;
+/** A bot's secret lasts two years (Microsoft's longest); a new one is made well before it runs out. */
+const SECRET_LIFE_MS = 2 * 365 * 24 * 3600_000;
+const RESOURCE_GROUP = "ambient-bots";
+const LOCATION = "westeurope";
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** What Ambient's setup app asks the admin for, once (Microsoft Graph, delegated). */
+export const TEAMS_GRAPH_SCOPES = [
+  "https://graph.microsoft.com/Application.ReadWrite.All",
+  "https://graph.microsoft.com/AppCatalog.ReadWrite.All",
+  "https://graph.microsoft.com/User.ReadBasic.All",
+];
+/** And Azure, to make each bot's Azure Bot in the company's subscription. */
+export const TEAMS_ARM_SCOPE = "https://management.azure.com/user_impersonation";
+
+export interface TeamsAppsConfig {
+  /** Ambient's setup app: a multi-tenant Entra app (Application (client) ID) and its secret. */
+  clientId: string;
+  secret: string;
+  /** Where the apps' "developer" links point (privacy, terms); default: the gateway's origin. */
+  website?: string;
+}
+
+/**
+ * BRAIN_TEAMS_APPS_CLIENT_ID + BRAIN_TEAMS_APPS_SECRET (+ BRAIN_TEAMS_APPS_WEBSITE). Unset: bots
+ * can't go to Teams on this server.
+ */
+export function loadTeamsApps(env: NodeJS.ProcessEnv = process.env): TeamsAppsConfig | undefined {
+  const clientId = env.BRAIN_TEAMS_APPS_CLIENT_ID?.trim();
+  if (!clientId) return undefined;
+  if (!GUID.test(clientId)) throw new Error("BRAIN_TEAMS_APPS_CLIENT_ID must be the setup app's Application (client) ID");
+  const secret = env.BRAIN_TEAMS_APPS_SECRET?.trim();
+  if (!secret) throw new Error("BRAIN_TEAMS_APPS_CLIENT_ID needs BRAIN_TEAMS_APPS_SECRET");
+  const website = env.BRAIN_TEAMS_APPS_WEBSITE?.trim();
+  return { clientId, secret, ...(website ? { website } : {}) };
+}
+
+/** A Teams channel a bot is in: the channel's conversation id, and its name once Teams told it. */
+export interface TeamsChannel {
+  id: string;
+  name?: string;
+  team?: string;
+}
+
+export interface TeamsNews {
+  channel: TeamsChannel | null;
+  channels: TeamsChannel[];
+  broken: string | null;
+}
+
+interface Tenant {
+  tenantId: string;
+  refresh: string;
+  /** Who connected it: the admin whose rights make the bots, and the fallback for who a bot listens to. */
+  admin: { oid: string; name: string; email: string | null };
+  subscriptionId: string;
+  subscriptions: { id: string; name: string }[];
+  resourceGroup: string;
+  location: string;
+  at: number;
+}
+
+interface AppRecord {
+  name: string;
+  tenantId: string;
+  /** The bot's Entra app registration: its object id, its Application ID, its secret. */
+  objectId?: string;
+  appId?: string;
+  secret?: string;
+  secretExp?: number;
+  servicePrincipal?: boolean;
+  /** Its Azure Bot (a resource name in the company's resource group). */
+  botName?: string;
+  subscriptionId?: string;
+  resourceGroup?: string;
+  channel?: boolean;
+  /** Its app in Teams: the manifest's id, its version, and its id in the company's app catalog. */
+  manifestId: string;
+  version: number;
+  catalogId?: string;
+  /** Who it takes instructions from: an Entra user (object id) and their name. */
+  installer?: string;
+  installerName?: string;
+  /** Where Teams is reached for this tenant (the serviceUrl of the last activity). */
+  serviceUrl?: string;
+  /** Set when its owner first opened a chat with it. */
+  installedAt?: number;
+  channels?: TeamsChannel[];
+  /** Where its news goes: a channel's id; "": only the app; unset: the first channel it was mentioned in. */
+  news?: string;
+  newsBroken?: string;
+  posts?: { conv: string; id: string; at: number }[];
+  /** The bot's face for its icon (192 px PNG, base64), kept so a new version keeps it. */
+  icon?: string;
+}
+
+interface Target {
+  conv: string;
+  at: number;
+  runId?: string;
+}
+
+interface Replies {
+  targets: Target[];
+  run?: { id: string; hash: string };
+}
+
+interface Ref {
+  k: "user" | "team";
+  i: string;
+  r: string;
+}
+
+export class TeamsError extends Error {
+  constructor(
+    public code: string,
+    message: string,
+    public status = 400,
+  ) {
+    super(message);
+  }
+}
+
+/** What checks an activity came from the Bot Framework for this bot (msteams/botframework.ts). */
+export interface ActivityVerifier {
+  verify(authorization: string | undefined, appId: string, activity: Activity): Promise<void>;
+}
+
+const b64url = (b: Buffer | string) => Buffer.from(b).toString("base64url");
+const ownerOf = (ref: Ref): Owner => (ref.k === "team" ? { kind: "team", teamId: ref.i } : { kind: "user", uid: ref.i });
+const refOf = (owner: Owner, routineId: string): Ref => ({ k: owner.kind, i: owner.kind === "user" ? owner.uid : owner.teamId, r: routineId });
+const ownerArgs = (owner: Owner) => ({ ownerKind: owner.kind, ownerId: owner.kind === "user" ? owner.uid : owner.teamId });
+const ownerKey = (owner: Owner) => JSON.stringify(ownerArgs(owner));
+
+export class TeamsApps {
+  private seen = new Map<string, number>();
+  private warned = new Set<string>();
+  private pending = new Set<Promise<unknown>>();
+  private locks = new Map<string, Promise<void>>();
+  private clients = new Map<string, BotClient>();
+  /** Access tokens per owner and resource, kept until shortly before they expire. */
+  private tokens = new Map<string, { value: string; until: number }>();
+  /** One token call per owner at a time: each one hands out a new refresh token. */
+  private renewing = new Map<string, Promise<unknown>>();
+
+  constructor(
+    private d: {
+      control: Control;
+      keys: RoutineKeys;
+      master: MasterKey;
+      origin: string;
+      config: TeamsAppsConfig;
+      verifier: ActivityVerifier;
+      startNow?: (hostId: string, routineId: string) => void;
+      /** A person's sign-in email: who a bot they add listens to in Teams is found by it. */
+      emailOf?: (uid: string) => Promise<string | null>;
+      fetchImpl?: typeof fetch;
+      /** Microsoft's addresses (tests: stand-ins). */
+      login?: string;
+      graph?: string;
+      arm?: string;
+      /** How long to wait before asking Azure again while a new app registration spreads. */
+      retryMs?: number;
+      now?: () => number;
+    },
+  ) {}
+
+  private now(): number {
+    return this.d.now?.() ?? Date.now();
+  }
+  private base(): string {
+    return this.d.origin.replace(/\/$/, "");
+  }
+  private get login() {
+    return (this.d.login ?? "https://login.microsoftonline.com").replace(/\/$/, "");
+  }
+  private get graph() {
+    return (this.d.graph ?? "https://graph.microsoft.com/v1.0").replace(/\/$/, "");
+  }
+  private get arm() {
+    return (this.d.arm ?? "https://management.azure.com").replace(/\/$/, "");
+  }
+  private get fetch(): typeof fetch {
+    return this.d.fetchImpl ?? fetch;
+  }
+
+  async idle(): Promise<void> {
+    while (this.pending.size) await Promise.all([...this.pending]);
+  }
+
+  private track<T>(p: Promise<T>): void {
+    const q = p.catch((err: Error) => console.warn(`[teams] ${err.message}`)).finally(() => this.pending.delete(q));
+    this.pending.add(q);
+  }
+
+  // ---- records ----
+
+  private async put(owner: Owner, kind: string, key: string, value: unknown, deleted = false): Promise<void> {
+    const sealed = await this.d.keys.seal(owner, `record:${kind}`, JSON.stringify(value));
+    await this.d.control.m(api.records.put, { ...ownerArgs(owner), kind, key, iv: sealed.iv, ct: sealed.ciphertext, size: sealed.ciphertext.length, byKind: "user", ...(deleted ? { deleted: true } : {}), keep: 1, now: this.now() });
+  }
+
+  private async get<T>(owner: Owner, kind: string, key: string): Promise<T | null> {
+    const r = (await this.d.control.q(api.records.get, { ...ownerArgs(owner), kind, key })) as { iv: string; ct: string; deleted: boolean } | null;
+    if (!r || r.deleted) return null;
+    const raw = await this.d.keys.open(owner, `record:${kind}`, r.iv, r.ct).catch(() => null);
+    if (raw === null) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- signed refs (a hook in a bot's endpoint; a sign-in's state) ----
+
+  private key(purpose: string): Buffer {
+    return createHmac("sha256", this.d.master.key).update(`ambient:teams:${purpose}`).digest();
+  }
+
+  private sign(purpose: string, value: object): string {
+    const body = b64url(JSON.stringify(value));
+    return `${body}.${b64url(createHmac("sha256", this.key(purpose)).update(body).digest().subarray(0, 18))}`;
+  }
+
+  private verify<T>(purpose: string, signed: string): T | null {
+    const [body, sig] = signed.split(".");
+    if (!body || !sig) return null;
+    const want = createHmac("sha256", this.key(purpose)).update(body).digest().subarray(0, 18);
+    const got = Buffer.from(sig, "base64url");
+    if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+    try {
+      return JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- Microsoft: tokens as the admin who connected the tenant ----
+
+  private async tokenCall(tenant: string, params: Record<string, string>): Promise<{ access_token?: string; refresh_token?: string; id_token?: string; expires_in?: number; error?: string; error_description?: string }> {
+    const res = await this.fetch(`${this.login}/${encodeURIComponent(tenant)}/oauth2/v2.0/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: this.d.config.clientId, client_secret: this.d.config.secret, ...params }).toString(),
+      signal: AbortSignal.timeout(20_000),
+    }).catch((err: Error) => {
+      throw new TeamsError("microsoft_unreachable", `Microsoft didn't answer (${err.message}).`, 502);
+    });
+    return (await res.json().catch(() => ({ error: `http_${res.status}` }))) as Awaited<ReturnType<TeamsApps["tokenCall"]>>;
+  }
+
+  /** A token for Graph or Azure as the admin; the refresh token Microsoft hands back is kept. */
+  private async token(owner: Owner, resource: "graph" | "arm"): Promise<{ token: string; tenant: Tenant }> {
+    const t = await this.get<Tenant>(owner, TENANT, "tenant");
+    if (!t) throw new TeamsError("no_tenant", "Connect Microsoft Teams first (Settings → Connect → Microsoft Teams): an admin signs in once.", 400);
+    const cacheKey = `${ownerKey(owner)}:${resource}`;
+    const cached = this.tokens.get(cacheKey);
+    if (cached && cached.until > this.now()) return { token: cached.value, tenant: t };
+    const k = ownerKey(owner);
+    while (this.renewing.has(k)) await this.renewing.get(k)!.catch(() => undefined);
+    const again = this.tokens.get(cacheKey);
+    if (again && again.until > this.now()) return { token: again.value, tenant: t };
+    const p = (async () => {
+      const fresh = (await this.get<Tenant>(owner, TENANT, "tenant")) ?? t;
+      const scope = resource === "graph" ? [...TEAMS_GRAPH_SCOPES, "offline_access"].join(" ") : `${TEAMS_ARM_SCOPE} offline_access`;
+      const out = await this.tokenCall(fresh.tenantId, { grant_type: "refresh_token", refresh_token: fresh.refresh, scope });
+      if (!out.access_token) {
+        const why = (out.error_description ?? out.error ?? "no reason").split("\n")[0];
+        throw new TeamsError("microsoft_token", out.error === "invalid_grant" ? `Microsoft doesn't take ${fresh.admin.name}'s sign-in anymore. An admin connects Microsoft Teams again in Ambient (${why}).` : `Microsoft refused the sign-in (${why}).`, 400);
+      }
+      if (out.refresh_token && out.refresh_token !== fresh.refresh) await this.put(owner, TENANT, "tenant", { ...fresh, refresh: out.refresh_token });
+      this.tokens.set(cacheKey, { value: out.access_token, until: this.now() + Math.max(60, (out.expires_in ?? 3600) - 300) * 1000 });
+      return out.access_token;
+    })().finally(() => this.renewing.delete(k));
+    this.renewing.set(k, p);
+    return { token: await p, tenant: t };
+  }
+
+  private async ms<T = Record<string, unknown>>(
+    owner: Owner,
+    resource: "graph" | "arm",
+    method: string,
+    path: string,
+    body?: unknown,
+    opts: { contentType?: string; ok?: number[] } = {},
+  ): Promise<{ status: number; json: T & { error?: { code?: string; message?: string } } }> {
+    const { token } = await this.token(owner, resource);
+    const url = `${resource === "graph" ? this.graph : this.arm}${path}`;
+    const res = await this.fetch(url, {
+      method,
+      headers: { authorization: `Bearer ${token}`, ...(body !== undefined ? { "content-type": opts.contentType ?? "application/json" } : {}) },
+      body: body === undefined ? undefined : Buffer.isBuffer(body) ? new Uint8Array(body) : JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    }).catch((err: Error) => {
+      throw new TeamsError("microsoft_unreachable", `Microsoft didn't answer (${err.message}).`, 502);
+    });
+    const text = await res.text();
+    let json = {} as T & { error?: { code?: string; message?: string } };
+    try {
+      json = text ? JSON.parse(text) : json;
+    } catch {
+      /* not JSON */
+    }
+    return { status: res.status, json };
+  }
+
+  private static why(r: { status: number; json: { error?: { code?: string; message?: string } } }): string {
+    return `${r.status}${r.json.error?.code ? ` ${r.json.error.code}` : ""}${r.json.error?.message ? `: ${r.json.error.message.split("\n")[0]!.slice(0, 200)}` : ""}`;
+  }
+
+  // ---- the tenant (once per person or team) ----
+
+  /** The Microsoft sign-in an admin opens once: Ambient's setup app asks for what it needs to make bots. */
+  connectUrl(owner: Owner, uid: string): { url: string } {
+    const state = this.sign("connect", { ...refOf(owner, ""), u: uid, n: randomBytes(9).toString("base64url"), e: this.now() + STATE_TTL_MS });
+    const q = new URLSearchParams({
+      client_id: this.d.config.clientId,
+      response_type: "code",
+      response_mode: "query",
+      redirect_uri: `${this.base()}/v1/teams/connected`,
+      // Azure's scope comes along for consent only; tokens for it come from the refresh token later.
+      scope: [...TEAMS_GRAPH_SCOPES, TEAMS_ARM_SCOPE, "offline_access", "openid", "profile"].join(" "),
+      state,
+      prompt: "select_account",
+    });
+    return { url: `${this.login}/organizations/oauth2/v2.0/authorize?${q.toString()}` };
+  }
+
+  /** Microsoft sends the admin back: the tenant, its Azure subscription and a resource group for the bots. */
+  async connected(code: string, state: string): Promise<{ tenantId: string; admin: string; subscription: string }> {
+    const s = this.verify<Ref & { u: string; e: number }>("connect", state);
+    if (!s) throw new TeamsError("bad_state", "This link isn't from Ambient.", 400);
+    if (s.e < this.now()) throw new TeamsError("state_expired", "This sign-in took too long. Tap Connect Microsoft Teams again in Ambient.", 400);
+    if (!code || code.length > 4000) throw new TeamsError("bad_request", "Microsoft sent no code.", 400);
+    const owner = ownerOf(s);
+    const out = await this.tokenCall("organizations", { grant_type: "authorization_code", code, redirect_uri: `${this.base()}/v1/teams/connected`, scope: [...TEAMS_GRAPH_SCOPES, "offline_access", "openid", "profile"].join(" ") });
+    if (!out.access_token || !out.refresh_token || !out.id_token) throw new TeamsError("microsoft_token", `Microsoft didn't sign you in (${(out.error_description ?? out.error ?? "no reason").split("\n")[0]}).`, 400);
+    const claims = decodeIdToken(out.id_token);
+    if (!claims.tid || !claims.oid) throw new TeamsError("microsoft_token", "Microsoft's sign-in named no organisation. Sign in with a work account.", 400);
+    const tenant: Tenant = {
+      tenantId: claims.tid,
+      refresh: out.refresh_token,
+      admin: { oid: claims.oid, name: claims.name ?? claims.preferred_username ?? "the admin", email: claims.email ?? claims.preferred_username ?? null },
+      subscriptionId: "",
+      subscriptions: [],
+      resourceGroup: RESOURCE_GROUP,
+      location: LOCATION,
+      at: this.now(),
+    };
+    await this.put(owner, TENANT, "tenant", tenant);
+    this.tokens.set(`${ownerKey(owner)}:graph`, { value: out.access_token, until: this.now() + Math.max(60, (out.expires_in ?? 3600) - 300) * 1000 });
+    this.tokens.delete(`${ownerKey(owner)}:arm`);
+    // Azure: which subscription the bots go in (the first one that's on; changeable later).
+    const subs = await this.ms<{ value?: { subscriptionId: string; displayName?: string; state?: string }[] }>(owner, "arm", "GET", "/subscriptions?api-version=2022-12-01");
+    if (subs.status !== 200) throw new TeamsError("azure_failed", `Azure didn't list your subscriptions (${TeamsApps.why(subs)}).`, 502);
+    const usable = (subs.json.value ?? []).filter((x) => !x.state || x.state === "Enabled").map((x) => ({ id: x.subscriptionId, name: x.displayName ?? x.subscriptionId }));
+    if (!usable.length) throw new TeamsError("no_subscription", `${tenant.admin.name} has no Azure subscription that's on. Each bot needs a free Azure Bot there: sign in with someone who can create resources in one.`, 400);
+    const withSub = { ...((await this.get<Tenant>(owner, TENANT, "tenant")) ?? tenant), subscriptions: usable, subscriptionId: usable[0]!.id };
+    await this.put(owner, TENANT, "tenant", withSub);
+    await this.prepareSubscription(owner, withSub);
+    return { tenantId: tenant.tenantId, admin: tenant.admin.name, subscription: usable[0]!.name };
+  }
+
+  /** The subscription can hold Azure Bots, and has the resource group Ambient puts them in. */
+  private async prepareSubscription(owner: Owner, t: Tenant): Promise<void> {
+    const reg = await this.ms(owner, "arm", "POST", `/subscriptions/${t.subscriptionId}/providers/Microsoft.BotService/register?api-version=2021-04-01`);
+    if (reg.status >= 300) throw new TeamsError("azure_failed", `Azure didn't turn on Azure Bots in your subscription (${TeamsApps.why(reg)}).`, 502);
+    const rg = await this.ms(owner, "arm", "PUT", `/subscriptions/${t.subscriptionId}/resourcegroups/${t.resourceGroup}?api-version=2021-04-01`, { location: t.location, tags: { madeBy: "Ambient" } });
+    if (rg.status >= 300) throw new TeamsError("azure_failed", `Azure didn't make the resource group ${t.resourceGroup} (${TeamsApps.why(rg)}).`, 502);
+  }
+
+  async connection(owner: Owner): Promise<{ connected: boolean; tenantId: string | null; admin: string | null; subscription: { id: string; name: string } | null; subscriptions: { id: string; name: string }[] }> {
+    const t = await this.get<Tenant>(owner, TENANT, "tenant");
+    if (!t) return { connected: false, tenantId: null, admin: null, subscription: null, subscriptions: [] };
+    return { connected: true, tenantId: t.tenantId, admin: t.admin.name, subscription: t.subscriptions.find((x) => x.id === t.subscriptionId) ?? null, subscriptions: t.subscriptions };
+  }
+
+  /** Another of the admin's subscriptions for new bots (bots made before stay where they are). */
+  async setSubscription(owner: Owner, id: string): Promise<void> {
+    const t = await this.get<Tenant>(owner, TENANT, "tenant");
+    if (!t) throw new TeamsError("no_tenant", "Connect Microsoft Teams first.", 400);
+    if (!t.subscriptions.some((x) => x.id === id)) throw new TeamsError("no_such_subscription", "That isn't one of the subscriptions the admin can use.", 400);
+    const next = { ...t, subscriptionId: id };
+    await this.put(owner, TENANT, "tenant", next);
+    await this.prepareSubscription(owner, next);
+  }
+
+  async disconnect(owner: Owner): Promise<void> {
+    await this.put(owner, TENANT, "tenant", {}, true);
+    this.tokens.delete(`${ownerKey(owner)}:graph`);
+    this.tokens.delete(`${ownerKey(owner)}:arm`);
+  }
+
+  // ---- a bot's app ----
+
+  async status(owner: Owner, routineId: string): Promise<{ tenant: boolean; app: { appId: string | null; ready: boolean; installed: boolean; installer: string | null; url: string | null } | null; news: TeamsNews | null }> {
+    const [t, app] = await Promise.all([this.get<Tenant>(owner, TENANT, "tenant"), this.get<AppRecord>(owner, APP, routineId)]);
+    const ready = !!app?.catalogId;
+    return {
+      tenant: !!t,
+      app: app ? { appId: app.appId ?? null, ready, installed: !!app.installedAt, installer: app.installerName ?? null, url: ready ? this.openUrl(app) : null } : null,
+      news: app?.installedAt || app?.channels?.length ? this.newsOf(app) : null,
+    };
+  }
+
+  private openUrl(app: AppRecord): string {
+    return `https://teams.microsoft.com/l/app/${app.manifestId}`;
+  }
+
+  /**
+   * Gives a bot its own Teams app in the company's tenant and returns the link that opens it in
+   * Teams (one tap: Add). Each step is kept as it's done, so asking again after a failure goes on
+   * where it stopped; asking again when it's all there gives the same link.
+   */
+  async add(owner: Owner, bot: { id: string; name: string }, uid: string): Promise<{ url: string; chatUrl: string; ready: true; installed: boolean; installer: string }> {
+    const { tenant: t } = await this.token(owner, "graph");
+    let app = (await this.get<AppRecord>(owner, APP, bot.id)) ?? { name: bot.name, tenantId: t.tenantId, manifestId: randomUUID(), version: 0 };
+    if (app.tenantId !== t.tenantId) throw new TeamsError("other_tenant", "This bot is in another company's Teams. Take it out of Teams first, then add it again.", 409);
+    const save = async (next: AppRecord) => {
+      app = next;
+      await this.put(owner, APP, bot.id, app);
+    };
+    // 1. Its app registration in the company's Entra, its secret, its service principal.
+    if (!app.objectId || !app.appId) {
+      const r = await this.ms<{ id?: string; appId?: string }>(owner, "graph", "POST", "/applications", { displayName: `${bot.name} (Ambient bot)`.slice(0, 120), signInAudience: "AzureADMyOrg", tags: ["Ambient"] });
+      if (r.status !== 201 || !r.json.id || !r.json.appId) throw this.refusal("graph", r, "make the bot's app registration");
+      await save({ ...app, objectId: r.json.id, appId: r.json.appId });
+    }
+    if (!app.secret) {
+      const r = await this.ms<{ secretText?: string; endDateTime?: string }>(owner, "graph", "POST", `/applications/${app.objectId}/addPassword`, { passwordCredential: { displayName: "Ambient", endDateTime: new Date(this.now() + SECRET_LIFE_MS).toISOString() } });
+      if (r.status !== 200 || !r.json.secretText) throw this.refusal("graph", r, "make the bot's secret");
+      await save({ ...app, secret: r.json.secretText, secretExp: r.json.endDateTime ? Date.parse(r.json.endDateTime) : this.now() + SECRET_LIFE_MS });
+    }
+    if (!app.servicePrincipal) {
+      const r = await this.ms(owner, "graph", "POST", "/servicePrincipals", { appId: app.appId, tags: ["Ambient"] });
+      if (r.status !== 201 && r.status !== 409) throw this.refusal("graph", r, "make the bot's service principal");
+      await save({ ...app, servicePrincipal: true });
+    }
+    // 2. Its Azure Bot, pointing at its hook, with the Teams channel on.
+    if (!app.botName) app = { ...app, botName: azureName(bot.name), subscriptionId: t.subscriptionId, resourceGroup: t.resourceGroup };
+    const botPath = `/subscriptions/${app.subscriptionId}/resourceGroups/${app.resourceGroup}/providers/Microsoft.BotService/botServices/${app.botName}`;
+    if (!app.channel) {
+      const endpoint = `${this.base()}/v1/hooks/teams/${this.sign("hook", refOf(owner, bot.id))}`;
+      const body = { location: "global", sku: { name: "F0" }, kind: "azurebot", tags: { madeBy: "Ambient" }, properties: { displayName: bot.name.slice(0, 64), endpoint, msaAppId: app.appId, msaAppType: "SingleTenant", msaAppTenantId: t.tenantId } };
+      // A new app registration takes a moment to reach Azure: asked again a few times.
+      let r = await this.ms(owner, "arm", "PUT", `${botPath}?api-version=2022-09-15`, body);
+      for (let i = 0; i < 4 && r.status >= 400 && r.status < 500 && r.status !== 403; i++) {
+        await new Promise((ok) => setTimeout(ok, this.d.retryMs ?? 5_000));
+        r = await this.ms(owner, "arm", "PUT", `${botPath}?api-version=2022-09-15`, body);
+      }
+      if (r.status >= 300) throw this.refusal("arm", r, "make the bot's Azure Bot");
+      await save(app);
+      const c = await this.ms(owner, "arm", "PUT", `${botPath}/channels/MsTeamsChannel?api-version=2022-09-15`, { location: "global", properties: { channelName: "MsTeamsChannel", properties: { isEnabled: true } } });
+      if (c.status >= 300) throw this.refusal("arm", c, "turn on Teams for the bot");
+      await save({ ...app, channel: true });
+    }
+    // 3. Its app in the company's Teams app catalog.
+    if (!app.catalogId) {
+      const version = app.version + 1;
+      const r = await this.ms<{ id?: string }>(owner, "graph", "POST", "/appCatalogs/teamsApps", this.package(app, version), { contentType: "application/zip" });
+      if (r.status === 409) {
+        // Published before (its id was lost): found by its manifest id.
+        const found = await this.ms<{ value?: { id: string }[] }>(owner, "graph", "GET", `/appCatalogs/teamsApps?$filter=externalId eq '${app.manifestId}'`);
+        const id = found.json.value?.[0]?.id;
+        if (!id) throw this.refusal("graph", r, "put the bot in your Teams app catalog");
+        await save({ ...app, catalogId: id, version });
+      } else {
+        if (r.status !== 201 && r.status !== 200) throw this.refusal("graph", r, "put the bot in your Teams app catalog");
+        if (!r.json.id) throw new TeamsError("microsoft_failed", "Teams didn't say the app's id.", 502);
+        await save({ ...app, catalogId: r.json.id, version });
+      }
+    }
+    // 4. Who it listens to: the person who added it, found in the company by their email; else the admin.
+    if (!app.installer) {
+      let who: { id: string; name: string } | null = null;
+      const email = await this.d.emailOf?.(uid).catch(() => null);
+      if (email) {
+        const r = await this.ms<{ id?: string; displayName?: string }>(owner, "graph", "GET", `/users/${encodeURIComponent(email)}?$select=id,displayName`);
+        if (r.status === 200 && r.json.id) who = { id: r.json.id, name: r.json.displayName ?? email };
+      }
+      who ??= { id: t.admin.oid, name: t.admin.name };
+      await save({ ...app, installer: who.id, installerName: who.name });
+    }
+    return { url: this.openUrl(app), chatUrl: `https://teams.microsoft.com/l/chat/0/0?users=28:${app.appId}`, ready: true, installed: !!app.installedAt, installer: app.installerName! };
+  }
+
+  private refusal(where: "graph" | "arm", r: { status: number; json: { error?: { code?: string; message?: string } } }, what: string): TeamsError {
+    if (r.status === 401 || r.status === 403) {
+      const role =
+        where === "arm"
+          ? "needs to be allowed to create resources in the Azure subscription (Contributor on it, or on the resource group ambient-bots)"
+          : what.includes("catalog")
+            ? "needs to be a Teams admin (or Global admin) to put apps in your company's Teams"
+            : "needs to be allowed to register apps in Microsoft Entra (Application admin, or Global admin)";
+      return new TeamsError("not_allowed", `Microsoft didn't let Ambient ${what}: the admin who connected Teams ${role}. (${TeamsApps.why(r)})`, 403);
+    }
+    return new TeamsError("microsoft_failed", `Microsoft didn't ${what} (${TeamsApps.why(r)}).`, 502);
+  }
+
+  private package(app: AppRecord, version: number): Buffer {
+    return teamsPackage({ manifestId: app.manifestId, version: `1.0.${version}`, botAppId: app.appId!, name: app.name, website: this.d.config.website ?? this.base() }, app.icon ? Buffer.from(app.icon, "base64") : undefined);
+  }
+
+  /** A new version of its app in the catalog (a new face, a new name): Teams updates it everywhere. */
+  private async republish(owner: Owner, routineId: string, app: AppRecord): Promise<AppRecord> {
+    if (!app.catalogId) {
+      await this.put(owner, APP, routineId, app);
+      return app;
+    }
+    const version = app.version + 1;
+    const r = await this.ms(owner, "graph", "POST", `/appCatalogs/teamsApps/${app.catalogId}/appDefinitions`, this.package(app, version), { contentType: "application/zip" });
+    if (r.status >= 300) throw this.refusal("graph", r, "update the bot's app in Teams");
+    const next = { ...app, version };
+    await this.put(owner, APP, routineId, next);
+    return next;
+  }
+
+  /** The bot's face as its app's icon: a 192 × 192 PNG (Teams' size for an app's colour icon). */
+  async setIcon(owner: Owner, routineId: string, png: Buffer): Promise<void> {
+    const size = pngSize(png);
+    if (!size || size.width !== 192 || size.height !== 192) throw new TeamsError("bad_icon", "Teams wants the icon as a PNG of exactly 192 × 192 pixels.", 400);
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app) throw new TeamsError("no_app", "This bot isn't in Teams yet.", 404);
+    await this.republish(owner, routineId, { ...app, icon: png.toString("base64") });
+  }
+
+  /** Takes the bot out of Teams: its app, its Azure Bot and its app registration are deleted. */
+  async remove(owner: Owner, routineId: string): Promise<boolean> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app) return false;
+    const steps: [string, () => Promise<{ status: number }>][] = [];
+    if (app.catalogId) steps.push(["its Teams app", () => this.ms(owner, "graph", "DELETE", `/appCatalogs/teamsApps/${app.catalogId}`)]);
+    if (app.botName && app.subscriptionId) steps.push(["its Azure Bot", () => this.ms(owner, "arm", "DELETE", `/subscriptions/${app.subscriptionId}/resourceGroups/${app.resourceGroup}/providers/Microsoft.BotService/botServices/${app.botName}?api-version=2022-09-15`)]);
+    if (app.objectId) steps.push(["its app registration", () => this.ms(owner, "graph", "DELETE", `/applications/${app.objectId}`)]);
+    for (const [what, run] of steps) {
+      const r = await run().catch((err: Error) => ({ status: 0, err }));
+      if (r.status >= 300 && r.status !== 404) console.warn(`[teams] couldn't delete ${what} of ${app.name}: ${r.status}`);
+    }
+    if (app.appId) this.clients.delete(app.appId);
+    await this.put(owner, APP, routineId, {}, true);
+    await this.put(owner, REPLY, routineId, {}, true);
+    return true;
+  }
+
+  // ---- its own news: one channel, chosen by its owner ----
+
+  private static newsChannel(app: AppRecord): TeamsChannel | null {
+    if (app.news === "") return null;
+    const id = app.news ?? app.channels?.[0]?.id;
+    return id ? (app.channels?.find((c) => c.id === id) ?? { id }) : null;
+  }
+
+  private newsOf(app: AppRecord): TeamsNews {
+    return { channel: TeamsApps.newsChannel(app), channels: app.channels ?? [], broken: app.newsBroken ?? null };
+  }
+
+  private static label(c: TeamsChannel): string {
+    return c.name ? `${c.team ? `${c.team} › ` : ""}${c.name}` : "the Teams channel you were mentioned in";
+  }
+
+  /** What a run is told about Teams (folder.ts, wake): its name, and where its news goes. Null: not in Teams. */
+  async forRun(owner: Owner, routineId: string): Promise<{ handle: string; news: string | null } | null> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.catalogId) return null;
+    const c = TeamsApps.newsChannel(app);
+    return { handle: app.name, news: c && !app.newsBroken ? TeamsApps.label(c) : null };
+  }
+
+  async setNews(owner: Owner, routineId: string, channel: string | null): Promise<TeamsNews> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.catalogId) throw new TeamsError("not_in_teams", "This bot isn't in Teams yet.", 400);
+    if (channel !== null && !app.channels?.some((c) => c.id === channel)) throw new TeamsError("no_such_channel", "It hasn't been mentioned in that channel. Add it to the team and mention it there once, then choose it.", 400);
+    const { newsBroken: _was, ...rest } = app;
+    const next: AppRecord = { ...rest, news: channel ?? "" };
+    await this.put(owner, APP, routineId, next);
+    return this.newsOf(next);
+  }
+
+  /** The bot posts news of its own (post_to_teams): a new post in the one channel its owner chose. */
+  async postNews(owner: Owner, routineId: string, text: string): Promise<{ channel: TeamsChannel }> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.catalogId || !app.secret) throw new TeamsError("not_in_teams", "You're not in Teams: what you report is in the Ambient app.", 400);
+    const channel = TeamsApps.newsChannel(app);
+    if (!channel || !app.serviceUrl) throw new TeamsError("no_channel", "No Teams channel is chosen for your news, so it stays in the Ambient app. Your owner chooses one on your Teams page.", 400);
+    const client = this.client(app);
+    let first: string | undefined;
+    try {
+      for (const part of splitText(text)) {
+        if (!first) first = await client.send(app.serviceUrl, channel.id, { text: part, textFormat: "markdown" });
+        else await client.send(app.serviceUrl, `${channel.id};messageid=${first}`, { text: part, textFormat: "markdown" });
+      }
+    } catch (err) {
+      const gone = /\b(403|404)\b/.test((err as Error).message);
+      if (gone) await this.put(owner, APP, routineId, { ...app, newsBroken: "removed" });
+      throw new TeamsError("teams_failed", gone ? `You can't post in ${TeamsApps.label(channel)} anymore (you were removed from the team or the channel is gone). It stays in the Ambient app; your owner sees that on your Teams page.` : `Teams didn't take the message (${(err as Error).message}).`, 502);
+    }
+    const { newsBroken: _was, ...rest } = app;
+    const posts = first ? [...(app.posts ?? []), { conv: channel.id, id: first, at: this.now() }].slice(-POSTS_MAX) : (app.posts ?? []);
+    await this.put(owner, APP, routineId, { ...rest, posts });
+    return { channel };
+  }
+
+  private client(app: AppRecord): BotClient {
+    let c = this.clients.get(app.appId!);
+    if (!c) {
+      c = new BotClient({ tenantId: app.tenantId, appId: app.appId!, secret: app.secret! }, this.d.fetchImpl);
+      this.clients.set(app.appId!, c);
+    }
+    return c;
+  }
+
+  // ---- what Teams sends ----
+
+  /** An activity for a bot (`hook` from its endpoint), checked as the Bot Framework's for that bot. */
+  async receive(hook: string, authorization: string | undefined, a: Activity): Promise<{ status: number; body: unknown }> {
+    const ref = this.verify<Ref>("hook", hook);
+    if (!ref) return { status: 404, body: { error: "not_found" } };
+    if (!a || typeof a !== "object" || typeof a.serviceUrl !== "string" || !a.recipient?.id || !a.conversation?.id || !a.from?.id) return { status: 400, body: { error: "invalid_request" } };
+    const owner = ownerOf(ref);
+    const app = await this.get<AppRecord>(owner, APP, ref.r);
+    if (!app?.appId || !app.secret) return { status: 404, body: { error: "not_found" } };
+    try {
+      await this.d.verifier.verify(authorization, app.appId, a);
+    } catch (err) {
+      if (err instanceof InboundError) {
+        console.warn(`[teams] refused an activity for ${app.name}: ${err.message}`);
+        return { status: 401, body: { error: "unauthorized" } };
+      }
+      throw err;
+    }
+    // A single-tenant bot answers no one outside its company.
+    const tenant = a.conversation.tenantId ?? a.channelData?.tenant?.id;
+    if (tenant && tenant !== app.tenantId) return { status: 403, body: { error: "wrong_tenant" } };
+    if (a.id) {
+      const now = this.now();
+      for (const [k, at] of this.seen) if (now - at > 30 * 60_000) this.seen.delete(k);
+      const id = `${app.appId}:${a.id}`;
+      if (this.seen.has(id)) return { status: 200, body: {} };
+      this.seen.set(id, now);
+    }
+    this.track(this.onActivity(owner, ref.r, app, a));
+    return { status: 200, body: {} };
+  }
+
+  private async onActivity(owner: Owner, routineId: string, app: AppRecord, a: Activity): Promise<void> {
+    if (app.serviceUrl !== a.serviceUrl) {
+      app = { ...app, serviceUrl: a.serviceUrl };
+      await this.put(owner, APP, routineId, app);
+    }
+    const kind = a.conversation.conversationType ?? (a.channelData?.channel ? "channel" : a.conversation.isGroup ? "groupChat" : "personal");
+    const client = this.client(app);
+    if (a.type === "conversationUpdate") {
+      const added = a.membersAdded?.some((m) => m.id === a.recipient.id);
+      if (!added) return;
+      if (kind === "personal") {
+        if (!app.installedAt && a.from.aadObjectId === app.installer) await this.put(owner, APP, routineId, (app = { ...app, installedAt: this.now() }));
+        await client.send(a.serviceUrl, a.conversation.id, { text: `Hi, I'm ${app.name}, your bot from Ambient. Write to me here, or mention me in a channel: I answer in the thread.`, textFormat: "markdown" }).catch(() => undefined);
+      }
+      return;
+    }
+    if (a.type !== "message") return;
+    if (a.from.id === a.recipient.id) return;
+    const mentioned = (a.entities ?? []).some((e) => e.type === "mention" && e.mentioned?.id === a.recipient.id);
+    const [conv, root] = a.conversation.id.split(";messageid=") as [string, string | undefined];
+    const underOwnPost = kind === "channel" && !mentioned && !!root && (app.posts ?? []).some((p) => p.conv === conv && p.id === root);
+    if (kind !== "personal" && !mentioned && !underOwnPost) return;
+    if (kind === "channel" && mentioned) app = await this.remember(owner, routineId, app, conv, a).catch(() => app);
+    const target = kind === "channel" ? `${conv};messageid=${root ?? a.id}` : a.conversation.id;
+    // It takes instructions from the person who added it (its runs hold its owner's secrets).
+    if (!app.installer || a.from.aadObjectId !== app.installer) {
+      const warnKey = `${routineId}:${target}`;
+      if (!this.warned.has(warnKey)) {
+        this.warned.add(warnKey);
+        await client.send(a.serviceUrl, target, { text: app.installerName ? `I only take instructions from ${app.installerName} for now.` : "I don't know who added me, so I'm not taking instructions. Add me to Teams again from Ambient.", textFormat: "markdown" }).catch(() => undefined);
+      }
+      return;
+    }
+    if (kind === "personal" && !app.installedAt) await this.put(owner, APP, routineId, (app = { ...app, installedAt: this.now() }));
+    const text = teamsToPlain(a.text ?? "");
+    if (!text) return;
+    const who = a.from.name ?? "Someone";
+    const where = kind === "personal" ? "in a direct message" : underOwnPost ? "in the thread under your post" : kind === "groupChat" ? "in a group chat" : "in a channel";
+    const body = `${who} wrote to you on Microsoft Teams (${where}): ${text}\n\n(Your answer goes back to that Teams thread on its own.)`;
+    await this.replies(owner, routineId, (r) => {
+      const now = this.now();
+      const kept = r.targets.filter((t) => now - t.at <= REPLY_FOR_MS && !(t.conv === target && !t.runId));
+      return { ...r, targets: [...kept, { conv: target, at: now }].slice(-TARGETS_MAX) };
+    });
+    void client.typing(a.serviceUrl, target).catch(() => undefined);
+    const sealed = await sealMessage(this.d.keys, owner, { text: body });
+    const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Teams", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
+    if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
+    if (out.ok && !out.enabled) await client.send(a.serviceUrl, target, { text: "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", textFormat: "markdown" });
+  }
+
+  /** A channel it was mentioned in: kept with its name and team, so its news can go there. */
+  private async remember(owner: Owner, routineId: string, app: AppRecord, conv: string, a: Activity): Promise<AppRecord> {
+    const id = a.channelData?.channel?.id ?? conv;
+    const name = a.channelData?.channel?.name ?? (a.channelData?.team && id === a.channelData.team.id ? "General" : undefined);
+    const team = a.channelData?.team?.name;
+    const known = app.channels?.find((c) => c.id === id);
+    if (known && (known.name || !name)) return app;
+    const entry: TeamsChannel = { id, ...(name ? { name } : {}), ...(team ? { team } : {}) };
+    const channels = known ? (app.channels ?? []).map((c) => (c.id === id ? entry : c)) : [...(app.channels ?? []), entry].slice(-CHANNELS_MAX);
+    const next = { ...app, channels };
+    await this.put(owner, APP, routineId, next);
+    return next;
+  }
+
+  private async replies(owner: Owner, routineId: string, change: (r: Replies) => Replies | null): Promise<Replies> {
+    const key = `${ownerKey(owner)}:${routineId}`;
+    const before = this.locks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((r) => (release = r));
+    const chained = before.then(() => mine);
+    this.locks.set(key, chained);
+    await before;
+    try {
+      const raw = await this.get<Replies>(owner, REPLY, routineId);
+      const cur: Replies = { targets: Array.isArray(raw?.targets) ? raw.targets : [], ...(raw?.run ? { run: raw.run } : {}) };
+      const next = change(cur);
+      if (next) await this.put(owner, REPLY, routineId, next);
+      return next ?? cur;
+    } finally {
+      release();
+      if (this.locks.get(key) === chained) this.locks.delete(key);
+    }
+  }
+
+  /** A bot's run starts: the Teams messages waiting for an answer are now its to answer. */
+  async runStarted(owner: Owner, routineId: string, runId: string, tokenHash: string): Promise<void> {
+    if (!(await this.get<AppRecord>(owner, APP, routineId))?.catalogId) return;
+    await this.replies(owner, routineId, (r) => ({ run: { id: runId, hash: tokenHash }, targets: r.targets.map((t) => (t.runId ? t : { ...t, runId })) }));
+  }
+
+  /** A running bot took Teams messages from its thread mid-run (its inbox). */
+  async runTook(owner: Owner, routineId: string, tokenHash: string): Promise<void> {
+    await this.replies(owner, routineId, (r) => {
+      if (r.run?.hash !== tokenHash) return null;
+      const now = this.now();
+      return { ...r, targets: r.targets.map((t) => (t.runId || t.at > now ? t : { ...t, runId: r.run!.id })) };
+    });
+  }
+
+  /** A run said something: it goes to the Teams threads that run took, and nowhere else. */
+  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }): void {
+    this.track(
+      (async () => {
+        const r = await this.get<Replies>(owner, REPLY, routineId);
+        if (!r?.targets?.length) return;
+        const runId = run.id ?? (run.hash && r.run?.hash === run.hash ? r.run.id : undefined);
+        if (!runId) return;
+        const mine = r.targets.filter((t) => t.runId === runId);
+        if (!mine.length) return;
+        const app = await this.get<AppRecord>(owner, APP, routineId);
+        if (!app?.secret || !app.serviceUrl) return;
+        const client = this.client(app);
+        if (text.trim()) for (const t of mine) for (const part of splitText(text)) await client.send(app.serviceUrl, t.conv, { text: part, textFormat: "markdown" });
+        if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}) }));
+      })(),
+    );
+  }
+}
+
+/** An Azure resource name for a bot: its name, safe, and unique enough (Azure Bot names are global). */
+function azureName(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30) || "bot";
+  return `ambient-${slug}-${randomBytes(4).toString("hex")}`;
+}
+
+function decodeIdToken(jwt: string): { tid?: string; oid?: string; name?: string; email?: string; preferred_username?: string } {
+  try {
+    return JSON.parse(Buffer.from(jwt.split(".")[1] ?? "", "base64url").toString("utf8")) as ReturnType<typeof decodeIdToken>;
+  } catch {
+    return {};
+  }
+}
+
+/** What Teams sends as a message's text (HTML, <at> mentions), as plain text for the bot. */
+export function teamsToPlain(text: string): string {
+  return text
+    .replace(/<at>[^<]*<\/at>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li)>/gi, "\n")
+    .replace(/<a [^>]*href="([^"]+)"[^>]*>([^<]*)<\/a>/gi, (_m, href: string, label: string) => (label && label !== href ? `${label} (${href})` : href))
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}

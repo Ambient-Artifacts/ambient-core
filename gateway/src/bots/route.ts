@@ -20,6 +20,8 @@ import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
 import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
 import { page as githubPage, type GitHubApps } from "./github-apps.ts";
 import { SlackError, type SlackApps } from "./slack-apps.ts";
+import { TeamsError, type TeamsApps } from "./teams-apps.ts";
+import type { Activity } from "../msteams/botframework.ts";
 import { IMessageError, type IMessageChannel } from "../channels/imessage.ts";
 import type { AmbReach } from "../channels/reach.ts";
 import { McpConnectionError, type McpConnections } from "./mcp-connections.ts";
@@ -69,6 +71,7 @@ export function botAppRoutes(
     github?: () => GitHubEvents | undefined;
     githubApp?: () => GitHubApps | undefined;
     slack?: () => SlackApps | undefined;
+    teams?: () => TeamsApps | undefined;
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
     imessage?: () => IMessageChannel | undefined;
@@ -567,6 +570,112 @@ export function botAppRoutes(
       res.status(204).end();
     } catch (err) {
       slackFail(res, err);
+    }
+  });
+
+  // ---- Microsoft Teams: an admin connects the company once, then a bot's own Teams app in one tap (docs/bots.md, "Microsoft Teams") ----
+  const teamsFail = (res: Response, err: unknown) => {
+    if (err instanceof TeamsError) return res.status(err.status).json({ error: err.code, message: err.message });
+    fail(res, err);
+  };
+  r.get("/v1/app/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      res.json(await tm.connection(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  // The Microsoft sign-in an admin opens once (the app opens the link in a browser).
+  r.post("/v1/app/teams/connect", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      const a = await actor(res);
+      res.json(tm.connectUrl(d.routines.botOwner(a, teamOf(req)), a.uid));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  // Another of the admin's Azure subscriptions for new bots.
+  r.put("/v1/app/teams", d.auth, d.json, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    const body = z.object({ subscriptionId: z.string().trim().min(1).max(64) }).safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send subscriptionId: one of the Azure subscriptions listed." });
+    try {
+      const owner = d.routines.botOwner(await actor(res), teamOf(req));
+      await tm.setSubscription(owner, body.data.subscriptionId);
+      res.json(await tm.connection(owner));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.delete("/v1/app/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      await tm.disconnect(d.routines.botOwner(await actor(res), teamOf(req)));
+      res.status(204).end();
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.get("/v1/app/routines/:id/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), false);
+      res.json(await tm.status(f.owner, f.routineId));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.post("/v1/app/routines/:id/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      const a = await actor(res);
+      const f = await d.routines.folderOf(a, id(req), true);
+      res.json(await tm.add(f.owner, { id: f.routineId, name: f.name }, a.uid));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.put("/v1/app/routines/:id/teams/news", d.auth, d.json, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    const body = z.object({ channel: z.string().max(200).nullable() }).safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send channel: a channel's id, or null for only the Ambient app." });
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      res.json({ news: await tm.setNews(f.owner, f.routineId, body.data.channel) });
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.put("/v1/app/routines/:id/teams/icon", d.auth, express.raw({ type: ["image/png", "application/octet-stream"], limit: "1mb" }), async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "bad_request", message: "Send the icon as a 192 × 192 PNG (content-type image/png)." });
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      await tm.setIcon(f.owner, f.routineId, req.body);
+      res.status(204).end();
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.delete("/v1/app/routines/:id/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      if (!(await tm.remove(f.owner, f.routineId))) return res.status(404).json({ error: "no_app", message: "This bot isn't in Teams." });
+      res.status(204).end();
+    } catch (err) {
+      teamsFail(res, err);
     }
   });
 
@@ -1487,6 +1596,42 @@ export function linqHookRouter(imessage: () => IMessageChannel | undefined): Rou
  * What Slack sends for bots' own apps: their events (an @mention, a DM), and the browser after
  * Allow (docs/bots.md, "Slack").
  */
+/** Teams' activities for bots' own Teams apps, and the admin's way back from Microsoft's sign-in. */
+export function teamsHookRouter(teams: () => TeamsApps | undefined): Router {
+  const r = express.Router();
+  const perHook = limiter(600);
+  r.post("/v1/hooks/teams/:hook", express.json({ limit: "256kb" }), async (req, res) => {
+    const tm = teams();
+    const hook = String(req.params.hook);
+    if (!tm) return res.status(404).json({ error: "not_found" });
+    if (!perHook(hook)) return res.status(429).json({ error: "slow_down" });
+    const out = await tm.receive(hook, req.get("authorization"), req.body as Activity).catch((err: Error) => {
+      console.warn(`[teams] an activity wasn't handled: ${err.message}`);
+      return { status: 200, body: {} };
+    });
+    res.status(out.status).json(out.body);
+  });
+  r.get("/v1/teams/connected", async (req, res) => {
+    const tm = teams();
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    if (!tm) return res.status(404).send(githubPage("Not set up", "<p>Microsoft Teams isn't set up on this Ambient server.</p>"));
+    if (typeof req.query.error === "string") {
+      const why = typeof req.query.error_description === "string" ? req.query.error_description.split("\n")[0]!.slice(0, 300) : String(req.query.error);
+      return res.status(400).send(githubPage("Not connected", `<p>Microsoft didn't connect Teams: ${esc(why)}</p><p>An admin of your company (Global admin, or Application and Teams admin) taps Connect Microsoft Teams in Ambient again.</p>`));
+    }
+    try {
+      const out = await tm.connected(typeof req.query.code === "string" ? req.query.code : "", typeof req.query.state === "string" ? req.query.state : "");
+      res.send(githubPage("Microsoft Teams is connected", `<p>Bots now go to Teams with one tap, as ${esc(out.admin)}, into the Azure subscription ${esc(out.subscription)} (resource group ambient-bots).</p><p><a href="ambient://teams/connected">Back to Ambient</a></p>`));
+    } catch (err) {
+      const msg = err instanceof TeamsError ? err.message : "Something went wrong. Try again in a minute.";
+      res.status(err instanceof TeamsError ? err.status : 500).send(githubPage("Not connected", `<p>${esc(msg)}</p>`));
+    }
+  });
+  return r;
+}
+
 export function slackHookRouter(slack: () => SlackApps | undefined): Router {
   const r = express.Router();
   const perHook = limiter(600);

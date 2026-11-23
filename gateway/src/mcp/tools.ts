@@ -310,6 +310,31 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
       },
     );
   }
+  // A bot in Teams posts news of its own in the one channel its owner chose (bots/teams-apps.ts).
+  if (principal.bot && folders?.teams) {
+    const teams = folders.teams;
+    const bot = principal.bot;
+    const owner = bot.teamId ? ({ kind: "team", teamId: bot.teamId } as const) : ({ kind: "user", uid: principal.uid } as const);
+    server.registerTool(
+      "post_to_teams",
+      {
+        title: "Post your news in Microsoft Teams",
+        description:
+          "Posts a message of your own in Microsoft Teams, as yourself, in the one channel your owner chose for your news. For news worth the channel: an alert, a result people wait for. Not for answers to a Teams message (those go back to their thread on their own), not for routine \"nothing new\" reports, questions to your owner (ask_owner) or failures. Short, plain, the most important first; Markdown works.",
+        inputSchema: { text: z.string().min(1).max(8_000) },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ text: said }: { text: string }) => {
+        try {
+          const out = await teams.postNews(owner, bot.routineId, said);
+          const where = out.channel.name ? out.channel.name : "your Teams channel";
+          return { content: [{ type: "text" as const, text: `Posted in ${where}. Replies in that thread reach you.` }], structuredContent: { posted: true, channel: out.channel } };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
+        }
+      },
+    );
+  }
   const warnings: string[] = [];
 
   /**

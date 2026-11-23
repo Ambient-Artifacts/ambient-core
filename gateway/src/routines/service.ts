@@ -420,6 +420,8 @@ export class RoutineService {
   slackToken?: (owner: Owner, routineId: string) => Promise<string | null>;
   /** What a bot in Slack is told at the start of a run: its handle and where its news goes; null: not in Slack. */
   slackFor?: (owner: Owner, routineId: string) => Promise<{ handle: string; workspace: string | null; news: string | null } | null>;
+  /** What a bot in Teams is told at the start of a run: its name and where its news goes; null: not in Teams. */
+  teamsFor?: (owner: Owner, routineId: string) => Promise<{ handle: string; news: string | null } | null>;
   /** The MCP servers a bot was given (bots/mcp-connections.ts): the name its tools carry and its address at the gateway. */
   mcpFor?: (owner: Owner, routineId: string) => Promise<{ name: string; path: string }[]>;
   /** A bot said something at the end of a run (its result): Slack answers the thread that asked. */
@@ -1175,7 +1177,7 @@ export class RoutineService {
         message:
           out.resume.kind === "answer"
             ? `${who} answered your question: ${body.text}`
-            : (out.resume.authorName === "GitHub" || out.resume.authorName === "Slack") && !(out.resume as { authorId?: string | null }).authorId
+            : (out.resume.authorName === "GitHub" || out.resume.authorName === "Slack" || out.resume.authorName === "Teams") && !(out.resume as { authorId?: string | null }).authorId
               ? body.text
               : out.resume.authorName === "Wake-up" && !(out.resume as { authorId?: string | null }).authorId
                 ? `Wake-up: ${body.text}`
@@ -1193,7 +1195,8 @@ export class RoutineService {
       const github = this.githubFor ? await this.githubFor(owner, r.id).catch(() => null) : null;
       const wakes = this.wakesFor ? await this.wakesFor({ id: r.id, teamId: r.teamId, createdBy: r.createdBy, timezone: r.schedule.timezone }).catch(() => null) : null;
       const slack = this.slackFor ? await this.slackFor(owner, r.id).catch(() => null) : null;
-      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github, wakes, slack, scheduled: r.schedule.every !== "needed" });
+      const teams = this.teamsFor ? await this.teamsFor(owner, r.id).catch(() => null) : null;
+      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github, wakes, slack, teams, scheduled: r.schedule.every !== "needed" });
       prompt = woken.prompt;
       resume = woken.resume;
       workspace = woken.workspace;
