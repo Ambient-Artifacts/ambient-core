@@ -59,6 +59,9 @@ export interface ListedPage {
   /** Who recorded the note or logged the session (their people page), from its `recorded_by`;
    *  the apps' "Mine" filter on a team's notes and sessions. Only on pages that have one. */
   recordedBy?: string;
+  /** The recording a team's own pipeline wrote this page from (its `recording_id`): the apps
+   *  list such pages among the team's recordings. Only on pages that have one. */
+  recordingId?: string;
 }
 
 const SECTIONS: Record<string, { label: string; about: string }> = {
