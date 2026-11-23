@@ -37,6 +37,8 @@ import { GitHubEvents } from "./bots/github.ts";
 import { GitHubApps } from "./bots/github-apps.ts";
 import { SlackApps } from "./bots/slack-apps.ts";
 import { TeamsApps } from "./bots/teams-apps.ts";
+import { TeamAmb } from "./bots/team-amb.ts";
+import type { AmbDoorDeps } from "./channels/amb-doors.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
 import { HistorySearch } from "./bots/history.ts";
@@ -329,14 +331,14 @@ export function createApp(deps: AppDeps) {
   // Someone asked Amb to stop texting: it writes first in the app again (set with Amb's settings, below).
   let reachBackToApp: (uid: string) => Promise<void> = async () => undefined;
   // A pick in a poll files the decision's answer (set once the decisions are up, just below).
-  let answerDecision: (uid: string, id: string, answer: string) => Promise<void> = async () => {
+  let answerDecision: (uid: string, id: string, answer: string, via?: string) => Promise<void> = async () => {
     throw new Error("Decisions aren't up yet.");
   };
   const reach = new AmbReach({ notifier, reachOf: (uid) => reachOf(uid) });
   folders.reach = reach;
   // What Amb made with its answer (a picture, a PDF) goes back with it.
   ambient.onReply = async (uid, via, text, files, react) => {
-    const made = await Promise.all(files.map((f) => ambient.file(uid, f.id).catch(() => null)));
+    const made = await Promise.all(files.map(async (f) => ({ id: f.id, ...(await ambient.file(uid, f.id)) })).map((p) => p.catch(() => null)));
     await reach.reply(uid, via, text, made.filter((f): f is NonNullable<typeof f> => f !== null), react);
   };
   if (config.linq) {
@@ -348,7 +350,7 @@ export function createApp(deps: AppDeps) {
   }
   const decisions: DecisionService = new DecisionService({ control, keys: routines.keys, routines, bots, ambient, channels: [new AppChannel(notifier)], reach, actorFor, triageMs: deps.ambient?.triageMs });
   ambient.decisionView = (uid, row) => decisions.view(uid, row);
-  answerDecision = async (uid, id, answer) => void (await decisions.answer(await actorFor(uid), id, answer, "imessage"));
+  answerDecision = async (uid, id, answer, via = "imessage") => void (await decisions.answer(await actorFor(uid), id, answer, via));
   onQuestion = (q) => void decisions.onBotQuestion(q);
   // Who Ambient's background work is for: everyone with bots or a chat with Ambient. Bots are
   // everyone's; with BRAIN_BOTS=all this was nobody (the "*" was dropped before asking Convex), so
@@ -425,9 +427,38 @@ export function createApp(deps: AppDeps) {
   folders.mcp = mcpConnections;
   routines.mcpFor = async (owner, id) => (await mcpConnections.forBot(owner, id)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id) }));
   ambientMcp = async (uid) => (await mcpConnections.forAmb(uid)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id), title: c.title }));
+  // Amb in Slack and Teams (channels/amb-doors.ts): a direct message is a door to the writer's own
+  // Amb chat; a channel gets the team's Amb, on the team's computer with the team's brain only.
+  const teamAmb = new TeamAmb({
+    computers,
+    computersOf: (uid) => routines.computersOf(uid),
+    teamsOf: (uid) => directory.teamsOf(uid),
+    teamMcp: async (uid, team) => buildMcpServer({ principal: { uid, scopes: new Set(TEAM_MCP_SCOPES), via: "pat" as const, clientId: "ambient-team", personal: false, teams: [team] }, readers, version: VERSION, personal: null }),
+    apiKey: deps.ambient ? deps.ambient.apiKey : useServerKey() ? process.env.ANTHROPIC_API_KEY : undefined,
+    model: config.ambientModel ?? "claude-sonnet-5-5",
+    fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
+  });
+  const ambDoors: AmbDoorDeps = {
+    inbox: ambient,
+    accountByEmail: async (owner, email) => {
+      const want = email.trim().toLowerCase();
+      if (owner.kind === "user") {
+        const u = await directory.user(owner.uid);
+        return u?.email?.toLowerCase() === want ? { uid: u.uid, name: u.name } : null;
+      }
+      const { users } = await control.q(api.admin.overview, {});
+      for (const u of users.filter((x) => x.email?.toLowerCase() === want)) {
+        if ((await directory.teamsOf(String(u.uid))).some((t) => t.id === owner.teamId && t.status === "active")) return { uid: String(u.uid), name: u.name };
+      }
+      return null;
+    },
+    answer: (uid, id, answer, via) => answerDecision(uid, id, answer, via),
+    teamTurn: (teamId, asker, conversation, text, files) => teamAmb.turn(teamId, asker, conversation, text, files),
+  };
   // Bots' own Slack apps (docs/bots.md, "Slack"): one app per bot, made by Ambient, one tap to install.
-  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
+  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, amb: ambDoors, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
   folders.slack = slack;
+  reach.add(slack.ambChannel());
   routines.slackToken = (owner, id) => slack.botToken(owner, id);
   routines.slackFor = (owner, id) => slack.forRun(owner, id);
   // Bots' own Microsoft Teams apps (docs/bots.md, "Microsoft Teams"): made in the company's own tenant.
@@ -442,6 +473,7 @@ export function createApp(deps: AppDeps) {
         startNow: (hostId, routineId) => computers.start(hostId, routineId),
         emailOf: async (uid) => (await directory.user(uid))?.email ?? null,
         attachments,
+        amb: ambDoors,
         // A click on a question's card (or a reply to it) answers it as its owner would in the
         // bot's thread, while that question is still the open one.
         answer: async (uid, routineId, questionId, text) => {
@@ -463,6 +495,7 @@ export function createApp(deps: AppDeps) {
       })
     : undefined;
   folders.teams = teamsApps;
+  if (teamsApps) reach.add(teamsApps.ambChannel());
   routines.teamsFor = teamsApps ? (owner, id) => teamsApps.forRun(owner, id) : undefined;
   // A bot's words go to the Slack and Teams threads its run took (each knows its own).
   routines.onBotSaid = (owner, id, text, final, runId) => {

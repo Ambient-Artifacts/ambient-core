@@ -99,6 +99,11 @@ const microsoft: typeof fetch = async (input, init) => {
   if (url.origin + "/" === new URL(SERVICE).origin + "/" && url.pathname.startsWith("/emea/v3/conversations/")) {
     if (auth !== "Bearer bot-token") return json(401, {});
     const conv = decodeURIComponent(url.pathname.split("/")[4]!);
+    // A member of the conversation, with the email Teams knows.
+    if (method === "GET" && url.pathname.includes("/members/")) {
+      const who = decodeURIComponent(url.pathname.split("/").pop()!);
+      return json(200, who === "29:lena" ? { id: who, name: "Lena Vogel", email: "apple-lena-teams@example.com", aadObjectId: LENA } : { id: who, name: "Max", email: "max@other.example" });
+    }
     const b = JSON.parse(String(body)) as Record<string, unknown>;
     if (method === "PUT") {
       updated.push({ conv, id: decodeURIComponent(url.pathname.split("/")[6]!), body: b });
@@ -423,5 +428,44 @@ describe("a bot's own Teams app", () => {
     expect(deletes).toEqual(expect.arrayContaining(["/v1.0/appCatalogs/teamsApps/catalog-1", "/v1.0/applications/app-object-1"]));
     expect(deletes.some((p) => /\/botServices\/ambient-chatty-/.test(p))).toBe(true);
     expect((await call("GET", `/v1/app/routines/${bot}/teams`)).json).toMatchObject({ app: null });
+  });
+});
+
+describe("Ambient itself in Teams", () => {
+  let ambHook = "";
+  it("is made like a bot's app, under its own name", async () => {
+    const before = seen.length;
+    const out = await call("POST", "/v1/app/teams/ambient", { name: "Acme Brain" });
+    expect(out.status, JSON.stringify(out.json)).toBe(200);
+    const botPut = seen.slice(before).filter((c) => c.method === "PUT" && /\/botServices\/ambient-acme-brain-[0-9a-f]{8}\?/.test(c.url)).at(-1)!;
+    ambHook = new URL((JSON.parse(String(botPut.body)) as { properties: { endpoint: string } }).properties.endpoint).pathname;
+    expect(JSON.parse(published!.get("manifest.json")!.toString())).toMatchObject({ name: { short: "Acme Brain" } });
+    expect((await call("GET", "/v1/app/teams/ambient")).json).toMatchObject({ tenant: true, app: { name: "Acme Brain", ready: true } });
+  });
+
+  it("takes a direct chat into the writer's own Amb chat and answers there; strangers are told", async () => {
+    sent = [];
+    expect(await send(activity({ text: "<p>what's waiting on me?</p>", conversation: { id: "a:amb-lena", conversationType: "personal", tenantId: TENANT } }), undefined, ambHook)).toBe(200);
+    const chat = (await call("GET", "/v1/app/ambient/chat")).json as { messages: { role: string; text: string }[] };
+    expect(chat.messages.some((m) => m.role === "user" && m.text.includes("what's waiting on me?"))).toBe(true);
+    expect(sent.some((m) => m.conv === "a:amb-lena")).toBe(true);
+    await send(activity({ from: { id: "29:max", name: "Max", aadObjectId: STRANGER }, text: "hi", conversation: { id: "a:amb-max", conversationType: "personal", tenantId: TENANT } }), undefined, ambHook);
+    expect(String(sent.at(-1)!.body.text)).toContain("no Ambient account here has the email max@other.example");
+    // A channel where Teams is connected for one person: no team brain to answer from.
+    await send(activity({ text: "<at>Acme Brain</at> news?", conversation: { id: "19:chan@thread.tacv2", conversationType: "channel", tenantId: TENANT }, entities: [{ type: "mention", mentioned: { id: `28:${BOT_APP}` } }] }), undefined, ambHook);
+    expect(String(sent.at(-1)!.body.text)).toContain("connected for one person");
+  });
+
+  it("asks a decision as a card, and a click files the answer", async () => {
+    const { decisionCard } = await import("../src/bots/teams-apps.ts");
+    const card = decisionCard("Chatty asks: ship it?", { decisionId: "dec1", choices: ["Yes", "No"] }) as { actions: { title: string; data: Record<string, string> }[] };
+    expect(card.actions.map((a) => a.title)).toEqual(["Yes", "No", "Send"]);
+    expect(card.actions[0]!.data).toMatchObject({ ambient: "decision", d: "dec1", o: "Yes" });
+    // A click on a decision that doesn't exist: said, not swallowed.
+    sent = [];
+    updated = [];
+    await send(activity({ value: { ambient: "decision", d: "nope", o: "Yes" }, replyToId: "card-1", conversation: { id: "a:amb-lena", conversationType: "personal", tenantId: TENANT } }), undefined, ambHook);
+    expect(updated.length + sent.length).toBeGreaterThan(0);
+    expect((await call("DELETE", "/v1/app/teams/ambient")).status).toBe(204);
   });
 });

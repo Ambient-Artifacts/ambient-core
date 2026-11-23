@@ -1112,6 +1112,8 @@ function registerSlackTools(
         refresh_token: z.string().max(500).optional().describe("The configuration token's refresh token (xoxe-…)."),
         ...teamArg,
         disconnect: z.boolean().optional(),
+        ambient: z.enum(["add", "remove", "status"]).optional().describe("Ambient itself in the workspace: add gives the Allow link for its own app (direct messages reach each person's own Ambient; in a channel it answers from the team's brain), remove takes it out."),
+        ambient_name: z.string().trim().min(1).max(35).optional().describe('Its name in Slack, when the user wants another than "Ambient" (e.g. "ACME Brain").'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -1119,6 +1121,12 @@ function registerSlackTools(
       guard(async () => {
         const team = typeof args.team === "string" ? args.team : null;
         const owner = routines.botOwner(actor, team);
+        if (args.ambient === "status") return result(JSON.stringify(await slack.ambStatus(owner)), await slack.ambStatus(owner));
+        if (args.ambient === "remove") return result((await slack.remove(owner, "amb")) ? "Ambient's Slack app is deleted." : "Ambient isn't in Slack.");
+        if (args.ambient === "add") {
+          const out = await slack.addAmb(owner, actor.uid, typeof args.ambient_name === "string" ? args.ambient_name : undefined);
+          return result(out.installed ? "Ambient is in Slack already. Message it directly, or invite it to a channel and mention it." : `[Add Ambient to Slack](${out.url}): tap Allow. Then message it directly, or invite it to a channel and mention it.`, out);
+        }
         if (args.disconnect === true) {
           await slack.disconnect(owner);
           return result("Slack is disconnected. Bots already in Slack stay there; new ones need it connected again.");
@@ -1196,6 +1204,8 @@ function registerTeamsTools(
         status: z.boolean().optional(),
         subscription: z.string().max(64).optional().describe("An Azure subscription id from `subscriptions`, for new bots."),
         disconnect: z.boolean().optional(),
+        ambient: z.enum(["add", "remove", "status"]).optional().describe("Ambient itself in the company's Teams: add makes its own Teams app (direct chats reach each person's own Ambient; in a channel it answers from the team's brain) and gives the link to open it; remove takes it out."),
+        ambient_name: z.string().trim().min(1).max(30).optional().describe('Its name in Teams, when the user wants another than "Ambient" (e.g. "ACME Brain").'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -1203,6 +1213,12 @@ function registerTeamsTools(
       guard(async () => {
         const team = typeof args.team === "string" ? args.team : null;
         const owner = routines.botOwner(actor, team);
+        if (args.ambient === "status") return result(JSON.stringify(await teams.ambStatus(owner)), await teams.ambStatus(owner));
+        if (args.ambient === "remove") return result((await teams.remove(owner, "amb")) ? "Ambient is out of Teams: its app, Azure Bot and app registration are deleted." : "Ambient isn't in Teams.");
+        if (args.ambient === "add") {
+          const out = await teams.addAmb(owner, actor.uid, typeof args.ambient_name === "string" ? args.ambient_name : undefined);
+          return result(`[Open Ambient in Teams](${out.url}): tap Add. Then chat with it directly, or add it to a team and mention it in a channel.`, out);
+        }
         if (args.disconnect === true) {
           await teams.disconnect(owner);
           return result("Microsoft Teams is disconnected. Bots already in Teams stay there; new ones need it connected again.");
@@ -1482,14 +1498,14 @@ function registerLearningTools(
       {
         title: "Ambient's settings",
         description:
-          'Two things about how Ambient reaches the user. notify: whether it tells them when one of their bots needs them ("important": a failed run, a decision waiting long, an approval; "never"). reach: where it writes first when it does ("app": a push; "imessage": a text, once they connected iMessage with connect_imessage). An answer always goes back where they asked, whatever reach is. Change either only when they ask.',
-        inputSchema: { notify: z.enum(["important", "never"]).optional(), reach: z.enum(["app", "imessage"]).optional() },
+          'Two things about how Ambient reaches the user. notify: whether it tells them when one of their bots needs them ("important": a failed run, a decision waiting long, an approval; "never"). reach: where it writes first when it does ("app": a push; "imessage": a text, once they connected iMessage with connect_imessage; "slack" or "teams": a direct message from Ambient there, once they wrote to it there once). An answer always goes back where they asked, whatever reach is. Change either only when they ask.',
+        inputSchema: { notify: z.enum(["important", "never"]).optional(), reach: z.enum(["app", "imessage", "slack", "teams"]).optional() },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
       async ({ notify, reach }) =>
         guard(async () => {
           const v = notify || reach ? await settings.set(actor.uid, { ...(notify ? { notify } : {}), ...(reach ? { reach } : {}) }) : await settings.get(actor.uid);
-          const where = v.reach === "imessage" ? "It writes to them first on iMessage." : "It writes to them first in the app (a push).";
+          const where = v.reach === "imessage" ? "It writes to them first on iMessage." : v.reach === "slack" ? "It writes to them first in Slack." : v.reach === "teams" ? "It writes to them first in Microsoft Teams." : "It writes to them first in the app (a push).";
           return result(`${v.notify === "never" ? "Ambient doesn't tell them about their bots on its own." : "Ambient tells them when a bot needs them (failed runs, decisions waiting, approvals)."} ${where}`, { settings: v });
         }),
     );

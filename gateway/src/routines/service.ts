@@ -468,11 +468,11 @@ export class RoutineService {
    * Where Ambient can run for a user, in order: their own computers, then their teams' servers
    * (Ambient's own machine for the team, one session per person there).
    */
-  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null }[]> {
+  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null; teamId: string | null }[]> {
     const teams = ((await this.d.teamsOf?.(uid).catch(() => [])) ?? []).filter((t) => t.status === "active");
     const out = (await this.d.control.q(api.routines.list, { uid: uid as never, teamIds: teams.map((t) => t.id) as never })) as unknown as { hosts: HostRow[] };
     const ready = out.hosts.filter((h) => h.ready);
-    return [...ready.filter((h) => !h.teamId), ...ready.filter((h) => h.teamId)].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null }));
+    return [...ready.filter((h) => !h.teamId), ...ready.filter((h) => h.teamId)].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null, teamId: h.teamId ? String(h.teamId) : null }));
   }
 
   get keys(): RoutineKeys {

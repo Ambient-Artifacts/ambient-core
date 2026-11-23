@@ -1137,8 +1137,7 @@ registration and a free Azure Bot (F0) in the company's Azure subscription
   its app registration, and forgets it here.
 - **Where it's kept.** Sealed records (kinds `teams:tenant`, `teams:app`, `teams:reply`), nothing
   new in Convex. The bot's secret never leaves the gateway.
-- **Not yet:** decisions Amb brings to the person (they reach the app and iMessage), Amb in
-  Teams, a new secret before the two years are up, and installing it for the owner without the
+- **Not yet:** a new secret before the two years are up, and installing it for the owner without the
   Add tap.
 
 ## Files in Slack and Teams
@@ -1162,6 +1161,31 @@ Every bot takes and sends files wherever it's reached, as in the app (`gateway/s
   Ambient, for 7 days; the file stays in the bot's thread).
 - **Amb** takes and sends files in the app and on iMessage already; in Slack and Teams it will by
   the same code.
+
+## Amb in Slack and Teams
+
+Ambient itself gets its own app in a company's Slack or Teams, made like a bot's ("Ambient", or the
+name the company gives it, like "ACME Brain"): `POST /v1/app/slack/ambient` / `POST
+/v1/app/teams/ambient` `{ "name"? }` (`?team=<slug>` for a team's workspace), `GET` for its state,
+`DELETE` to take it out; from the person's AI, `connect_slack` / `connect_teams` with `ambient: "add" | "remove" | "status"`.
+Its records live with the owner under the key `amb` (`gateway/src/channels/amb-doors.ts`). Who it
+serves depends on where it's written to, decided in code, never by the model:
+
+- **A direct message** is matched to an Ambient account by the writer's email (Slack:
+  `users:read.email`, only Amb's app asks for it; Teams: the member's email), among the people the
+  owner covers (the person, or the team's members). It goes into that person's own Amb chat, as
+  another door like iMessage: the same conversation, the answer goes back there, files both ways.
+  That DM is kept as the person's door (`slack:amb-link` / `teams:amb-link`), so "Reach me on"
+  can be Slack or Teams (`reach: "slack" | "teams"`, once they wrote there). In Teams, Amb's
+  decisions come as cards (a button per answer and a box; a click files the answer as that person,
+  `via: "teams"`). Someone with no account is told once that their email isn't on one.
+- **A channel or group chat** (an @mention) gets the team's Amb (`gateway/src/bots/team-amb.ts`):
+  only where a team connected the workspace; it runs on the team's own computer (the one for its
+  bots) as a short session apart from anyone's chat, with the asker's token for that team alone
+  (`resource: team`), so no personal note, bot or chat can reach a channel; what it may change, it
+  may as the asker. The thread's last 12 turns are kept in memory for 6 hours, for a follow-up.
+  Without a team computer, the server's key answers where the operator pays (read-only team tools),
+  else it says how to connect one.
 
 ## MCP connections
 

@@ -92,7 +92,7 @@ beforeAll(async () => {
           if (postError) return json({ ok: false, error: postError });
           return json({ ok: true, ts: `1800000000.000${++posted}` });
         case "users.info":
-          return json({ ok: true, user: { real_name: "Lena Vogel", profile: { display_name: "Lena" } } });
+          return json({ ok: true, user: { real_name: args.user === "U_LENA" ? "Lena Vogel" : "Max", profile: { display_name: args.user === "U_LENA" ? "Lena" : "Max", email: args.user === "U_LENA" ? "apple-lena-slack@example.com" : "max@other.example" } } });
         case "files.getUploadURLExternal":
           return json({ ok: true, upload_url: `${slackBase}/upload/F1`, file_id: "F1" });
         case "files.completeUploadExternal":
@@ -403,6 +403,40 @@ describe("a bot's own Slack app", () => {
     expect(calls.find((c) => c.method === "files.completeUploadExternal")!.args).toMatchObject({ channel_id: "D1", thread_ts: "1800000011.0001" });
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Done." });
     await s.folders.slack!.idle();
+  });
+
+  it("puts Ambient itself in the workspace: a direct message is the writer's own Amb chat, answered there", async () => {
+    const add = await call("POST", "/v1/app/slack/ambient", { name: "Acme Brain" });
+    expect(add.status, JSON.stringify(add.json)).toBe(200);
+    expect(manifest).toMatchObject({ display_information: { name: "Acme Brain" } });
+    expect((manifest.oauth_config as { scopes: { bot: string[] } }).scopes.bot).toContain("users:read.email");
+    const ambHook = hookPath();
+    expect(new URL(String(add.json.url)).searchParams.get("scope")).toContain("users:read.email");
+    await fetch(`${s.origin}/v1/slack/installed?code=good-code&state=${encodeURIComponent(new URL(String(add.json.url)).searchParams.get("state")!)}`, { redirect: "manual" });
+    expect((await call("GET", "/v1/app/slack/ambient")).json).toMatchObject({ workspace: true, app: { name: "Acme Brain", installed: true } });
+    // Lena writes to it directly: her own Amb chat takes it, and the answer comes back in that DM.
+    const before = posts().length;
+    await sendEvent({ type: "event_callback", event_id: "EvA1", event: { type: "message", channel_type: "im", user: "U_LENA", text: "what's waiting on me?", channel: "DA", ts: "1800000020.0001" } }, { path: ambHook });
+    await s.folders.slack!.idle();
+    const answer = posts().slice(before).find((p) => p.args.channel === "DA");
+    expect(answer, JSON.stringify(posts().slice(before))).toBeDefined();
+    expect(answer!.args.thread_ts).toBeUndefined();
+    const chat = (await call("GET", "/v1/app/ambient/chat")).json as { messages: { role: string; text: string; via?: string | null }[] };
+    expect(chat.messages.some((m) => m.role === "user" && m.text.includes("what's waiting on me?"))).toBe(true);
+    // Someone with no Ambient account: told so once, and nothing reaches anyone's chat.
+    await sendEvent({ type: "event_callback", event_id: "EvA2", event: { type: "message", channel_type: "im", user: "U_MAX", text: "hi", channel: "DM2", ts: "1800000021.0001" } }, { path: ambHook });
+    await s.folders.slack!.idle();
+    expect(String(posts().at(-1)!.args.text)).toContain("no Ambient account here has the email max@other.example");
+    // In a channel of a workspace connected for one person: no team brain to answer from.
+    await sendEvent({ type: "event_callback", event_id: "EvA3", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> what's new?", channel: "C9", ts: "1800000022.0001" } }, { path: ambHook });
+    await s.folders.slack!.idle();
+    expect(String(posts().at(-1)!.args.text)).toContain("connected for one person");
+    // Its Slack door can be where Amb writes first.
+    const pat = String((await call("POST", "/v1/app/pats", { label: "Claude amb" })).json.token);
+    const mcp = await mcpClient(`${s.origin}/mcp`, pat);
+    expect(text(await mcp.callTool({ name: "connect_slack", arguments: { ambient: "status" } }))).toContain("Acme Brain");
+    await mcp.close();
+    expect((await call("DELETE", "/v1/app/slack/ambient")).status).toBe(204);
   });
 
   it("takes its face as its icon, and leaves Slack when it's taken out", async () => {

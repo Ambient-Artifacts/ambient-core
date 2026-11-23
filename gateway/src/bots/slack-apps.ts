@@ -26,6 +26,8 @@ import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
 import { download, leftLine, takeFiles, type OfferedFile } from "../channels/channel-files.ts";
+import { AMB, forAmb, type AmbDoorDeps } from "../channels/amb-doors.ts";
+import type { AmbChannel, OutFile } from "../channels/reach.ts";
 
 const WORKSPACE = "slack:workspace";
 const APP = "slack:app";
@@ -44,6 +46,10 @@ const PART_MAX = 3_500;
 /** `channels:read` and `groups:read`: the names of the channels it's in (for "Posts news in #anomalies"). */
 /** `files:read` and `files:write`: files sent with a message reach the bot, and files it makes reach the thread. */
 export const SLACK_SCOPES = ["app_mentions:read", "chat:write", "channels:history", "channels:read", "groups:history", "groups:read", "im:history", "im:read", "im:write", "reactions:write", "users:read", "files:read", "files:write"];
+/** Amb's app also reads people's emails: a direct message reaches the writer's own Ambient account. */
+export const SLACK_AMB_SCOPES = [...SLACK_SCOPES, "users:read.email"];
+const scopesFor = (id: string) => (id === AMB ? SLACK_AMB_SCOPES : SLACK_SCOPES);
+const AMB_LINK = "slack:amb-link";
 /** `message.channels` and `message.groups`: replies in the thread under a post of its own reach it without an @mention. */
 export const SLACK_EVENTS = ["app_mention", "message.im", "message.channels", "message.groups"];
 /** Channels remembered per bot, and posts of its own whose threads it listens to. */
@@ -166,6 +172,8 @@ export class SlackApps {
       /** Slack's Web API (tests: a stand-in). */
       apiBase?: string;
       now?: () => number;
+      /** Amb in Slack: its chat, and whose account a direct message is (channels/amb-doors.ts). */
+      amb?: AmbDoorDeps;
     },
   ) {}
 
@@ -403,21 +411,22 @@ export class SlackApps {
     if (!app) throw new SlackError("no_app", "This bot has no Slack app yet.", 404);
     const ws = await this.configToken(owner);
     const hook = this.sign("hook", refOf(owner, bot.id));
-    const out = await this.call("apps.manifest.update", ws.token, { app_id: app.appId, manifest: JSON.stringify(this.manifest(app.name, hook)) }, { form: true });
+    const out = await this.call("apps.manifest.update", ws.token, { app_id: app.appId, manifest: JSON.stringify(this.manifest(app.name, hook, bot.id)) }, { form: true });
     if (!out.ok) throw new SlackError("slack_failed", `Slack didn't update the app (${out.error ?? "no reason"}).`, 502);
     return { url: this.installUrl(owner, bot.id, uid, app, ws.teamId) };
   }
 
   /** The manifest Slack gets: the bot's name, Ambient's addresses, what it may read and say. */
-  manifest(name: string, hook: string): Record<string, unknown> {
+  manifest(name: string, hook: string, id = ""): Record<string, unknown> {
     const shown = name.trim().slice(0, NAME_MAX) || "Bot";
+    const about = id === AMB ? `${shown}: Ambient, your team's brain. Message it directly, or mention it in a channel.` : `${shown}, a bot in Ambient. Mention it or send it a message.`;
     return {
-      display_information: { name: shown, description: `${shown}, a bot in Ambient. Mention it or send it a message.`.slice(0, 140), background_color: "#2f2f31" },
+      display_information: { name: shown, description: about.slice(0, 140), background_color: "#2f2f31" },
       features: {
         app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
         bot_user: { display_name: shown, always_online: true },
       },
-      oauth_config: { redirect_urls: [`${this.base()}/v1/slack/installed`], scopes: { bot: SLACK_SCOPES } },
+      oauth_config: { redirect_urls: [`${this.base()}/v1/slack/installed`], scopes: { bot: scopesFor(id) } },
       settings: {
         event_subscriptions: { request_url: `${this.base()}/v1/hooks/slack/${hook}`, bot_events: SLACK_EVENTS },
         org_deploy_enabled: false,
@@ -437,7 +446,7 @@ export class SlackApps {
     const ws = await this.configToken(owner);
     if (!app) {
       const hook = this.sign("hook", refOf(owner, bot.id));
-      const out = await this.call<{ app_id?: string; credentials?: { client_id?: string; client_secret?: string; signing_secret?: string }; errors?: { message?: string; pointer?: string }[] }>("apps.manifest.create", ws.token, { manifest: JSON.stringify(this.manifest(bot.name, hook)) }, { form: true });
+      const out = await this.call<{ app_id?: string; credentials?: { client_id?: string; client_secret?: string; signing_secret?: string }; errors?: { message?: string; pointer?: string }[] }>("apps.manifest.create", ws.token, { manifest: JSON.stringify(this.manifest(bot.name, hook, bot.id)) }, { form: true });
       if (!out.ok || !out.app_id || !out.credentials?.client_id || !out.credentials.client_secret || !out.credentials.signing_secret) {
         const why = out.errors?.map((e) => `${e.pointer ?? ""} ${e.message ?? ""}`.trim()).join("; ");
         throw new SlackError("slack_failed", `Slack didn't make the app (${out.error ?? "no reason"}${why ? `: ${why}` : ""}).`, 502);
@@ -450,7 +459,7 @@ export class SlackApps {
 
   private installUrl(owner: Owner, routineId: string, uid: string, app: AppRecord, teamId?: string | null): string {
     const state = this.sign("install", { ...refOf(owner, routineId), u: uid, n: randomBytes(9).toString("base64url"), e: this.now() + STATE_TTL_MS });
-    const q = new URLSearchParams({ client_id: app.clientId, scope: SLACK_SCOPES.join(","), redirect_uri: `${this.base()}/v1/slack/installed`, state });
+    const q = new URLSearchParams({ client_id: app.clientId, scope: scopesFor(routineId).join(","), redirect_uri: `${this.base()}/v1/slack/installed`, state });
     if (teamId ?? app.teamId) q.set("team", (teamId ?? app.teamId)!);
     return `https://slack.com/oauth/v2/authorize?${q.toString()}`;
   }
@@ -550,6 +559,7 @@ export class SlackApps {
   }
 
   private async onEvent(owner: Owner, routineId: string, app: AppRecord, e: SlackEvent): Promise<void> {
+    if (routineId === AMB) return this.onAmbEvent(owner, app, e);
     const dm = e.type === "message" && e.channel_type === "im";
     // A reply in the thread under a post of its own counts as written to it. One that also
     // mentions it comes as an app_mention too, and is taken there.
@@ -609,6 +619,93 @@ export class SlackApps {
     if (out.ok && !out.enabled) await this.post(app.botToken, e.channel, thread, "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", true);
   }
 
+  // ---- Amb in Slack (channels/amb-doors.ts) ----
+
+  /** Amb's app in the workspace, made like a bot's, under the key "amb" (one tap: Allow). */
+  async addAmb(owner: Owner, uid: string, name = "Ambient"): Promise<{ url: string; installed: boolean }> {
+    if (!this.d.amb) throw new SlackError("not_set_up", "Amb isn't set up for Slack on this server.", 404);
+    return this.add(owner, { id: AMB, name }, uid);
+  }
+
+  /** Whether Amb is in the workspace, and under which name. */
+  async ambStatus(owner: Owner): Promise<{ workspace: boolean; app: { name: string; installed: boolean } | null }> {
+    const [ws, app] = await Promise.all([this.get<Workspace>(owner, WORKSPACE, "workspace"), this.get<AppRecord>(owner, APP, AMB)]);
+    return { workspace: !!ws, app: app ? { name: app.name, installed: !!app.botToken } : null };
+  }
+
+  /** Someone writes to Amb in Slack: a direct message goes to their own Amb chat; a channel to the team's Amb. */
+  private async onAmbEvent(owner: Owner, app: AppRecord, e: SlackEvent): Promise<void> {
+    const amb = this.d.amb;
+    const dm = e.type === "message" && e.channel_type === "im";
+    if (!amb || (e.type !== "app_mention" && !dm)) return;
+    if (e.bot_id || (e.subtype && e.subtype !== "file_share") || !e.user || !e.channel || !e.ts || !app.botToken) return;
+    if (e.user === app.botUserId) return;
+    const token = app.botToken;
+    const thread = e.thread_ts ?? e.ts;
+    const reply = (text: string) => this.post(token, e.channel!, dm ? "" : thread, text, true);
+    const email = await this.emailOf(token, e.user);
+    const account = email ? await amb.accountByEmail(owner, email).catch(() => null) : null;
+    if (!account) {
+      const warnKey = `amb:${e.user}`;
+      if (!this.warned.has(warnKey)) {
+        this.warned.add(warnKey);
+        await reply(email ? `I don't know you yet: no Ambient account here has the email ${email}. Ask your team's admin to invite you to Ambient.` : "I can't see your email in Slack, so I don't know who you are in Ambient.");
+      }
+      return;
+    }
+    const text = slackToPlain((e.text ?? "").replace(new RegExp(`<@${app.botUserId}>`, "g"), "").trim());
+    const canRead = SlackApps.canFiles(app);
+    const taken = await takeFiles(
+      (e.files ?? [])
+        .filter((f) => f.mode !== "tombstone" && f.mode !== "external")
+        .map((f): OfferedFile => ({ name: f.name ?? f.title ?? "file", type: f.mimetype, size: f.size, fetch: canRead && (f.url_private_download ?? f.url_private) ? () => download(this.d.fetchImpl ?? fetch, (f.url_private_download ?? f.url_private)!, { authorization: `Bearer ${token}` }) : null, why: "Amb's Slack app may not open files yet" })),
+    );
+    const { files, left } = forAmb(taken.files);
+    const all = [...taken.left, ...left];
+    if (!text && !files.length && !all.length) return;
+    void this.call("reactions.add", token, { channel: e.channel, timestamp: e.ts, name: "eyes" }).catch(() => undefined);
+    if (!dm) {
+      // A channel: the team's Amb, with the team's brain only.
+      if (owner.kind !== "team" || !amb.teamTurn) {
+        await reply("In a channel I answer from a team's brain, and this workspace is connected for one person. Write to me directly instead.");
+        return;
+      }
+      const answer = await amb.teamTurn(owner.teamId, account, `slack:${e.channel}:${thread}`, `${text}${leftLine(all)}`, files).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
+      if (answer?.text) await this.post(token, e.channel, thread, answer.text);
+      return;
+    }
+    // A direct message: their own Amb, and this chat is their Slack door to it.
+    await this.put({ kind: "user", uid: account.uid }, AMB_LINK, "link", { ...refOf(owner, AMB), channel: e.channel, lastTs: e.ts, at: this.now() } satisfies AmbLink);
+    await amb.inbox.sendQueued(account.uid, await amb.inbox.nameOf(account.uid).catch(() => account.name), `${text || `sent ${files.length === 1 ? "a file" : "files"}`}${leftLine(all)}`, "slack", files);
+  }
+
+  /** The Slack user's email (Amb's app may read it: users:read.email). */
+  private async emailOf(token: string, user: string): Promise<string | null> {
+    const out = await this.call<{ user?: { profile?: { email?: string } } }>("users.info", token, { user }, { form: true }).catch(() => null);
+    return out?.user?.profile?.email?.toLowerCase() ?? null;
+  }
+
+  /** Amb's Slack door for one person: their direct message with Amb's app, for answers and for what Amb says first. */
+  ambChannel(): AmbChannel {
+    const link = async (uid: string) => {
+      const l = await this.get<AmbLink>({ kind: "user", uid }, AMB_LINK, "link");
+      if (!l) return null;
+      const app = await this.get<AppRecord>(ownerOf(l), APP, AMB);
+      return app?.botToken ? { l, app, token: app.botToken } : null;
+    };
+    return {
+      kind: "slack",
+      linked: async (uid) => !!(await link(uid)),
+      send: async (uid: string, text: string, opts: { first?: boolean; files?: OutFile[]; react?: string } = {}) => {
+        const found = await link(uid);
+        if (!found) throw new SlackError("not_linked", "Not linked to Slack.", 400);
+        if (opts.react) await this.call("reactions.add", found.token, { channel: found.l.channel, timestamp: found.l.lastTs, name: slackEmoji(opts.react) }).catch(() => undefined);
+        if (text.trim()) await this.post(found.token, found.l.channel, "", text);
+        for (const f of opts.files ?? []) await this.upload(found.app, found.l.channel, "", { name: f.name, type: f.type, data: f.bytes.toString("base64") });
+      },
+    };
+  }
+
   /**
    * A file the bot made (send_file) into a Slack thread, as itself: Slack's upload URL, the bytes,
    * then the file shared in the thread. An app that may not send files says where it is instead.
@@ -625,7 +722,7 @@ export class SlackApps {
     }
     const put = await (this.d.fetchImpl ?? fetch)(url.upload_url, { method: "POST", headers: { "content-type": f.type || "application/octet-stream" }, body: new Uint8Array(bytes), signal: AbortSignal.timeout(60_000) });
     if (!put.ok) throw new SlackError("slack_failed", `Slack didn't take the file (HTTP ${put.status}).`, 502);
-    const done = await this.call("files.completeUploadExternal", app.botToken, { files: JSON.stringify([{ id: url.file_id, title: f.name }]), channel_id: channel, thread_ts: threadTs }, { form: true });
+    const done = await this.call("files.completeUploadExternal", app.botToken, { files: JSON.stringify([{ id: url.file_id, title: f.name }]), channel_id: channel, ...(threadTs ? { thread_ts: threadTs } : {}) }, { form: true });
     if (!done.ok) throw new SlackError("slack_failed", `Slack didn't share the file (${done.error ?? "no reason"}).`, 502);
   }
 
@@ -641,7 +738,7 @@ export class SlackApps {
   /** Into a Slack thread: a bot's Markdown (`mrkdwn`: Ambient's own notice, already Slack's markup). */
   private async post(token: string, channel: string, threadTs: string, text: string, mrkdwn = false): Promise<void> {
     for (const part of splitText(mrkdwn ? text : markdownToSlack(text))) {
-      const out = await this.call("chat.postMessage", token, { channel, thread_ts: threadTs, text: part, unfurl_links: false });
+      const out = await this.call("chat.postMessage", token, { channel, ...(threadTs ? { thread_ts: threadTs } : {}), text: part, unfurl_links: false });
       if (!out.ok) throw new SlackError("slack_failed", `Slack didn't take the message (${out.error ?? "no reason"}).`, 502);
     }
   }
@@ -708,6 +805,20 @@ export class SlackApps {
       })(),
     );
   }
+}
+
+/** A person's Slack door to Amb: whose workspace app, and their direct message with it. */
+interface AmbLink extends Ref {
+  channel: string;
+  /** Their last message there (Amb's reaction goes on it). */
+  lastTs: string;
+  at: number;
+}
+
+/** Slack's name for a few emoji Amb reacts with (others: a thumbs up). */
+function slackEmoji(e: string): string {
+  const names: Record<string, string> = { "👍": "+1", "❤️": "heart", "😂": "joy", "🙏": "pray", "🎉": "tada", "🔥": "fire", "🤝": "handshake", "👀": "eyes", "✅": "white_check_mark", "🙂": "slightly_smiling_face" };
+  return names[e] ?? "+1";
 }
 
 interface SlackEvent {

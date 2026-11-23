@@ -29,6 +29,8 @@ import { splitText } from "./slack-apps.ts";
 import { pngSize, teamsPackage } from "./teams-package.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
 import { download, FILES_BYTES_MAX, leftLine, takeFiles, type OfferedFile } from "../channels/channel-files.ts";
+import { AMB, forAmb, type AmbDoorDeps } from "../channels/amb-doors.ts";
+import type { AmbChannel, OutFile, Question } from "../channels/reach.ts";
 
 const TENANT = "teams:tenant";
 const APP = "teams:app";
@@ -41,6 +43,7 @@ const TARGETS_MAX = 10;
 const ASK_FOR_MS = 24 * 3600_000;
 const ADAPTIVE_CARD = "application/vnd.microsoft.card.adaptive";
 const FILE_INFO = "application/vnd.microsoft.teams.file.download.info";
+const AMB_LINK = "teams:amb-link";
 /** A picture up to this size goes inline in the message; anything else as a card with a link. */
 const INLINE_MAX = 1024 * 1024;
 /** How long a file's download link works. */
@@ -228,6 +231,8 @@ export class TeamsApps {
       /** How long to wait before asking Azure again while a new app registration spreads. */
       retryMs?: number;
       now?: () => number;
+      /** Amb in Teams: its chat, and whose account a direct message is (channels/amb-doors.ts). */
+      amb?: AmbDoorDeps;
     },
   ) {}
 
@@ -717,6 +722,7 @@ export class TeamsApps {
     }
     const kind = a.conversation.conversationType ?? (a.channelData?.channel ? "channel" : a.conversation.isGroup ? "groupChat" : "personal");
     const client = this.client(app);
+    if (routineId === AMB) return this.onAmbActivity(owner, app, client, a, kind);
     if (a.type === "conversationUpdate") {
       const added = a.membersAdded?.some((m) => m.id === a.recipient.id);
       if (!added) return;
@@ -802,6 +808,111 @@ export class TeamsApps {
     return out;
   }
 
+  // ---- Amb in Teams (channels/amb-doors.ts) ----
+
+  /** Amb's app in the company's Teams, made like a bot's, under the key "amb". */
+  async addAmb(owner: Owner, uid: string, name = "Ambient"): Promise<{ url: string; chatUrl: string; ready: true; installed: boolean; installer: string }> {
+    if (!this.d.amb) throw new TeamsError("not_set_up", "Amb isn't set up for Teams on this server.", 404);
+    return this.add(owner, { id: AMB, name }, uid);
+  }
+
+  async ambStatus(owner: Owner): Promise<{ tenant: boolean; app: { name: string; ready: boolean; url: string | null } | null }> {
+    const [t, app] = await Promise.all([this.get<Tenant>(owner, TENANT, "tenant"), this.get<AppRecord>(owner, APP, AMB)]);
+    return { tenant: !!t, app: app ? { name: app.name, ready: !!app.catalogId, url: app.catalogId ? this.openUrl(app) : null } : null };
+  }
+
+  /** Someone writes to Amb in Teams: a direct chat goes to their own Amb chat; a channel to the team's Amb. */
+  private async onAmbActivity(owner: Owner, app: AppRecord, client: BotClient, a: Activity, kind: string): Promise<void> {
+    const amb = this.d.amb;
+    if (!amb) return;
+    if (a.type === "conversationUpdate") {
+      if (kind === "personal" && a.membersAdded?.some((m) => m.id === a.recipient.id)) {
+        await client.send(a.serviceUrl, a.conversation.id, { text: `Hi, I'm ${app.name}. Write to me here like in the Ambient app: it's the same conversation. In a channel, mention me and I answer from your team's brain.`, textFormat: "markdown" }).catch(() => undefined);
+      }
+      return;
+    }
+    if (a.type !== "message" || a.from.id === a.recipient.id) return;
+    const mentioned = (a.entities ?? []).some((e) => e.type === "mention" && e.mentioned?.id === a.recipient.id);
+    const submit = decisionSubmit(a.value);
+    if (kind !== "personal" && !mentioned && !submit) return;
+    const member = await client.member(a.serviceUrl, a.conversation.id, a.from.id).catch(() => null);
+    const email = (member?.email ?? member?.userPrincipalName ?? "").toLowerCase();
+    const account = email ? await amb.accountByEmail(owner, email).catch(() => null) : null;
+    const [conv, root] = a.conversation.id.split(";messageid=") as [string, string | undefined];
+    const target = kind === "channel" ? `${conv};messageid=${root ?? a.id}` : a.conversation.id;
+    if (!account) {
+      const warnKey = `amb:${a.from.aadObjectId ?? a.from.id}`;
+      if (!this.warned.has(warnKey)) {
+        this.warned.add(warnKey);
+        await client.send(a.serviceUrl, target, { text: email ? `I don't know you yet: no Ambient account here has the email ${email}. Ask your team's admin to invite you to Ambient.` : "I can't see your email in Teams, so I don't know who you are in Ambient.", textFormat: "markdown" }).catch(() => undefined);
+      }
+      return;
+    }
+    // A click on one of Amb's decision cards: the decision's answer, as that person.
+    if (submit) {
+      if (!amb.answer || !submit.text) return;
+      try {
+        await amb.answer(account.uid, submit.d, submit.text, "teams");
+        if (a.replyToId) await client.update(a.serviceUrl, a.conversation.id, a.replyToId, { attachments: [{ contentType: ADAPTIVE_CARD, content: answeredCard(submit.q ?? "", submit.text, account.name) }] }).catch(() => undefined);
+      } catch (err) {
+        const gone = /already answered|no such decision/i.test((err as Error).message);
+        if (gone && a.replyToId) await client.update(a.serviceUrl, a.conversation.id, a.replyToId, { attachments: [{ contentType: ADAPTIVE_CARD, content: answeredCard(submit.q ?? "", null, null) }] }).catch(() => undefined);
+        else await client.send(a.serviceUrl, a.conversation.id, { text: (err as Error).message, textFormat: "markdown" }).catch(() => undefined);
+      }
+      return;
+    }
+    const text = teamsToPlain(a.text ?? "");
+    const taken = await takeFiles(this.offered(client, a, kind));
+    const { files, left } = forAmb(taken.files);
+    const all = [...taken.left, ...left];
+    if (!text && !files.length && !all.length) return;
+    void client.typing(a.serviceUrl, target).catch(() => undefined);
+    if (kind !== "personal") {
+      // A channel or group chat: the team's Amb, with the team's brain only.
+      if (owner.kind !== "team" || !amb.teamTurn) {
+        await client.send(a.serviceUrl, target, { text: "In a channel I answer from a team's brain, and Teams is connected for one person here. Write to me directly instead.", textFormat: "markdown" });
+        return;
+      }
+      const answer = await amb.teamTurn(owner.teamId, account, `teams:${target}`, `${text}${leftLine(all)}`, files).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
+      if (answer?.text) for (const part of splitText(answer.text)) await client.send(a.serviceUrl, target, { text: part, textFormat: "markdown" });
+      return;
+    }
+    // A direct chat: their own Amb, and this chat is their Teams door to it.
+    await this.put({ kind: "user", uid: account.uid }, AMB_LINK, "link", { ...refOf(owner, AMB), conv: a.conversation.id, serviceUrl: a.serviceUrl, at: this.now() } satisfies AmbLink);
+    await amb.inbox.sendQueued(account.uid, await amb.inbox.nameOf(account.uid).catch(() => account.name), `${text || `sent ${files.length === 1 ? "a file" : "files"}`}${leftLine(all)}`, "teams", files);
+  }
+
+  /** Amb's Teams door for one person: their chat with Amb's app, for answers, what Amb says first, and decisions as cards. */
+  ambChannel(): AmbChannel {
+    const link = async (uid: string) => {
+      const l = await this.get<AmbLink>({ kind: "user", uid }, AMB_LINK, "link");
+      if (!l) return null;
+      const app = await this.get<AppRecord>(ownerOf(l), APP, AMB);
+      return app?.catalogId && app.secret ? { l, app, client: this.client(app) } : null;
+    };
+    const must = async (uid: string) => {
+      const found = await link(uid);
+      if (!found) throw new TeamsError("not_linked", "Not linked to Teams.", 400);
+      return found;
+    };
+    return {
+      kind: "teams",
+      linked: async (uid) => !!(await link(uid)),
+      send: async (uid: string, text: string, opts: { first?: boolean; files?: OutFile[]; react?: string } = {}) => {
+        const { l, client } = await must(uid);
+        // Teams has no reactions a bot can put: a lone emoji is said.
+        const said = text.trim() || opts.react || "";
+        if (said) for (const part of splitText(said)) await client.send(l.serviceUrl, l.conv, { text: part, textFormat: "markdown" });
+        const files = (opts.files ?? []).filter((f) => f.id).map((f) => ({ ref: { id: f.id!, name: f.name, type: f.type, size: f.bytes.length }, data: f.bytes.toString("base64") }));
+        if (files.length) await this.sendFiles({ kind: "user", uid }, AMB, client, l.serviceUrl, l.conv, files);
+      },
+      ask: async (uid: string, text: string, question: Question) => {
+        const { l, client } = await must(uid);
+        await client.send(l.serviceUrl, l.conv, { attachments: [{ contentType: ADAPTIVE_CARD, content: decisionCard(text, question) }], summary: text.slice(0, 200) });
+      },
+    };
+  }
+
   /** A link to one of its files that works for a week (a file it sends that isn't shown inline). */
   fileLink(owner: Owner, routineId: string, ref: FileRef): string {
     return `${this.base()}/v1/teams/files/${this.sign("file", { ...refOf(owner, routineId), f: ref.id, e: this.now() + FILE_LINK_MS })}/${encodeURIComponent(ref.name)}`;
@@ -811,7 +922,7 @@ export class TeamsApps {
   async linkedFile(token: string): Promise<{ name: string; type: string; bytes: Buffer }> {
     const s = this.verify<Ref & { f: string; e: number }>("file", token);
     if (!s || s.e < this.now() || !this.d.attachments) throw new TeamsError("not_found", "This link doesn't work (any more).", 404);
-    return this.d.attachments.read(ownerOf(s), { routineId: s.r }, s.f);
+    return this.d.attachments.read(ownerOf(s), s.r === AMB ? {} : { routineId: s.r }, s.f);
   }
 
   /** Files it made (send_file) into a Teams chat or thread: a small picture inline, anything else as a card with its link. */
@@ -985,6 +1096,40 @@ export function teamsToPlain(text: string): string {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** A person's Teams door to Amb: whose app, and their chat with it. */
+interface AmbLink extends Ref {
+  conv: string;
+  serviceUrl: string;
+  at: number;
+}
+
+/** A click on one of Amb's decision cards. */
+function decisionSubmit(value: unknown): { d: string; text: string; q?: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { ambient?: unknown; d?: unknown; o?: unknown; other?: unknown; q?: unknown };
+  if (v.ambient !== "decision" || typeof v.d !== "string" || v.d.length > 64) return null;
+  const text = typeof v.o === "string" && v.o.trim() ? v.o.trim() : typeof v.other === "string" ? v.other.trim() : "";
+  return { d: v.d, text: text.slice(0, 4000), ...(typeof v.q === "string" ? { q: v.q.slice(0, 500) } : {}) };
+}
+
+/** A decision Amb brings to the person, as a card: its text, a button per answer, and a box. */
+export function decisionCard(text: string, question: Question): Record<string, unknown> {
+  const short = text.length > 500 ? `${text.slice(0, 500)}…` : text;
+  return {
+    type: "AdaptiveCard",
+    $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+    version: "1.5",
+    body: [
+      { type: "TextBlock", text, wrap: true },
+      { type: "Input.Text", id: "other", placeholder: question.choices.length ? "Or write something else" : "Your answer", isMultiline: true, maxLength: 4000 },
+    ],
+    actions: [
+      ...question.choices.map((c) => ({ type: "Action.Submit", title: c, data: { ambient: "decision", d: question.decisionId, o: c, q: short } })),
+      { type: "Action.Submit", title: "Send", data: { ambient: "decision", d: question.decisionId, q: short } },
+    ],
+  };
 }
 
 /** What a card's button sends back (Action.Submit's data, with the text box's value). */

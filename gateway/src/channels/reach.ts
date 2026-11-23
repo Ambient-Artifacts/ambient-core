@@ -33,6 +33,8 @@ export interface AmbChannel {
 
 /** A file Amb sends with its words. */
 export interface OutFile {
+  /** Its id in Ambient's files (Teams links to it). */
+  id?: string;
   name: string;
   type: string;
   bytes: Buffer;

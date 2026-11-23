@@ -503,6 +503,38 @@ export function botAppRoutes(
       slackFail(res, err);
     }
   });
+  // Ambient itself in the workspace (channels/amb-doors.ts): its own app, one tap to Allow.
+  r.get("/v1/app/slack/ambient", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      res.json(await sl.ambStatus(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.post("/v1/app/slack/ambient", d.auth, d.json, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    const body = z.object({ name: z.string().trim().min(1).max(35).optional() }).safeParse(req.body ?? {});
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "A name has at most 35 characters." });
+    try {
+      const a = await actor(res);
+      res.json(await sl.addAmb(d.routines.botOwner(a, teamOf(req)), a.uid, body.data.name));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.delete("/v1/app/slack/ambient", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      if (!(await sl.remove(d.routines.botOwner(await actor(res), teamOf(req)), "amb"))) return res.status(404).json({ error: "no_app", message: "Ambient isn't in Slack." });
+      res.status(204).end();
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
   r.get("/v1/app/routines/:id/slack", d.auth, async (req, res) => {
     const sl = d.slack?.();
     if (!sl) return notEnabled(res);
@@ -617,6 +649,38 @@ export function botAppRoutes(
     if (!tm) return notEnabled(res);
     try {
       await tm.disconnect(d.routines.botOwner(await actor(res), teamOf(req)));
+      res.status(204).end();
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  // Ambient itself in the company's Teams (channels/amb-doors.ts): its own app, made in the tenant.
+  r.get("/v1/app/teams/ambient", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      res.json(await tm.ambStatus(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.post("/v1/app/teams/ambient", d.auth, d.json, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    const body = z.object({ name: z.string().trim().min(1).max(30).optional() }).safeParse(req.body ?? {});
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "A name has at most 30 characters." });
+    try {
+      const a = await actor(res);
+      res.json(await tm.addAmb(d.routines.botOwner(a, teamOf(req)), a.uid, body.data.name));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.delete("/v1/app/teams/ambient", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      if (!(await tm.remove(d.routines.botOwner(await actor(res), teamOf(req)), "amb"))) return res.status(404).json({ error: "no_app", message: "Ambient isn't in Teams." });
       res.status(204).end();
     } catch (err) {
       teamsFail(res, err);

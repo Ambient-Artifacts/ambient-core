@@ -41,6 +41,10 @@ export interface ChatMessage {
 
 /** How Amb is told a message came through a channel, and how to answer there (docs/bots.md, "Channels"). */
 const VIA_NOTES: Record<string, (name: string) => string> = {
+  slack: (name) =>
+    `[${name} wrote this to you in a direct message on Slack, and your answer goes there: short, Markdown is fine. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision. You can start your answer with [react: 👍] to react to their message, when you'd do so yourself.]`,
+  teams: (name) =>
+    `[${name} wrote this to you in a direct chat in Microsoft Teams, and your answer goes there: short, Markdown is fine. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision.]`,
   imessage: (name) =>
     `[${name} wrote this on iMessage, and your answer goes there as a text message: plain text, no Markdown, a few short lines. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision. You can react to their message as a person would, when you'd do so yourself; nothing reacts for you. Two ways: start your answer with [react: 👍] (one emoji, any: 👍 ❤️ 😂 🙏 🎉 🔥 🤝 …), where a reaction alone is a whole answer when words would add nothing ("thanks", "ok", "sounds good") and words after it follow as a text; or call react_on_imessage first when the work will take a while (👀), so they see you're on it before your answer comes. Not on every message.]`,
 };
