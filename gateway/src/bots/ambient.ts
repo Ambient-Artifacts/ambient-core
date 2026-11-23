@@ -539,9 +539,13 @@ export class AmbientChat {
     if (had && this.d.folder) void this.keepMemory(uid, name ?? (await this.nameOf(uid)), "new_chat").catch(() => undefined);
   }
 
+  /** With Forget chat: the backups of the person's sessions go too (app.ts). */
+  onForget?: (uid: string) => Promise<void>;
+
   /** The whole history goes, for good (the memory stays: it's edited on its own). */
   async forget(uid: string): Promise<void> {
     this.unseen.delete(uid);
+    await this.onForget?.(uid).catch((err: Error) => console.warn(`[ambient] a session backup wasn't removed: ${err.message}`));
     await this.d.attachments?.forgetChat(uid);
     for (let i = 0; i < 200; i++) {
       const out = await this.d.control.m(api.bots.forgetChat, { uid: uid as never, now: this.now() });

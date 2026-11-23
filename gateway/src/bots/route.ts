@@ -1467,7 +1467,7 @@ export function botRunRouter(d: { bots: BotService; history?: HistorySearch; wak
  * A person's computer that runs Ambient (ambient-runner ambient), with its computer token: it waits
  * for the next chat message (a long poll of up to 25 seconds) and sends back the reply.
  */
-export function ambientHostRouter(d: { routines: RoutineService; directory: Directory; computers: AmbientComputers }): Router {
+export function ambientHostRouter(d: { routines: RoutineService; directory: Directory; computers: AmbientComputers; backups?: import("./session-backups.ts").SessionBackups }): Router {
   const r = express.Router();
   const json = express.json({ limit: "256kb" });
   const host = async (req: Request, res: Response): Promise<Host | undefined> => {
@@ -1483,6 +1483,34 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
     }
     return h;
   };
+
+  // A lane's session, backed up after each answer and fetched by a computer that doesn't have it
+  // (product/conversations.md): only for a lane this computer was given a turn of lately.
+  r.post("/v1/host/ambient/lanes/:lane/session", express.raw({ type: "*/*", limit: "13mb" }), async (req, res) => {
+    const h = await host(req, res);
+    if (!h) return;
+    const owner = d.computers.laneOwner(h.id, String(req.params.lane));
+    const session = req.get("x-ambient-session") ?? "";
+    if (!d.backups || !owner) return res.status(404).json({ error: "not_found" });
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(session) || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "bad_request" });
+    try {
+      await d.backups.put(owner, String(req.params.lane), session, req.body);
+      res.status(204).end();
+    } catch (err) {
+      res.status(413).json({ error: "not_kept", message: (err as Error).message });
+    }
+  });
+  r.get("/v1/host/ambient/lanes/:lane/session", async (req, res) => {
+    const h = await host(req, res);
+    if (!h) return;
+    const owner = d.computers.laneOwner(h.id, String(req.params.lane));
+    if (!d.backups || !owner) return res.status(404).json({ error: "not_found" });
+    const b = await d.backups.get(owner, String(req.params.lane)).catch(() => null);
+    if (!b) return res.status(404).json({ error: "not_found" });
+    res.setHeader("x-ambient-session", b.session);
+    res.setHeader("content-type", "application/gzip");
+    res.send(b.gz);
+  });
 
   r.get("/v1/host/ambient/next", async (req, res) => {
     const h = await host(req, res);

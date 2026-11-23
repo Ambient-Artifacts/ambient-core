@@ -1183,8 +1183,20 @@ serves depends on where it's written to, decided in code, never by the model:
   only where a team connected the workspace; it runs on the team's own computer (the one for its
   bots) as a short session apart from anyone's chat, with the asker's token for that team alone
   (`resource: team`), so no personal note, bot or chat can reach a channel; what it may change, it
-  may as the asker. A thread is kept like any chat (sealed with the team, kind `team-amb:thread`, no
-  end date), and its last 20 turns go with each turn, so a follow-up weeks later is understood.
+  may as the asker. Each thread is a **lane** (the team wiki's `product/conversations.md`): one
+  Claude Code session on the team's computer (`ComputerJob.lane`, a folder `lanes/<lane>` there),
+  resumed every turn with only what people said in the thread since it last answered. A new thread,
+  or a computer without the session, starts cold from the whole thread and the lane's turns (the
+  runner reads `history` only when it has nothing to resume). The lane's record (sealed with the
+  team, kind `team-amb:thread`, no end date) keeps its session id, how far it has read, and its
+  turns.
+- **Sessions move with their lane.** After each answer the runner (0.18.0) sends the lane's
+  session file, gzipped, to `POST /v1/host/ambient/lanes/:lane/session`; the gateway seals it with
+  the lane's owner's key and keeps it in Convex (`sessionBackups`, one per lane, up to 12 MB). A
+  computer that doesn't have the session (wiped, replaced, or another one) fetches it with `GET` on
+  the same path before it resumes. A computer may only send or fetch a lane it was given a turn of
+  in the last 2 hours. Forget chat removes the person's backups.
+- **"new chat"** typed alone in iMessage, Slack or Teams starts over, as New chat in the app.
 - **A thread is read as a thread.** Tagged inside a Slack or Teams thread, a bot or Amb gets what
   was said there before, also what people said to each other (Slack: `conversations.replies`;
   Teams: Graph with the bot's own app and its resource-specific consent), by name, its own

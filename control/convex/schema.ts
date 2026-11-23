@@ -605,6 +605,18 @@ export default defineSchema({
    * `routineId` says it's a bot's thread's, none: Ambient's chat. Goes with the chat's history
    * (forgetChat), the bot (routines.remove) and the account.
    */
+  // A lane's Claude Code session, backed up sealed (sessionBackups.ts): one per lane.
+  sessionBackups: defineTable({
+    ownerKind: v.union(v.literal("user"), v.literal("team")),
+    ownerId: v.string(),
+    lane: v.string(),
+    session: v.string(),
+    storageId: v.id("_storage"),
+    iv: v.string(),
+    size: v.number(),
+    updatedAt: v.number(),
+  }).index("by_lane", ["ownerKind", "ownerId", "lane"]),
+
   attachments: defineTable({
     userId: v.optional(v.id("users")),
     teamId: v.optional(v.id("teams")),

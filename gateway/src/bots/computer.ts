@@ -87,6 +87,8 @@ const TOKEN_TTL_MS = 24 * 3600_000;
 const TOKEN_RENEW_MS = 3600_000;
 /** In a token's key: it's for one team only. */
 const TEAM_KEY = "#team:";
+/** After a turn of a lane, its computer may back up and fetch the lane's session this long. */
+const LANE_GRANT_MS = 2 * 3600_000;
 const REPLY_TIMEOUT_MS = 15 * 60_000;
 /** How long one of upkeep's answers may take on the computer (the runner stops Claude Code at 4 min). */
 const COMPLETE_TIMEOUT_MS = 5 * 60_000;
@@ -108,6 +110,8 @@ export class AmbientComputers {
   private replyFiles = new Map<string, OutboxFile[]>();
   /** The session a reply came from, until `askWithFiles` takes it. */
   private replySessions = new Map<string, string>();
+  /** Which lanes a computer was given turns of lately, and whose they are: its session's backup is theirs. */
+  private laneOwners = new Map<string, { owner: { kind: "user"; uid: string } | { kind: "team"; teamId: string }; until: number }>();
   private relays = new Map<string, { hostId: string; resolve: (r: RelayResponse) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
 
   constructor(
@@ -156,6 +160,7 @@ export class AmbientComputers {
   /** As `ask`, with the files Ambient made for the person there (its outbox), if any. */
   async askWithFiles(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token" | "uid">, opts: { teamId?: string } = {}): Promise<{ text: string; files: OutboxFile[]; session?: string }> {
     const full: ComputerJob = { ...job, id: randomUUID(), uid: host.uid, token: await this.token(host.id, host.uid, host.name, opts.teamId) };
+    if (job.mode !== "internal") this.laneOwners.set(`${host.id}:${job.lane || host.uid}`, { owner: opts.teamId ? { kind: "team", teamId: opts.teamId } : { kind: "user", uid: host.uid }, until: this.now() + LANE_GRANT_MS });
     const reply = new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(full.id);
@@ -329,6 +334,12 @@ export class AmbientComputers {
       timer.unref();
       this.waiters.set(hostId, { resolve, timer });
     });
+  }
+
+  /** Whose lane this is, if the computer was given a turn of it lately (it may back up or fetch its session). */
+  laneOwner(hostId: string, lane: string): { kind: "user"; uid: string } | { kind: "team"; teamId: string } | null {
+    const g = this.laneOwners.get(`${hostId}:${lane}`);
+    return g && g.until > this.now() ? g.owner : null;
   }
 
   /** The computer's reply to a message it took, with the files Ambient put in its outbox. */

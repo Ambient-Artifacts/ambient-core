@@ -21,6 +21,7 @@
 // and `sync` replaces it when the gateway has a newer one.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { chmodSync, chownSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, release, tmpdir, type } from "node:os";
 import { dirname, join } from "node:path";
@@ -882,6 +883,48 @@ async function ambientService() {
     log(`Ambient's session for ${uid} ${p.session ? `resumed (${p.session.slice(0, 8)})` : "started"}`);
   };
 
+  /**
+   * Sessions move with their lane (product/conversations.md): after each answer the session's file
+   * goes to the gateway (gzipped; it seals and keeps it), and a lane whose session isn't on this
+   * computer gets it back before it resumes. Claude Code keeps a session under its settings
+   * folder, in projects/<the working folder, every other character a dash>/<id>.jsonl.
+   */
+  const claudeDir = () => runEnv(cfg).CLAUDE_CONFIG_DIR || join(as?.home ?? home(user), ".claude");
+  const sessionFile = (session) => {
+    const projects = join(claudeDir(), "projects");
+    try {
+      for (const d of readdirSync(projects)) if (existsSync(join(projects, d, `${session}.jsonl`))) return join(projects, d, `${session}.jsonl`);
+    } catch {}
+    return null;
+  };
+  const backup = async (lane, session) => {
+    const file = sessionFile(session);
+    if (!file) return;
+    const gz = gzipSync(readFileSync(file));
+    if (gz.length > 12 * 1024 * 1024) return log(`The session of ${lane.slice(0, 12)} is too big to back up (${Math.round(gz.length / 1048576)} MB gzipped)`);
+    const res = await fetch(`${cfg.server}/v1/host/ambient/lanes/${encodeURIComponent(lane)}/session`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${cfg.token}`, "user-agent": `ambient-runner/${VERSION}`, "content-type": "application/gzip", "x-ambient-session": session },
+      body: gz,
+      signal: AbortSignal.timeout(60_000),
+    }).catch((err) => ({ ok: false, status: err.message }));
+    if (!res.ok) log(`The session of ${lane.slice(0, 12)} wasn't backed up (${res.status})`);
+  };
+  const restore = async (lane, dir) => {
+    const res = await fetch(`${cfg.server}/v1/host/ambient/lanes/${encodeURIComponent(lane)}/session`, {
+      headers: { authorization: `Bearer ${cfg.token}`, "user-agent": `ambient-runner/${VERSION}` },
+      signal: AbortSignal.timeout(60_000),
+    }).catch(() => null);
+    const session = res?.headers.get("x-ambient-session");
+    if (!res?.ok || !session || !/^[A-Za-z0-9_-]{1,100}$/.test(session)) return null;
+    const into = join(claudeDir(), "projects", dir.replace(/[^A-Za-z0-9]/g, "-"));
+    mkdirSync(into, { recursive: true, mode: 0o700 });
+    writeFileSync(join(into, `${session}.jsonl`), gunzipSync(Buffer.from(await res.arrayBuffer())), { mode: 0o600 });
+    if (as) spawnSync(sys("chown"), ["-R", `${as.uid}:${as.gid}`, join(claudeDir(), "projects")]);
+    log(`Brought back the session of ${lane.slice(0, 12)} from its backup`);
+    return session;
+  };
+
   /** Before another session opens: the one used longest ago that isn't answering is closed (its session stays). */
   const makeRoom = (keep) => {
     const live = [...people.entries()].filter(([k, x]) => x.child && k !== keep);
@@ -924,6 +967,11 @@ async function ambientService() {
     // Cold: no session to resume (a new lane, a fresh start, or one that isn't on this computer).
     let cold = Boolean(job.fresh);
     if (!p.child) {
+      // Not on this computer (wiped, replaced, or the lane was elsewhere): back from its backup.
+      if (!job.fresh && (!p.session || !sessionFile(p.session))) {
+        const back = await restore(uid, dir).catch((err) => (log(`The session of ${uid.slice(0, 12)} couldn't be brought back: ${err.message}`), null));
+        if (back) p.session = back;
+      }
       makeRoom(uid);
       placeSkills(dir, job.skills);
       start(uid, p, job.instructions, dir);
@@ -955,6 +1003,7 @@ async function ambientService() {
       // The session's id goes with the answer: the gateway keeps it for the lane.
       await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text, ...(sent.files.length ? { files: sent.files } : {}), ...(p.session ? { session: p.session } : {}) } : { error: r.text || "Claude Code couldn't answer" });
       sent.moved();
+      if (r.ok && p.session) await backup(uid, p.session).catch((err) => log(`The session of ${uid.slice(0, 12)} wasn't backed up: ${err.message}`));
       log(`Answered ${uid} (${r.turns ?? "?"} turns${r.costUsd !== undefined ? `, $${r.costUsd.toFixed(2)}` : ""})`);
     } catch (err) {
       await call(cfg, "POST", `/v1/host/ambient/${job.id}`, { error: err.message.slice(0, 1900) }).catch(() => {});

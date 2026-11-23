@@ -38,6 +38,7 @@ import { GitHubApps } from "./bots/github-apps.ts";
 import { SlackApps } from "./bots/slack-apps.ts";
 import { TeamsApps } from "./bots/teams-apps.ts";
 import { TeamAmb } from "./bots/team-amb.ts";
+import { SessionBackups } from "./bots/session-backups.ts";
 import { sha256Hex } from "./crypto.ts";
 import type { AmbDoorDeps } from "./channels/amb-doors.ts";
 import { BotFolder } from "./bots/folder.ts";
@@ -286,6 +287,8 @@ export function createApp(deps: AppDeps) {
   // Ambient, the master bot: Claude with the person's own MCP server, every scope, as /mcp gives it.
   // Ambient on a person's own computer (their Claude plan) when one is connected; the server's key otherwise.
   const computers = new AmbientComputers({ pats, scopes: MCP_SCOPES });
+  // Lanes' sessions, backed up (product/conversations.md): a wiped or replaced computer resumes them.
+  const sessionBackups = new SessionBackups({ control, keys: routines.keys });
   startNow = (hostId, routineId) => computers.start(hostId, routineId);
   relay = (host, req, ms) => computers.relay(host, req, ms);
   // The brain's upkeep and work-session notes, written by Claude on the person's own computer.
@@ -336,6 +339,7 @@ export function createApp(deps: AppDeps) {
     throw new Error("Decisions aren't up yet.");
   };
   const reach = new AmbReach({ notifier, reachOf: (uid) => reachOf(uid) });
+  ambient.onForget = (uid) => sessionBackups.forget({ kind: "user", uid });
   folders.reach = reach;
   // What Amb made with its answer (a picture, a PDF) goes back with it.
   ambient.onReply = async (uid, via, text, files, react) => {
@@ -545,7 +549,7 @@ export function createApp(deps: AppDeps) {
   app.use(linqHookRouter(() => folders.imessage));
   app.use(mcpSignInRouter(() => folders.mcp));
   app.use(mcpRelayRouter({ connections: () => folders.mcp, control, ambUid: (token) => computers.uidOfToken(token), version: VERSION }));
-  app.use(ambientHostRouter({ routines, directory, computers }));
+  app.use(ambientHostRouter({ routines, directory, computers, backups: sessionBackups }));
   app.use(internalRouter({ secret: config.serviceSecret, upkeep, relay: (host, req, ms) => computers.relay(host, req, ms) }));
   app.use(sessionUploadRouter({ pats, directory, sessions }));
   app.use(

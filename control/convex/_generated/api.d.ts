@@ -22,6 +22,7 @@ import type * as records from "../records.js";
 import type * as repos from "../repos.js";
 import type * as revisions from "../revisions.js";
 import type * as routines from "../routines.js";
+import type * as sessionBackups from "../sessionBackups.js";
 import type * as sessions from "../sessions.js";
 import type * as teams from "../teams.js";
 import type * as users from "../users.js";
@@ -50,6 +51,7 @@ declare const fullApi: ApiFromModules<{
   repos: typeof repos;
   revisions: typeof revisions;
   routines: typeof routines;
+  sessionBackups: typeof sessionBackups;
   sessions: typeof sessions;
   teams: typeof teams;
   users: typeof users;
