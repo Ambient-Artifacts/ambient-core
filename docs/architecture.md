@@ -13,7 +13,7 @@ Ambient turns what happens at work (meetings, work sessions with AI agents, note
 
 - **Gateway** (`gateway/`): the only thing clients talk to. It runs sign-in, the MCP endpoints, personal-wiki sync, work-session uploads and the routines API. It holds no state of its own beyond caches, so it can be restarted or run several times over.
 - **Convex** (`control/`): the control plane and the store for personal wikis. Every function takes a service secret that only the gateway has; no client calls Convex directly. Personal page text arrives already encrypted.
-- **Team server** (`team/`): one per team, on its own machine in Ambient Cloud. It holds the team wiki as a git repository, searches it, takes new notes into it and consolidates it every night. It accepts only short tokens signed by the gateway.
+- **Team server** (`team/`): one per team, on the team's own computer ("A team on its own computer" below; older teams keep a hosted server of Ambient's). It holds the team wiki as a git repository, searches it, takes new notes into it and consolidates it every night. It accepts only short tokens signed by the gateway.
 - **Wiki store** (`wiki/`): shared by the gateway (personal wikis, in memory) and the team server (on disk). It covers parsing, the SQLite FTS5 index (umlauts folded, trigram matching), generated index pages, lint and git.
 - **Contracts** (`spec/`): zod schemas for notes, living pages, decisions, the team-note payload, sync and job results, exported as JSON Schema for the Swift apps.
 
@@ -69,7 +69,7 @@ Scopes are `personal:read`, `personal:write`, `team:read`, `team:write` and `ses
 - Each user has a **data key**. Personal pages, transcripts, voice fingerprints, repo tokens, routine prompts, results and secrets are sealed with it (AES-256-GCM, bound to the user and the path) before they're stored in Convex.
 - Data keys are wrapped by the **master key** (`BRAIN_MASTER_KEY`), which only the gateway and its jobs hold. A team's routine key is wrapped the same way.
 - So Convex, its backups and anyone with only database access see ciphertext. The gateway decrypts in memory to serve MCP and sync.
-- Team wikis are plain git on the team's own server, readable by the team's tools by design. In Ambient Cloud, each team server is a separate VM that only the gateway can reach.
+- Team wikis are plain git on the team's own server, readable by the team's tools by design. A team's computer runs its server on 127.0.0.1 only and the gateway reaches it through the runner's connection; a hosted team server is a separate VM that only the gateway can reach.
 
 ## One team per person
 
