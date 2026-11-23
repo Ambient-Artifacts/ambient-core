@@ -259,17 +259,28 @@ export class WikiStore {
 
   /** Title, summary and dates of every page: what the index pages are built from. */
   entries(): ListedPage[] {
-    const rows = this.db.prepare("SELECT path, type, title, summary, updated, sort_date FROM pages").all() as Pick<
-      PageRow,
-      "path" | "type" | "title" | "summary" | "updated" | "sort_date"
-    >[];
+    const rows = this.db
+      .prepare("SELECT path, type, title, summary, updated, sort_date, json_extract(frontmatter_json, '$.recording_id') AS recording_id FROM pages")
+      .all() as (Pick<PageRow, "path" | "type" | "title" | "summary" | "updated" | "sort_date"> & { recording_id: unknown })[];
     const recorders = new Map(
       (this.db.prepare("SELECT src, dst FROM links WHERE rel = 'recorded_by'").all() as { src: string; dst: string }[]).map((l) => [l.src, l.dst]),
     );
     return rows.map((r) => {
       const ref = this.refOf(r.path);
       const recordedBy = recorders.get(ref);
-      return { ref, type: r.type, title: r.title, summary: r.summary, updated: r.updated, sortDate: r.sort_date, ...(recordedBy ? { recordedBy } : {}) };
+      // A team's own pipeline names the recording its page was written from (`recording_id`):
+      // the apps list that page among the team's recordings, whatever folder it is in.
+      const recordingId = typeof r.recording_id === "string" && r.recording_id ? r.recording_id : undefined;
+      return {
+        ref,
+        type: r.type,
+        title: r.title,
+        summary: r.summary,
+        updated: r.updated,
+        sortDate: r.sort_date,
+        ...(recordedBy ? { recordedBy } : {}),
+        ...(recordingId ? { recordingId } : {}),
+      };
     });
   }
 

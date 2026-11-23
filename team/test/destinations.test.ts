@@ -523,6 +523,10 @@ describe("meeting notes written by the team's own pipeline", () => {
     expect(found.json.result).toMatchObject({ ref: "meetings/2026-10/2026-10-12-acme-kickoff", title: "Kickoff with Acme" });
     expect((await s.call("POST", "/v1/query", "query", { op: "recording", id: "01JNOSUCHRECORDING00000001" })).json.result).toBeNull();
     expect((await s.call("POST", "/v1/query", "query", { op: "recording", id: "../people/x" })).status).toBe(400);
+    // The apps list it among the team's recordings: the entries name the recording.
+    const entries = (await s.call("POST", "/v1/query", "query", { op: "entries" })).json.result as { ref: string; recordingId?: string }[];
+    expect(entries.find((e) => e.ref === "meetings/2026-10/2026-10-12-acme-kickoff")?.recordingId).toBe("01JOWNNOTES000000000000001");
+    expect(entries.filter((e) => e.recordingId).map((e) => e.ref)).toEqual(["meetings/2026-10/2026-10-12-acme-kickoff"]);
   });
 
   it("records a note written with Apple's Private Cloud Compute as such", async () => {
