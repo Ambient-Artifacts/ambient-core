@@ -53,6 +53,7 @@ export const CATALOG: CatalogEntry[] = [
   e("miro", "Miro", "https://mcp.miro.com/", "Boards and what's on them", "work"),
   e("figma", "Figma", "https://mcp.figma.com/mcp", "Designs, components and comments", "work"),
   e("canva", "Canva", "https://mcp.canva.com/mcp", "Designs and brand templates", "work"),
+  e("higgsfield", "Higgsfield", "https://mcp.higgsfield.ai/mcp", "AI images and videos from a prompt", "work"),
   e("dropbox", "Dropbox", "https://mcp.dropbox.com/mcp", "Files and folders", "work"),
   e("granola", "Granola", "https://mcp.granola.ai/mcp", "Meeting notes", "work"),
   e("fireflies", "Fireflies", "https://api.fireflies.ai/mcp", "Meeting transcripts and summaries", "work"),
