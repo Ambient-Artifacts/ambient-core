@@ -67,6 +67,13 @@ export interface ComputerJob {
   attachments?: { name: string; type: string; data: string }[];
   /** The person's token for Ambient's MCP (the same until it's renewed). */
   token: string;
+  /**
+   * The lane (docs/bots.md, "Conversations and sessions"): a shared thread's id; none for the
+   * person's main lane. The runner keeps one session per lane, in a folder of its own.
+   */
+  lane?: string;
+  /** The lane's session as the gateway last heard of it (from another computer, maybe): resumed when it's there. */
+  session?: string;
 }
 
 interface Waiter {
@@ -99,6 +106,8 @@ export class AmbientComputers {
   private tokens = new Map<string, { token: string; expiresAt: number }>();
   /** Files that came with a reply, until `askWithFiles` takes them. */
   private replyFiles = new Map<string, OutboxFile[]>();
+  /** The session a reply came from, until `askWithFiles` takes it. */
+  private replySessions = new Map<string, string>();
   private relays = new Map<string, { hostId: string; resolve: (r: RelayResponse) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
 
   constructor(
@@ -145,7 +154,7 @@ export class AmbientComputers {
   }
 
   /** As `ask`, with the files Ambient made for the person there (its outbox), if any. */
-  async askWithFiles(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token" | "uid">, opts: { teamId?: string } = {}): Promise<{ text: string; files: OutboxFile[] }> {
+  async askWithFiles(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token" | "uid">, opts: { teamId?: string } = {}): Promise<{ text: string; files: OutboxFile[]; session?: string }> {
     const full: ComputerJob = { ...job, id: randomUUID(), uid: host.uid, token: await this.token(host.id, host.uid, host.name, opts.teamId) };
     const reply = new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -159,7 +168,9 @@ export class AmbientComputers {
     const text = await reply;
     const files = this.replyFiles.get(full.id) ?? [];
     this.replyFiles.delete(full.id);
-    return { text, files };
+    const session = this.replySessions.get(full.id);
+    this.replySessions.delete(full.id);
+    return { text, files, ...(session ? { session } : {}) };
   }
 
   /** To the computer's waiting long poll, or first in its queue. */
@@ -321,10 +332,11 @@ export class AmbientComputers {
   }
 
   /** The computer's reply to a message it took, with the files Ambient put in its outbox. */
-  reply(hostId: string, jobId: string, text: string, files: OutboxFile[] = []): boolean {
+  reply(hostId: string, jobId: string, text: string, files: OutboxFile[] = [], session?: string): boolean {
     const p = this.pending.get(jobId);
     if (!p || p.hostId !== hostId) return false;
     if (files.length) this.replyFiles.set(jobId, files);
+    if (session) this.replySessions.set(jobId, session);
     this.pending.delete(jobId);
     clearTimeout(p.timer);
     p.resolve(text);

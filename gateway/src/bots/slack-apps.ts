@@ -25,7 +25,7 @@ import type { MasterKey } from "../crypto.ts";
 import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
-import { download, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile } from "../channels/channel-files.ts";
+import { download, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile, type ThreadMessage } from "../channels/channel-files.ts";
 import { AMB, forAmb, type AmbDoorDeps } from "../channels/amb-doors.ts";
 import type { AmbChannel, OutFile } from "../channels/reach.ts";
 
@@ -805,8 +805,8 @@ export class SlackApps {
         await reply("In a channel I answer from a team's brain, and this workspace is connected for one person. Write to me directly instead.");
         return;
       }
-      const before = e.thread_ts && e.thread_ts !== e.ts ? await this.threadLines(app, e.channel, e.thread_ts, e.ts) : "";
-      const answer = await amb.teamTurn(owner.teamId, account, `slack:${e.channel}:${thread}`, `${text}${leftLine(all)}${before}`, files).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
+      const before = e.thread_ts && e.thread_ts !== e.ts ? await this.threadMessages(app, e.channel, e.thread_ts, e.ts) : [];
+      const answer = await amb.teamTurn(owner.teamId, account, `slack:${e.channel}:${thread}`, `${text}${leftLine(all)}`, files, before).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
       if (answer?.text) await this.post(token, e.channel, thread, answer.text);
       return;
     }
@@ -816,18 +816,22 @@ export class SlackApps {
   }
 
   /** A thread's messages before `beforeTs`, by name (its own as "you"): conversations.replies. */
-  private async threadLines(app: AppRecord, channel: string, threadTs: string, beforeTs: string): Promise<string> {
-    if (!app.botToken) return "";
-    const out = await this.call<{ messages?: { user?: string; bot_id?: string; text?: string; ts?: string; files?: { name?: string }[] }[] }>("conversations.replies", app.botToken, { channel, ts: threadTs, limit: String(THREAD_MAX + 1) }, { form: true }).catch(() => null);
-    if (!out?.ok || !out.messages) return "";
-    const lines: { who: string; text: string }[] = [];
+  private async threadMessages(app: AppRecord, channel: string, threadTs: string, beforeTs: string): Promise<ThreadMessage[]> {
+    if (!app.botToken) return [];
+    const out = await this.call<{ messages?: { user?: string; bot_id?: string; text?: string; ts?: string; files?: { name?: string }[] }[] }>("conversations.replies", app.botToken, { channel, ts: threadTs, limit: String(THREAD_MAX * 3) }, { form: true }).catch(() => null);
+    if (!out?.ok || !out.messages) return [];
+    const lines: ThreadMessage[] = [];
     for (const m of out.messages) {
       if (!m.ts || Number(m.ts) >= Number(beforeTs)) continue;
       const who = m.user === app.botUserId ? "you" : m.user ? await this.nameOf(app.botToken, m.user) : "a bot";
       const files = m.files?.length ? ` [${m.files.map((f) => f.name ?? "file").join(", ")}]` : "";
-      lines.push({ who, text: `${slackToPlain((m.text ?? "").replace(new RegExp(`<@${app.botUserId}>`, "g"), "@you"))}${files}` });
+      lines.push({ who, text: `${slackToPlain((m.text ?? "").replace(new RegExp(`<@${app.botUserId}>`, "g"), "@you"))}${files}`, at: Math.round(Number(m.ts) * 1000) });
     }
-    return threadSoFar(lines);
+    return lines;
+  }
+
+  private async threadLines(app: AppRecord, channel: string, threadTs: string, beforeTs: string): Promise<string> {
+    return threadSoFar(await this.threadMessages(app, channel, threadTs, beforeTs));
   }
 
   /** The Slack user's email (Amb's app may read it: users:read.email). */

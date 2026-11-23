@@ -440,12 +440,12 @@ export function createApp(deps: AppDeps) {
     fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
     // A channel thread's turns with the team's Amb: sealed with the team's key, in its records.
     store: {
-      get: async (teamId, conversation) => {
+      get: async (teamId, conversation): Promise<import("./bots/team-amb.ts").LaneRecord | null> => {
         const owner = { kind: "team" as const, teamId };
         const key = sha256Hex(conversation).slice(0, 40);
         const r = (await control.q(api.records.get, { ownerKind: "team", ownerId: teamId, kind: "team-amb:thread", key })) as { iv: string; ct: string; deleted: boolean } | null;
         if (!r || r.deleted) return null;
-        return JSON.parse(await routineKeys.open(owner, "record:team-amb:thread", r.iv, r.ct)) as { turns: { role: "user" | "assistant"; text: string }[]; at: number };
+        return JSON.parse(await routineKeys.open(owner, "record:team-amb:thread", r.iv, r.ct)) as import("./bots/team-amb.ts").LaneRecord;
       },
       put: async (teamId, conversation, value) => {
         const sealed = await routineKeys.seal({ kind: "team", teamId }, "record:team-amb:thread", JSON.stringify(value));
@@ -468,7 +468,7 @@ export function createApp(deps: AppDeps) {
       return null;
     },
     answer: (uid, id, answer, via) => answerDecision(uid, id, answer, via),
-    teamTurn: (teamId, asker, conversation, text, files) => teamAmb.turn(teamId, asker, conversation, text, files),
+    teamTurn: (teamId, asker, conversation, text, files, thread) => teamAmb.turn(teamId, asker, conversation, text, files, thread),
   };
   // A click on a question's button or card (or a reply to it in its thread) answers it as its
   // owner would in the bot's thread, while that question is still the open one.

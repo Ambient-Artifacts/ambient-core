@@ -28,7 +28,7 @@ import { sealMessage } from "./messages.ts";
 import { splitText } from "./slack-apps.ts";
 import { pngSize, teamsPackage } from "./teams-package.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
-import { download, FILES_BYTES_MAX, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile } from "../channels/channel-files.ts";
+import { download, FILES_BYTES_MAX, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile, type ThreadMessage } from "../channels/channel-files.ts";
 import { AMB, forAmb, type AmbDoorDeps } from "../channels/amb-doors.ts";
 import type { AmbChannel, OutFile, Question } from "../channels/reach.ts";
 
@@ -876,8 +876,8 @@ export class TeamsApps {
         await client.send(a.serviceUrl, target, { text: "In a channel I answer from a team's brain, and Teams is connected for one person here. Write to me directly instead.", textFormat: "markdown" });
         return;
       }
-      const before = kind === "channel" && root ? await this.threadLines(app, a, root) : "";
-      const answer = await amb.teamTurn(owner.teamId, account, `teams:${target}`, `${text}${leftLine(all)}${before}`, files).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
+      const before = kind === "channel" && root ? await this.threadMessages(app, a, root) : [];
+      const answer = await amb.teamTurn(owner.teamId, account, `teams:${target}`, `${text}${leftLine(all)}`, files, before).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
       if (answer?.text) for (const part of splitText(answer.text)) await client.send(a.serviceUrl, target, { text: part, textFormat: "markdown" });
       return;
     }
@@ -963,11 +963,15 @@ export class TeamsApps {
 
   /** A channel thread's messages before this one (its root and replies), by name: Graph, as the bot. */
   private async threadLines(app: AppRecord, a: Activity, root: string): Promise<string> {
+    return threadSoFar(await this.threadMessages(app, a, root));
+  }
+
+  private async threadMessages(app: AppRecord, a: Activity, root: string): Promise<ThreadMessage[]> {
     const teamId = a.channelData?.team?.aadGroupId;
     const channelId = a.channelData?.channel?.id;
-    if (!teamId || !channelId || !app.secret) return "";
+    if (!teamId || !channelId || !app.secret) return [];
     const token = await this.botGraphToken(app);
-    if (!token) return "";
+    if (!token) return [];
     type GraphMessage = { id?: string; from?: { user?: { displayName?: string }; application?: { id?: string; displayName?: string } }; body?: { content?: string }; attachments?: { name?: string }[]; createdDateTime?: string };
     const get = async (path: string) => {
       const res = await this.fetch(`${this.graph}${path}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
@@ -976,12 +980,11 @@ export class TeamsApps {
     const base = `/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(root)}`;
     const [first, replies] = await Promise.all([get(base), get(`${base}/replies?$top=${THREAD_MAX}`)]);
     const all = [...(first ? [first] : []), ...[...(replies?.value ?? [])].sort((x, y) => String(x.createdDateTime).localeCompare(String(y.createdDateTime)))].filter((m) => m.id !== a.id);
-    return threadSoFar(
-      all.map((m) => ({
-        who: m.from?.application?.id === app.appId ? "you" : (m.from?.user?.displayName ?? m.from?.application?.displayName ?? "someone"),
-        text: `${teamsToPlain(m.body?.content ?? "")}${m.attachments?.some((x) => x.name) ? ` [${m.attachments.filter((x) => x.name).map((x) => x.name).join(", ")}]` : ""}`,
-      })),
-    );
+    return all.map((m) => ({
+      who: m.from?.application?.id === app.appId ? "you" : (m.from?.user?.displayName ?? m.from?.application?.displayName ?? "someone"),
+      text: `${teamsToPlain(m.body?.content ?? "")}${m.attachments?.some((x) => x.name) ? ` [${m.attachments.filter((x) => x.name).map((x) => x.name).join(", ")}]` : ""}`,
+      at: Date.parse(m.createdDateTime ?? "") || 0,
+    }));
   }
 
   /** The question waiting in this chat or thread, if any (24 hours at most). */

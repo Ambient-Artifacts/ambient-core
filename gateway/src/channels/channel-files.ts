@@ -134,8 +134,15 @@ const THREAD_LINE_MAX = 600;
  * A thread's earlier messages (oldest first), as the bot or Amb reads them with the new one: who
  * said what, also what people said to each other before tagging it. Empty: nothing before.
  */
-export function threadSoFar(lines: { who: string; text: string }[]): string {
+export function threadSoFar(lines: { who: string; text: string }[], heading = "The thread so far (oldest first):"): string {
   const kept = lines.filter((l) => l.text.trim()).slice(-THREAD_MAX);
   if (!kept.length) return "";
-  return `\n\nThe thread so far (oldest first):\n${kept.map((l) => `- ${l.who}: ${l.text.replace(/\s+/g, " ").trim().slice(0, THREAD_LINE_MAX)}`).join("\n")}`;
+  return `\n\n${heading}\n${kept.map((l) => `- ${l.who}: ${l.text.replace(/\s+/g, " ").trim().slice(0, THREAD_LINE_MAX)}`).join("\n")}`;
+}
+
+/** A thread's message as the channels read it: who, what, and when (ms), so a lane takes only what's new. */
+export interface ThreadMessage {
+  who: string;
+  text: string;
+  at: number;
 }

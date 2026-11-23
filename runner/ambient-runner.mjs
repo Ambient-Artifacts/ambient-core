@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.17.0";
+const VERSION = "0.18.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -750,9 +750,15 @@ async function ambientService() {
     if (as) chownSync(path, as.uid, as.gid);
   };
 
-  /** One open Claude Code session per person: uid → { child, session, token, waiting }. */
+  /**
+   * One Claude Code session per lane (docs/bots.md, "Conversations and sessions"): a person's main
+   * lane is keyed by their uid (as before lanes), a shared thread's by its lane id. Lane → { child,
+   * session, token, waiting, used }. At most MAX_LIVE are open at once: the one used longest ago
+   * that isn't answering is closed, and resumed from its session when its lane is next written to.
+   */
   const people = new Map();
   const sessions = readState().ambientSessions ?? {};
+  const MAX_LIVE = 3;
 
   const safe = (uid) => uid.replace(/[^A-Za-z0-9_-]/g, "_");
   /** The person's folder here (their files, Claude Code's working directory). */
@@ -760,6 +766,19 @@ async function ambientService() {
     const dir = join(base, safe(uid));
     mkdirSync(dir, { recursive: true });
     own(base);
+    own(dir);
+    return dir;
+  };
+  /**
+   * A lane's folder: the person's own for their main lane, else lanes/<lane>. The same name on
+   * every computer, so a session restored from its backup is found where Claude Code looks.
+   */
+  const laneFolder = (job) => {
+    if (!job.lane || job.lane === job.uid) return folderOf(job.uid);
+    const dir = join(base, "lanes", safe(job.lane));
+    mkdirSync(dir, { recursive: true });
+    own(base);
+    own(join(base, "lanes"));
     own(dir);
     return dir;
   };
@@ -822,8 +841,7 @@ async function ambientService() {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-  const start = (uid, p, instructions) => {
-    const dir = folderOf(uid);
+  const start = (uid, p, instructions, dir) => {
     // A session kept in another settings folder (before the runner had its own) can't be resumed: start afresh.
     const configDir = runEnv(cfg).CLAUDE_CONFIG_DIR;
     if (p.session && configDir && !sessionKnown(configDir, p.session)) {
@@ -845,6 +863,7 @@ async function ambientService() {
             p.session = e.session;
             const st = readState();
             st.ambientSessions = { ...(st.ambientSessions ?? {}), [uid]: e.session };
+            sessions[uid] = e.session;
             writeState(st);
           }
           p.waiting?.resolve(e);
@@ -863,10 +882,27 @@ async function ambientService() {
     log(`Ambient's session for ${uid} ${p.session ? `resumed (${p.session.slice(0, 8)})` : "started"}`);
   };
 
+  /** Before another session opens: the one used longest ago that isn't answering is closed (its session stays). */
+  const makeRoom = (keep) => {
+    const live = [...people.entries()].filter(([k, x]) => x.child && k !== keep);
+    if (live.length < MAX_LIVE) return;
+    const idle = live.filter(([, x]) => !x.waiting).sort((a, b) => (a[1].used ?? 0) - (b[1].used ?? 0));
+    for (const [k, x] of idle.slice(0, live.length - MAX_LIVE + 1)) {
+      x.child.kill("SIGTERM");
+      x.child = null;
+      log(`Closed the session of ${k.slice(0, 12)} for now (it resumes when it's written to)`);
+    }
+  };
+
   const handle = async (job) => {
-    const uid = job.uid;
+    // The lane (a shared thread) or, before lanes and for the main lane, the person.
+    const uid = job.lane || job.uid;
+    const dir = laneFolder(job);
     const p = people.get(uid) ?? { child: null, session: sessions[uid] ?? null, token: null, waiting: null };
     people.set(uid, p);
+    p.used = Date.now();
+    // The gateway knows the lane's session (another computer may have had it): resumed if it's here.
+    if (!p.session && typeof job.session === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(job.session)) p.session = job.session;
     const stop = () => {
       p.child?.kill("SIGTERM");
       p.child = null;
@@ -885,15 +921,20 @@ async function ambientService() {
       p.mcp = granted;
       stop();
     }
+    // Cold: no session to resume (a new lane, a fresh start, or one that isn't on this computer).
+    let cold = Boolean(job.fresh);
     if (!p.child) {
-      placeSkills(folderOf(uid), job.skills);
-      start(uid, p, job.instructions);
+      makeRoom(uid);
+      placeSkills(dir, job.skills);
+      start(uid, p, job.instructions, dir);
+      if (!p.session) cold = true;
     }
-    const history = job.fresh && job.history?.length ? `Earlier in this chat:\n${job.history.map((t) => `${t.role === "user" ? job.name : "You"}: ${t.text}`).join("\n")}\n\n` : "";
+    // The turns so far come along every time, and are read only when the session starts cold.
+    const history = cold && job.history?.length ? `Earlier in this chat:\n${job.history.map((t) => `${t.role === "user" ? job.name : "You"}: ${t.text}`).join("\n")}\n\n` : "";
     // Files that came with the message go in the person's folder here; Claude Code reads them.
     const saved = [];
     if (job.attachments?.length) {
-      const into = join(base, uid.replace(/[^A-Za-z0-9_-]/g, "_"), "attachments");
+      const into = join(dir, "attachments");
       mkdirSync(into, { recursive: true });
       own(into);
       for (const f of job.attachments) {
@@ -910,8 +951,9 @@ async function ambientService() {
     try {
       const r = await result;
       // What Ambient put in its outbox for the person: with the reply, then moved to outbox/sent.
-      const sent = r.ok ? outbox(folderOf(uid)) : { files: [], moved: () => {} };
-      await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text, ...(sent.files.length ? { files: sent.files } : {}) } : { error: r.text || "Claude Code couldn't answer" });
+      const sent = r.ok ? outbox(dir) : { files: [], moved: () => {} };
+      // The session's id goes with the answer: the gateway keeps it for the lane.
+      await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text, ...(sent.files.length ? { files: sent.files } : {}), ...(p.session ? { session: p.session } : {}) } : { error: r.text || "Claude Code couldn't answer" });
       sent.moved();
       log(`Answered ${uid} (${r.turns ?? "?"} turns${r.costUsd !== undefined ? `, $${r.costUsd.toFixed(2)}` : ""})`);
     } catch (err) {
@@ -1088,7 +1130,7 @@ async function ambientService() {
     else if (job?.uid && job.token) {
       // One person's messages one after another in their session; Ambient's own turns (a bot's
       // question, the heartbeat) one after another in short sessions of their own, beside it.
-      const key = job.mode === "internal" ? `${job.uid}:internal` : job.uid;
+      const key = job.mode === "internal" ? `${job.uid}:internal` : job.lane || job.uid;
       const prev = queues.get(key) ?? Promise.resolve();
       const next = prev.then(() => (job.mode === "internal" ? internal(job) : handle(job)));
       queues.set(key, next.catch(() => {}));

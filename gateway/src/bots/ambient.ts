@@ -49,6 +49,11 @@ const VIA_NOTES: Record<string, (name: string) => string> = {
     `[${name} wrote this on iMessage, and your answer goes there as a text message: plain text, no Markdown, a few short lines. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision. You can react to their message as a person would, when you'd do so yourself; nothing reacts for you. Two ways: start your answer with [react: 👍] (one emoji, any: 👍 ❤️ 😂 🙏 🎉 🔥 🤝 …), where a reaction alone is a whole answer when words would add nothing ("thanks", "ok", "sounds good") and words after it follow as a text; or call react_on_imessage first when the work will take a while (👀), so they see you're on it before your answer comes. Not on every message.]`,
 };
 
+/** "new chat" (or "neuer Chat", "/new") on its own: start over, as New chat in the app. */
+export function isNewChat(text: string): boolean {
+  return /^\s*(\/new|new chat|neuer chat|neuen chat)[.!]?\s*$/i.test(text);
+}
+
 /**
  * A reaction Amb put at the start of its answer ("[react: 👍] Done."): the emoji, and the answer
  * without it. One emoji only; anything else in the brackets is left as text.
@@ -379,7 +384,13 @@ export class AmbientChat {
    * gets its own. Resolves once that answer is stored and sent back. One conversation, whichever
    * way it's written.
    */
-  async sendQueued(uid: string, name: string, text: string, via: string, attachments: ChatAttachment[] = []): Promise<ChatMessage> {
+  async sendQueued(uid: string, name: string, text: string, via: string, attachments: ChatAttachment[] = []): Promise<ChatMessage | null> {
+    // "new chat" typed in a channel without a button (iMessage, Slack, Teams): as New chat in the app.
+    if (via !== "app" && !attachments.length && isNewChat(text)) {
+      await this.clear(uid, name);
+      await Promise.resolve(this.onReply?.(uid, via, "New chat: I'm starting fresh. What I keep in my memory stays.", [])).catch(() => undefined);
+      return null;
+    }
     const turn = (this.queued.get(uid) ?? Promise.resolve())
       .catch(() => undefined)
       .then(async () => {

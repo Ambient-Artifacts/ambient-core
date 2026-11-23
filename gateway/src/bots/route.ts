@@ -1525,7 +1525,7 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
   r.post("/v1/host/ambient/:jobId", express.json({ limit: "16mb" }), async (req, res) => {
     const h = await host(req, res);
     if (!h) return;
-    const body = z.object({ text: z.string().max(100_000).optional(), error: z.string().max(2_000).optional(), files: z.array(ChatAttachment).max(4).optional() }).safeParse(req.body);
+    const body = z.object({ text: z.string().max(100_000).optional(), error: z.string().max(2_000).optional(), files: z.array(ChatAttachment).max(4).optional(), session: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).optional() }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Send the reply's text, or what went wrong." });
       return;
@@ -1538,7 +1538,7 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
       // Files that can't go with a message (a type or size the chat doesn't take): the text still does.
       console.warn(`[ambient] files from ${h.name} left out: ${(err as Error).message}`);
     }
-    const ok = body.data.error !== undefined ? d.computers.fail(h.id, id, body.data.error) : d.computers.reply(h.id, id, body.data.text ?? "", files);
+    const ok = body.data.error !== undefined ? d.computers.fail(h.id, id, body.data.error) : d.computers.reply(h.id, id, body.data.text ?? "", files, body.data.session);
     if (!ok) {
       res.status(404).json({ error: "no_such_message", message: "That message isn't waiting for a reply anymore." });
       return;

@@ -13,6 +13,7 @@ import type { IncomingFile } from "../bots/attachments.ts";
 import { checkAttachments } from "../bots/ambient.ts";
 import type { Owner } from "../routines/keys.ts";
 import type { AmbInbox } from "./imessage.ts";
+import type { ThreadMessage } from "./channel-files.ts";
 
 /** The key Amb's app is kept under, where a bot's would be under its id. */
 export const AMB = "amb";
@@ -26,7 +27,7 @@ export interface AmbDoorDeps {
   /** Files a decision's answer (a click on a card). */
   answer?(uid: string, decisionId: string, answer: string, via: string): Promise<void>;
   /** A team's Amb in a channel (null: not available there yet; the reason is said). */
-  teamTurn?(teamId: string, asker: { uid: string; name: string }, conversation: string, text: string, files: IncomingFile[]): Promise<{ text: string } | null>;
+  teamTurn?(teamId: string, asker: { uid: string; name: string }, conversation: string, text: string, files: IncomingFile[], thread?: ThreadMessage[]): Promise<{ text: string } | null>;
 }
 
 /** Amb's chat takes images, PDFs and text: the rest is named in the message. */

@@ -491,6 +491,12 @@ describe("a bot's own Slack app", () => {
     expect(answer!.args.thread_ts).toBeUndefined();
     const chat = (await call("GET", "/v1/app/ambient/chat")).json as { messages: { role: string; text: string; via?: string | null }[] };
     expect(chat.messages.some((m) => m.role === "user" && m.text.includes("what's waiting on me?"))).toBe(true);
+    // "new chat" typed in the DM starts over, as New chat in the app.
+    await sendEvent({ type: "event_callback", event_id: "EvA0", event: { type: "message", channel_type: "im", user: "U_LENA", text: "new chat", channel: "DA", ts: "1800000020.0002" } }, { path: ambHook });
+    await s.folders.slack!.idle();
+    expect(String(posts().at(-1)!.args.text)).toContain("New chat: I'm starting fresh");
+    const after = (await call("GET", "/v1/app/ambient/chat")).json as { messages: { role: string; text: string }[] };
+    expect(after.messages.some((m) => m.text.includes("what's waiting on me?"))).toBe(false);
     // Someone with no Ambient account: told so once, and nothing reaches anyone's chat.
     await sendEvent({ type: "event_callback", event_id: "EvA2", event: { type: "message", channel_type: "im", user: "U_MAX", text: "hi", channel: "DM2", ts: "1800000021.0001" } }, { path: ambHook });
     await s.folders.slack!.idle();
