@@ -45,11 +45,11 @@ const hostCall = async (token: string, method: string, path: string, body?: unkn
   const t = await res.text();
   return { status: res.status, json: t ? (JSON.parse(t) as Record<string, unknown>) : {} };
 };
-const deliver = async (path: string, secret: string, event: string, payload: unknown) => {
+const deliver = async (path: string, secret: string, event: string, payload: unknown, id?: string) => {
   const body = JSON.stringify(payload);
   const res = await fetch(`${s.origin}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-github-event": event, "x-github-delivery": `d-${delivery++}`, "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}` },
+    headers: { "content-type": "application/json", "x-github-event": event, "x-github-delivery": id ?? `d-${delivery++}`, "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}` },
     body,
   });
   return { status: res.status, json: (await res.json()) as { result: string } };
@@ -194,6 +194,20 @@ describe("a bot from the Reviewer template", () => {
     // Signed with another App's secret: refused.
     expect((await deliver(`/v1/hooks/github-app/${reviewerHook}`, shared.secret, "pull_request", { ...opened, installation: { id: 2 } })).status).toBe(401);
     expect((await deliver("/v1/hooks/github-app/nope", shared.secret, "pull_request", opened)).status).toBe(404);
+  });
+
+  it("hears an event that GitHub sends to both Apps under one delivery id, and takes a repeat to the same App once", async () => {
+    const thread = async (id: string) => ((await call("GET", `/v1/app/routines/${id}/thread`)).json.messages as { author: string | null; text: string }[]).filter((m) => m.author === "GitHub");
+    const before = { reviewer: (await thread(reviewer)).length, plain: (await thread(plain)).length };
+    const opened = { action: "opened", repository, pull_request: { ...pr, number: 8, html_url: "https://github.com/Acme-Org/web/pull/8" } };
+    // The shared App's copy arrives first; the Reviewer's copy has the same id.
+    expect((await deliver("/v1/hooks/github-app", shared.secret, "pull_request", { ...opened, installation: { id: 1 } }, "one-event")).json.result).toBe("queued");
+    expect((await deliver(`/v1/hooks/github-app/${reviewerHook}`, made["code-reviewer"]!.secret, "pull_request", { ...opened, installation: { id: 2 } }, "one-event")).json.result).toBe("queued");
+    // GitHub's redelivery to the same App is still a repeat.
+    expect((await deliver(`/v1/hooks/github-app/${reviewerHook}`, made["code-reviewer"]!.secret, "pull_request", { ...opened, installation: { id: 2 } }, "one-event")).json.result).toBe("seen");
+    await s.folders.github!.idle();
+    expect(await thread(reviewer)).toHaveLength(before.reviewer + 1);
+    expect(await thread(plain)).toHaveLength(before.plain + 1);
   });
 });
 
