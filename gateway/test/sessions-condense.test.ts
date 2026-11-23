@@ -213,4 +213,10 @@ describe("which team a session goes to", () => {
     expect(pickTeam(rules, { cwd: "~/git/old-thing", repo: null, files: [] }, teams)?.slug).toBe("acme");
     expect(pickTeam(rules, { cwd: "~/Documents", repo: null, files: [] }, teams)).toBeNull();
   });
+  it("never sends a session from a private folder or repo, whatever the rules say", () => {
+    const rules = [{ match: "~/*", team: "acme" }, { match: "~/*/*", team: "acme" }];
+    expect(pickTeam(rules, { cwd: "~/git/site", repo: null, files: [] }, teams)?.slug).toBe("acme");
+    expect(pickTeam(rules, { cwd: "~/Privat/taxes", repo: null, files: [] }, teams)).toBeNull();
+    expect(pickTeam(rules, { cwd: "~/git/x", repo: "github.com/lena/private-notes", files: [] }, teams)).toBeNull();
+  });
 });

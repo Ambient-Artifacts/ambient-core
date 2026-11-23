@@ -5,13 +5,14 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JWK, type JWTPayload } from "jose";
-import { clock, MicrosoftConnection, TeamNoteV1, TeamSettings, withKind, WorkDestination } from "@brain/spec";
-import { dispatchQuery, GitError, HasContent, LocalReader, QueryRequest, type WikiStore } from "@brain/wiki";
+import { clock, IgnorePaths, MeetingNotes, MicrosoftConnection, TeamNoteV1, TeamSettings, withKind, WorkDestination } from "@brain/spec";
+import { dispatchQuery, GitError, HasContent, LocalReader, normalizeIgnore, QueryRequest, type WikiStore } from "@brain/wiki";
 import type { Deliverer } from "./destination.ts";
 import { GraphError, graphFor as defaultGraphFor, GraphTokens, type DriveFolder, type MicrosoftGraph } from "./graph.ts";
 import { destinationFiles, IngestError, ingestNote } from "./ingest.ts";
 import type { TeamSettingsStore } from "./settings.ts";
 import { ReadOnlyWiki, type TeamWiki } from "./wiki.ts";
+import { BotsMirror, MAX_MIRROR_BYTES, MirrorError, mirrorBots } from "./bots.ts";
 
 export interface TeamAppConfig {
   teamId: string;
@@ -37,7 +38,7 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
   app.disable("x-powered-by");
 
   /** The gateway's token for this team and `purpose`, or null. */
-  const verified = async (req: Request, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health") => {
+  const verified = async (req: Request, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health" | "bots") => {
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ")) return null;
     try {
@@ -68,7 +69,7 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     res.json({
       ...base,
       pages: wiki.store.size,
-      consolidate: await jobState(wiki, cfg.outDir, !!wiki.remote?.readOnly),
+      consolidate: await jobState(wiki, cfg.outDir, !!wiki.remote?.readOnly || !!wiki.fence),
       repo: wiki.remote?.status() ?? null,
       delivery: (await cfg.deliverer?.status()) ?? null,
       // The wiki's git head: the gateway's health check tells the apps when it moves.
@@ -76,7 +77,7 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     });
   });
 
-  const auth = (purpose: "query" | "inbox" | "repo" | "settings" | "graph") => async (req: Request, res: Response, next: NextFunction) => {
+  const auth = (purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "bots") => async (req: Request, res: Response, next: NextFunction) => {
     if (!req.headers.authorization?.startsWith("Bearer ")) {
       res.status(401).json({ error: "missing token" });
       return;
@@ -100,6 +101,34 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     res.json({ result: await dispatchQuery(new TeamReader(wiki.store, cfg.rawDir), parsed.data) });
   });
 
+  // Bots' folders mirrored from Ambient into the wiki's repo (docs/bots.md, "A bot's folder in
+  // git"): every bot of the team at once, replacing what was mirrored before, in one commit.
+  app.put("/v1/bots", express.json({ limit: MAX_MIRROR_BYTES * 2 }), auth("bots"), async (req, res) => {
+    const parsed = BotsMirror.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "bad_request", issues: parsed.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
+      return;
+    }
+    const repo = () => {
+      const st = wiki.remote?.connected ? wiki.remote.status() : null;
+      return st ? { url: st.url, mode: wiki.remote!.mode, status: st.status, lastError: st.lastError, lastPushAt: st.lastPushAt } : null;
+    };
+    if (wiki.remote?.readOnly) {
+      res.status(409).json({ error: "read_only", message: "Another tool keeps this team's brain and Ambient only reads it, so bots aren't mirrored there.", repo: repo() });
+      return;
+    }
+    try {
+      const out = await mirrorBots(wiki, parsed.data);
+      res.json({ ...out, repo: repo() });
+    } catch (err) {
+      if (err instanceof MirrorError || err instanceof ReadOnlyWiki) {
+        res.status(err instanceof MirrorError ? 400 : 409).json({ error: err instanceof MirrorError ? "bad_request" : "read_only", message: err.message, repo: repo() });
+        return;
+      }
+      throw err;
+    }
+  });
+
   // The team's own git repo (set by an admin through the gateway).
   app.get("/v1/repo", auth("repo"), (_req, res) => {
     res.json({ repo: wiki.remote?.status() ?? null });
@@ -113,11 +142,13 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     }
     const url = typeof req.body?.url === "string" ? req.body.url : "";
     const token = typeof req.body?.token === "string" ? req.body.token : "";
-    const mode = req.body?.mode === "read-only" ? "read-only" : "two-way";
+    // No mode: nobody has said who keeps the repo yet (see TeamRemote.connect).
+    const mode = req.body?.mode === "read-only" ? "read-only" : req.body?.mode === "folder" ? "folder" : req.body?.mode === "two-way" ? "two-way" : undefined;
     const existing = req.body?.existing === true;
+    const folder = typeof req.body?.folder === "string" ? req.body.folder : undefined;
     try {
       const repo = await wiki.exclusive(async () => {
-        const status = await remote.connect(url, token, { mode, existing });
+        const status = await remote.connect(url, token, { mode, existing, folder });
         wiki.reload();
         return status;
       });
@@ -128,6 +159,30 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
         res.status(409).json({ error: err.code, message: err.message, files: err.files, sample: err.sample });
         return;
       }
+      if (err instanceof GitError) {
+        res.status(400).json({ error: err.code, message: err.message });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  // Between read-only and a folder for Ambient, without connecting again (the token stays).
+  app.patch("/v1/repo", express.json({ limit: "4kb" }), auth("repo"), async (req, res) => {
+    const remote = wiki.remote;
+    const mode = req.body?.mode;
+    if (!remote?.connected || (mode !== "read-only" && mode !== "folder")) {
+      res.status(400).json({ error: "bad_request", message: remote?.connected ? "Choose read-only or a folder for Ambient." : "Connect the repo first." });
+      return;
+    }
+    try {
+      const repo = await wiki.exclusive(async () => {
+        const status = await remote.setMode(mode, req.body?.folder);
+        wiki.reload();
+        return status;
+      });
+      res.json({ repo });
+    } catch (err) {
       if (err instanceof GitError) {
         res.status(400).json({ error: err.code, message: err.message });
         return;
@@ -212,7 +267,9 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
     return {
       settings: store.public(readOnly),
       delivery: (await cfg.deliverer?.status()) ?? null,
-      repo_mode: wiki.remote?.connected ? (readOnly ? "read-only" : "two-way") : null,
+      repo_mode: wiki.remote?.connected ? wiki.remote.mode : null,
+      /** Mode "folder": where Ambient writes in the team's repo. */
+      repo_folder: wiki.fence,
     };
   };
 
@@ -269,12 +326,30 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
         if (!parsed.success) throw new SettingsError("Work logs go to a OneDrive or SharePoint folder, or nowhere.");
         next.work = parsed.data;
       }
+      if (body.ignore !== undefined) {
+        const paths = IgnorePaths.safeParse(body.ignore);
+        if (!paths.success) throw new SettingsError("Left-out paths are folders or files in the repo, like templates or README.md.");
+        next.ignore = normalizeIgnore(paths.data);
+      }
+      if (body.notes !== undefined) {
+        // Only what's given changes: {pcc: true} keeps who writes them, and the other way round.
+        const given = body.notes && typeof body.notes === "object" ? (body.notes as Record<string, unknown>) : null;
+        const notes = given ? MeetingNotes.safeParse({ ...next.notes, ...given }) : null;
+        if (!notes?.success) throw new SettingsError("Meeting notes are written by Ambient or by your own pipeline, with Apple's Private Cloud Compute or without.");
+        next.notes = notes.data;
+      }
       if (!next.microsoft && (next.transcripts.kind === "drive" || next.work.kind === "drive")) {
         throw new SettingsError("A OneDrive or SharePoint folder needs the Microsoft 365 connection. Choose another place first.");
+      }
+      // The team's own pipeline writes meeting notes from the transcripts, so they have to reach it.
+      const transcriptsGo = next.transcripts.kind === "drive" || (next.transcripts.kind === "repo" && !wiki.remote?.readOnly);
+      if (next.notes.by === "own" && !transcriptsGo) {
+        throw new SettingsError("Your own pipeline writes meeting notes from the transcripts, so choose where transcripts go first.");
       }
       const valid = TeamSettings.safeParse(next);
       if (!valid.success) throw new SettingsError(`Those settings aren't valid (${valid.error.issues[0]?.path.join(".")}).`);
       await store.save(valid.data);
+      wiki.setIgnore(valid.data.ignore);
       res.json(await settingsReply(store));
       void cfg.deliverer?.run().catch((err) => console.error("[team] delivery", err));
     } catch (err) {

@@ -10,9 +10,9 @@ const config = loadConfig();
 const convex = new ConvexHttpClient(config.convexUrl);
 // One WebSocket to Convex for the apps' live revisions (Node has WebSocket built in).
 const live = new ConvexClient(config.convexUrl);
-const { app, microsoftConnect } = createApp({
+const { app, microsoftConnect, msteamsBots } = createApp({
   config,
-  convex: { query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args) },
+  convex: { query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args), action: (fn, args) => convex.action(fn, args) },
   apple: appleVerifier(config.appleAudiences),
   revisionSource: new ConvexRevisionSource(live, config.serviceSecret),
 });
@@ -25,6 +25,7 @@ app.listen(port, host, () => {
   const signIn = [
     config.appleAudiences.length ? `Apple (${config.appleAudiences.join(", ")})` : null,
     config.microsoftClientIds?.length ? "Microsoft" : null,
+    config.googleClientIds?.length ? "Google" : null,
   ].filter(Boolean);
   console.log(`[gateway] app sign-in: ${signIn.length ? signIn.join(", ") : "none (accounts and AI-app codes come from the admin CLI)"}`);
   // Unset BRAIN_SIGNUPS means open: say so, so a server meant to be private doesn't stay open unnoticed.
@@ -49,3 +50,5 @@ if (microsoftConnect) {
   setTimeout(push, 5_000).unref();
   setInterval(push, TOKEN_PUSH_MS).unref();
 }
+
+if (msteamsBots.length) console.log(`[gateway] Microsoft Teams bots: ${config.msteamsBots!.map((b) => b.team).join(", ")}`);

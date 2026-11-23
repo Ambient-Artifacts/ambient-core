@@ -121,8 +121,9 @@ describe("ingest", () => {
 
     expect(readdirSync(join(dataDir, "raw"))).toEqual(["01JBTEAMNOTE00000000000001.json"]);
     expect(JSON.parse(readFileSync(join(dataDir, "raw", "01JBTEAMNOTE00000000000001.json"), "utf8")).segments[0].speaker).toBe("Lena Vogel");
-    const log = execFileSync("git", ["-C", join(dataDir, "wiki"), "log", "--format=%s %an"], { encoding: "utf8" });
-    expect(log).toContain("ingest: Kundencall Bergmann (000001) Ambient Bot");
+    // The person whose note it is is the author (named in the message too); Ambient commits it.
+    const log = execFileSync("git", ["-C", join(dataDir, "wiki"), "log", "--format=%s|%an|%cn"], { encoding: "utf8" });
+    expect(log).toContain("ingest: Kundencall Bergmann (000001) by Lena Vogel|Lena Vogel|Ambient Bot");
     const tracked = execFileSync("git", ["-C", join(dataDir, "wiki"), "ls-files"], { encoding: "utf8" });
     expect(tracked).not.toContain("raw");
     // The same commit carries the regenerated index pages.

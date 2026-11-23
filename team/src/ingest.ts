@@ -16,6 +16,7 @@ import {
 } from "@brain/spec";
 import { EntityIndex } from "@brain/wiki";
 import type { OutboxKind, TranscriptOutbox } from "./destination.ts";
+import { personAuthor } from "./repo.ts";
 import type { TeamWiki } from "./wiki.ts";
 
 const REF = /^(people|orgs|projects|topics)\/[a-z0-9][a-z0-9-]{0,79}$/;
@@ -51,8 +52,9 @@ function cleanBody(md: string): string {
 export function notePath(note: TeamNoteV1, title: string): string {
   const date = note.recorded_at.slice(0, 10);
   const id6 = note.note_id.slice(-6).toLowerCase();
-  // Work sessions with AI agents have their own folder; notes/ is recorded conversations.
-  return `${note.kind === "session" ? "sessions" : "notes"}/${date.slice(0, 7)}/${date}-${slugify(title) || "note"}-${id6}.md`;
+  // Work sessions with AI agents and corrections have their own folders; notes/ is recorded conversations.
+  const folder = note.kind === "session" ? "sessions" : note.kind === "correction" ? "corrections" : "notes";
+  return `${folder}/${date.slice(0, 7)}/${date}-${slugify(title) || "note"}-${id6}.md`;
 }
 
 export interface IngestResult {
@@ -142,18 +144,23 @@ export async function ingestNote(
   const recordedBy = opts.recordedBySlug && REF.test(opts.recordedBySlug) ? opts.recordedBySlug : undefined;
   // The id names the raw transcript's file: never a path (the schema says so too).
   if (!NoteId.safeParse(note.note_id).success) throw new IngestError(422, "invalid note: note_id");
-  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null };
+  const settings = opts.settings ?? { transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [], notes: { by: "ambient", pcc: false } };
   const files = opts.outbox ? destinationFiles(wiki, note, settings) : [];
+  const author = personAuthor(note.recorded_by_name, recordedBy);
+  const by = author ? { by: author } : {};
 
-  if (opts.readOnly) {
-    // Another tool keeps the wiki: Ambient adds no page, and its copy of the transcript would be
-    // out of reach (the MCP finds transcripts through their note), so only the files go out.
-    if (!files.length) throw new IngestError(409, "read_only");
-    const where = (f: DestinationFile) => `drive:${f.file}`;
+  // Another tool keeps the wiki, or the team's own pipeline writes its meeting notes from the
+  // transcripts: Ambient adds no page for this note, and only its files go out. (Read-only, a
+  // transcript kept here would be out of reach: the MCP finds transcripts through their note.)
+  // A correction has no transcript and is for whoever keeps the page: always filed, like a session.
+  const ownNotes = settings.notes.by === "own" && note.kind !== "session" && note.kind !== "correction";
+  if (opts.readOnly || ownNotes) {
+    if (!files.length) throw new IngestError(409, opts.readOnly ? "read_only" : "no_transcript_destination");
+    const where = (f: DestinationFile) => (f.kind === "transcript" && settings.transcripts.kind === "repo" ? wiki.place(`${settings.transcripts.folder}/${f.file}`) : `drive:${f.file}`);
     if ((await Promise.all(files.map((f) => opts.outbox!.seen(note.note_id, f.kind)))).every(Boolean)) {
       return { status: "duplicate", path: where(files[0]!) };
     }
-    for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f });
+    for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f, ...by });
     return { status: "stored", path: where(files[0]!) };
   }
 
@@ -168,9 +175,9 @@ export async function ingestNote(
 
   // Queued before the page is written: if a later step fails, the phone retries, and the same
   // note is queued again into the same file.
-  for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f });
+  for (const f of files) await opts.outbox!.add({ note_id: note.note_id, ...f, ...by });
   const transcript = files.find((f) => f.kind === "transcript");
-  const rawPath = transcript && settings.transcripts.kind === "repo" ? `${settings.transcripts.folder}/${transcript.file}` : undefined;
+  const rawPath = transcript && settings.transcripts.kind === "repo" ? wiki.place(`${settings.transcripts.folder}/${transcript.file}`) : undefined;
 
   const fm = note.entry_page.frontmatter;
   const title = str(fm.title, 60) || "Untitled note";
@@ -180,9 +187,22 @@ export async function ingestNote(
   const index = new EntityIndex(wiki.store);
   const recorder = recordedBy ? { ref: recordedBy, name: note.recorded_by_name ?? null } : undefined;
   const canon = (v: unknown) => [...new Set(refs(v).map((r) => index.canonical(r, { recorder })).filter((r): r is string => r !== null))];
-  const people = canon(fm.people);
-  if (recordedBy && !people.includes(recordedBy)) people.unshift(recordedBy);
+  // A correction is about the pages it names, never a new one, and not about the person who sent it.
+  const correction = note.kind === "correction";
+  const linked = (v: unknown) => (correction ? canon(v).filter((r) => wiki.store.getByRef(r)) : canon(v));
+  const people = linked(fm.people);
+  if (recordedBy && !correction && !people.includes(recordedBy)) people.unshift(recordedBy);
 
+  // A correction is the person's own words: nothing compiled it.
+  const compiled = correction
+    ? null
+    : note.client.compiler === "extractive"
+      ? { engine: "fm-ondevice", status: "partial", fallback: "extractive" }
+      : note.client.compiler === "session-summary"
+        ? { engine: "server", status: "compiled", fallback: "none" }
+        : note.client.compiler === "fm-pcc"
+          ? { engine: "fm-pcc", status: "compiled", fallback: "none" }
+          : { engine: "fm-ondevice", status: "compiled", fallback: "none" };
   const frontmatter: Record<string, unknown> = {
     id: note.note_id,
     type: "note",
@@ -197,16 +217,12 @@ export async function ingestNote(
     ...(recordedBy ? { recorded_by: recordedBy } : {}),
     consent: note.consent,
     people,
-    orgs: canon(fm.orgs),
-    projects: canon(fm.projects),
-    topics: canon(fm.topics),
+    orgs: linked(fm.orgs),
+    projects: linked(fm.projects),
+    topics: linked(fm.topics),
     ...(work(fm.work) ? { work: work(fm.work) } : {}),
     ...(rawPath ? { raw: rawPath } : {}),
-    compile: note.client.compiler === "extractive"
-      ? { engine: "fm-ondevice", status: "partial", fallback: "extractive" }
-      : note.client.compiler === "session-summary"
-        ? { engine: "server", status: "compiled", fallback: "none" }
-        : { engine: "fm-ondevice", status: "compiled", fallback: "none" },
+    ...(compiled ? { compile: compiled } : {}),
     updated: today,
   };
   const parsed = NoteFrontmatter.safeParse(frontmatter);
@@ -215,17 +231,21 @@ export async function ingestNote(
   // Replaced at its old address, so links to it stay. A new note whose address is already
   // another note's (same day, title and last six characters of the id, by chance or made so by a
   // member) gets its whole id in the name instead: it must never overwrite someone else's note.
-  let path = existing?.path ?? notePath(note, title);
+  let path = existing?.path ?? wiki.place(notePath(note, title));
   const taken = wiki.store.getByRef(path.replace(/\.md$/, ""));
   if (!existing && taken && taken.frontmatter.id !== note.note_id) {
     path = path.replace(/-[0-9a-z_-]{6}\.md$/, `-${note.note_id.toLowerCase()}.md`);
     if (wiki.store.getByRef(path.replace(/\.md$/, ""))) throw new IngestError(409, "a different note already has this address");
   }
-  // Links to the note's pages in this wiki's layout (the phone's own links point elsewhere).
+  // Links to the note's pages in this wiki's layout (the phone's own links point elsewhere). In a repo
+  // another tool keeps (a fence), Ambient never makes people, org or project pages, and the repo may not
+  // use those folders at all (ALEAS has clients/, no projects/): a page that isn't there is named, not linked.
   const related = (["people", "orgs", "projects", "topics"] as const).flatMap((k) =>
     (frontmatter[k] as string[]).map((ref) => {
-      const name = wiki.store.getByRef(ref)?.title ?? ref.split("/").pop()!.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-      return `- [${name.replace(/[[\]]/g, "")}](${posix.relative(posix.dirname(path), `${ref}.md`)})`;
+      const existing = wiki.store.getByRef(ref);
+      const name = (existing?.title ?? ref.split("/").pop()!.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")).replace(/[[\]]/g, "");
+      if (!existing && wiki.fence) return `- ${name}`;
+      return `- [${name}](${posix.relative(posix.dirname(path), `${ref}.md`)})`;
     }),
   );
   const own = cleanBody(note.entry_page.body_md).replace(/\n## Related\n[\s\S]*?(?=\n## |$)/, "").trimEnd();
@@ -242,7 +262,7 @@ export async function ingestNote(
     await put(path, text);
     const id6 = note.note_id.slice(-6).toLowerCase();
     const result: IngestResult = { status: replacing ? "replaced" : "stored", path };
-    return { message: `${replacing ? "summarized again" : "ingest"}: ${title} (${id6})`, result };
+    return { message: `${replacing ? "summarized again" : "ingest"}: ${title} (${id6})${author ? ` by ${author.name}` : ""}`, result, author };
   });
   return out;
 }

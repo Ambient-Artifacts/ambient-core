@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { TeamRemote } from "./remote.ts";
 import { TeamWiki } from "./wiki.ts";
 import { seedTeam } from "./seed.ts";
+import { claudeCodeLlm, type LlmOrKey } from "./llm.ts";
 
 const cmd = process.argv[2];
 const cfg = loadTeamConfig();
@@ -27,12 +28,16 @@ const missingKey: PageUpdater = {
 
 if (cmd === "consolidate" || cmd === "rewrite") {
   const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir, {}, cfg.teamSecret));
-  // Another tool keeps this wiki (its repo is connected read-only): its upkeep isn't ours to do.
-  if (wiki.remote?.readOnly) {
-    console.log(JSON.stringify({ status: "skipped", reason: "the team's repo is connected read-only; another tool keeps the wiki" }));
+  // Another tool keeps this wiki (its repo is connected read-only, or Ambient writes only one
+  // folder of it): its upkeep isn't ours to do.
+  if (wiki.remote?.readOnly || wiki.fence) {
+    console.log(JSON.stringify({ status: "skipped", reason: "another tool keeps the wiki (the team's repo is connected read-only or with a folder for Ambient)" }));
     process.exit(0);
   }
-  const updater = cfg.anthropicApiKey ? new AnthropicUpdater(cfg.anthropicApiKey, cfg.model) : missingKey;
+  // The model: the team's key, or (a team on its own computer) Claude Code there, signed in with the
+  // computer's Claude plan (BRAIN_CLAUDE: its path; the runner's unit sets an isolated config folder).
+  const model: LlmOrKey | null = cfg.anthropicApiKey ?? (process.env.BRAIN_CLAUDE ? claudeCodeLlm({ claude: process.env.BRAIN_CLAUDE }) : null);
+  const updater = model ? new AnthropicUpdater(model, cfg.model) : missingKey;
   // `rewrite --all` or `rewrite people/anna-mueller …`: pages rewritten from their latest notes
   // (into their kind's sections), as well as the nightly run's work.
   const args = process.argv.slice(3);
@@ -43,9 +48,9 @@ if (cmd === "consolidate" || cmd === "rewrite") {
     process.exit(2);
   }
   const result = await consolidate(wiki, updater, {
-    overview: cfg.anthropicApiKey ? new AnthropicOverviewWriter(cfg.anthropicApiKey, cfg.model) : undefined,
-    decisions: cfg.anthropicApiKey ? new AnthropicDecisionFiler(cfg.anthropicApiKey, cfg.model) : undefined,
-    finder: cfg.anthropicApiKey ? new AnthropicEntityFinder(cfg.anthropicApiKey, cfg.model) : undefined,
+    overview: model ? new AnthropicOverviewWriter(model, cfg.model) : undefined,
+    decisions: model ? new AnthropicDecisionFiler(model, cfg.model) : undefined,
+    finder: model ? new AnthropicEntityFinder(model, cfg.model) : undefined,
     outDir: cfg.outDir,
     version: cfg.version,
     rewrite,

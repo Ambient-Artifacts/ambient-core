@@ -3,9 +3,12 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { attention, LocalReader, indexFilesIn, renderIndexFiles, WikiStore } from "@brain/wiki";
+import { attention, LocalReader, indexFilesIn, normalizeIgnore, renderIndexFiles, WikiStore } from "@brain/wiki";
 import type { TeamRemote } from "./remote.ts";
-import { Repo } from "./repo.ts";
+import { Repo, type Author } from "./repo.ts";
+
+/** Where bots' folders are mirrored (inside the fence when there is one). */
+export const BOTS_DIR = "bots";
 
 /** Write a file in the wiki; `index: false` keeps it out of the page index (raw transcripts). */
 export type Put = (path: string, text: string, opts?: { index?: boolean }) => Promise<void>;
@@ -16,7 +19,15 @@ const LEGACY_GITIGNORE = "raw/\nout/\n.brain/\n";
 /** A write to a team wiki whose repo another tool keeps (read-only): refused, never queued. */
 export class ReadOnlyWiki extends Error {
   constructor() {
-    super("This team's wiki is kept by another tool. Ambient only reads it, so nothing can be added here.");
+    super("Another tool keeps this team's brain. Ambient only reads it, so nothing can be added here.");
+  }
+}
+
+/** A write outside the one folder Ambient may write in a repo another tool keeps (mode "folder"). */
+export class FencedWrite extends ReadOnlyWiki {
+  constructor(readonly fence: string, readonly path: string) {
+    super();
+    this.message = `Another tool keeps this team's brain; Ambient writes only into ${fence}/ there, not ${path}.`;
   }
 }
 
@@ -32,6 +43,8 @@ export class TeamWiki {
   }
   private lastCheck = 0;
   private lastPull = 0;
+  /** Folders and files of the repo that aren't knowledge (templates, a README) and stay out of the brain. */
+  private ignore: string[];
   /** The team's own repo, when an admin connected one. */
   remote?: TeamRemote;
 
@@ -39,26 +52,47 @@ export class TeamWiki {
     readonly dir: string,
     readonly teamId: string,
     readonly teamName = "Team",
+    ignore: readonly string[] = [],
   ) {
     this.repo = new Repo(dir);
-    this.store = WikiStore.fromDirectory(dir, "team", teamId);
+    this.ignore = normalizeIgnore(ignore);
+    this.store = WikiStore.fromDirectory(dir, "team", teamId, { ignore: this.ignore });
+  }
+
+  /**
+   * What stays out of the brain: the team's own list, and bots' folders mirrored from Ambient
+   * (bots/ at the top is skipped by the store; inside a fence they're at <fence>/bots).
+   */
+  private get skipped(): string[] {
+    const fence = this.remote?.fence;
+    return fence ? normalizeIgnore([...this.ignore, `${fence}/${BOTS_DIR}`]) : this.ignore;
+  }
+
+  /** The team changed what stays out: read the repo again without it (or with it again). */
+  setIgnore(list: readonly string[]): void {
+    const next = normalizeIgnore(list);
+    if (next.join("\n") === this.ignore.join("\n")) return;
+    this.ignore = next;
+    this.reload();
   }
 
   get reader(): LocalReader {
     return new LocalReader(this.store);
   }
 
-  static async open(dir: string, teamId: string, teamName: string, remote?: TeamRemote): Promise<TeamWiki> {
+  static async open(dir: string, teamId: string, teamName: string, remote?: TeamRemote, ignore: readonly string[] = []): Promise<TeamWiki> {
     await new Repo(dir).ensure(teamName);
-    const wiki = new TeamWiki(dir, teamId, teamName);
+    const wiki = new TeamWiki(dir, teamId, teamName, ignore);
     if (remote) {
       await remote.load();
       wiki.remote = remote;
+      // Inside a fence, the bots' folder is under it: read the wiki again without it.
+      if (remote.fence) wiki.reload();
     }
     wiki.knownHead = await wiki.repo.head();
-    // Repos from before index pages existed (or edited by hand) get them now; a read-only
-    // wiki is the repo's, as it is.
-    if (!remote?.readOnly) {
+    // Repos from before index pages existed (or edited by hand) get them now; a wiki another
+    // tool keeps (read-only, or Ambient writing into one folder) is the repo's, as it is.
+    if (!remote?.readOnly && !remote?.fence) {
       await wiki.write(async () => ({ message: "index: rebuild", result: {} }));
       await wiki.trackRaw();
     }
@@ -100,23 +134,41 @@ export class TeamWiki {
 
   /** Re-read everything from disk (after another process, e.g. the nightly job, committed). */
   reload(): void {
-    this.store = WikiStore.fromDirectory(this.dir, "team", this.teamId);
+    this.store = WikiStore.fromDirectory(this.dir, "team", this.teamId, { ignore: this.skipped });
   }
 
   read(path: string): string {
     return readFileSync(inside(this.dir, path), "utf8");
   }
 
+  /** The one folder Ambient may write when another tool keeps this wiki (mode "folder"), else null. */
+  get fence(): string | null {
+    return this.remote?.fence ?? null;
+  }
+
+  /** Where a file Ambient writes goes: inside the fence when there is one ("notes/…" → "ambient/notes/…"). */
+  place(path: string): string {
+    const fence = this.fence;
+    return fence ? `${fence}/${path}` : path;
+  }
+
   /** Serialize writers: each callback runs alone and its files land in one commit. */
   write<T>(
-    fn: (put: Put, remove: (path: string) => Promise<void>) => Promise<{ message: string; result: T }>,
+    fn: (put: Put, remove: (path: string) => Promise<void>) => Promise<{ message: string; result: T; author?: Author }>,
   ): Promise<T & { commit: string | null }> {
     if (this.remote?.readOnly) return Promise.reject(new ReadOnlyWiki());
     const next = this.chain.then(async () => {
       // Start from the repo's latest state, so edits made there aren't overwritten.
       if (this.remote?.connected && (await this.remote.pull())) this.reload();
       const touched: string[] = [];
+      // Another tool keeps this wiki and Ambient writes one folder of it: anything else is refused
+      // before a byte is written, whoever asks.
+      const fence = this.fence;
+      const fenced = (path: string) => {
+        if (fence && !path.startsWith(`${fence}/`)) throw new FencedWrite(fence, path);
+      };
       const put: Put = async (path, text, opts = {}) => {
+        fenced(path);
         const file = inside(this.dir, path);
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, text);
@@ -125,14 +177,18 @@ export class TeamWiki {
         touched.push(path);
       };
       const remove = async (path: string) => {
+        fenced(path);
         await rm(inside(this.dir, path), { force: true });
         this.store.remove(path);
         touched.push(path);
       };
-      const { message, result } = await fn(put, remove);
-      if (touched.length) touched.push(await this.appendLog(message));
-      touched.push(...(await this.writeIndexes()));
-      const commit = touched.length ? await this.repo.commit(touched, message) : null;
+      const { message, result, author } = await fn(put, remove);
+      // log.md and the folder indexes are the wiki's own: not Ambient's to write when it has one folder.
+      if (!fence) {
+        if (touched.length) touched.push(await this.appendLog(message));
+        touched.push(...(await this.writeIndexes()));
+      }
+      const commit = touched.length ? await this.repo.commit(touched, message, author) : null;
       if (commit) {
         this.knownHead = commit;
         await this.remote?.push();
@@ -167,7 +223,7 @@ export class TeamWiki {
   /** Regenerate index.md and every folder's _index.md; returns the files that changed. */
   private async writeIndexes(): Promise<string[]> {
     const changed: string[] = [];
-    const rendered = renderIndexFiles(this.store.entries(), `${this.teamName} wiki`, attention(this.store.lint()));
+    const rendered = renderIndexFiles(this.store.entries(), `${this.teamName} wiki`, attention(this.store.lint()), this.store.folderNotes);
     const keep = new Set(this.remote?.keep ?? []);
     for (const [path, text] of rendered) {
       // The repo's own index.md (it had one when it was connected) stays as its people wrote it.

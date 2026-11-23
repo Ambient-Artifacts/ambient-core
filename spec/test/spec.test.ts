@@ -275,9 +275,13 @@ describe("destination files", () => {
       body: "# Pricing\n\nDid it.\n",
     });
 
-    expect(TeamSettings.parse({})).toEqual({ transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null });
+    expect(TeamSettings.parse({})).toEqual({ transcripts: { kind: "repo", folder: "raw" }, work: { kind: "none" }, microsoft: null, ignore: [], notes: { by: "ambient", pcc: false } });
     expect(TeamSettings.safeParse({ transcripts: { kind: "repo", folder: "../etc" } }).success).toBe(false);
     expect(TeamSettings.safeParse({ work: { kind: "repo" } }).success).toBe(false);
+    // Folders and files of the team's repo that stay out of the brain: paths in the repo, nothing else.
+    expect(TeamSettings.parse({ ignore: ["templates", "tools/wiki-sync", "README.md", "Über uns.md"] }).ignore).toHaveLength(4);
+    for (const bad of ["", "../x", "a/../b", "a\\b", "a\u0000b", "x".repeat(201)]) expect(TeamSettings.safeParse({ ignore: [bad] }).success, JSON.stringify(bad)).toBe(false);
+    expect(TeamSettings.safeParse({ ignore: Array.from({ length: 51 }, (_, i) => `d${i}`) }).success).toBe(false);
   });
 });
 
@@ -288,5 +292,32 @@ describe("the transcript fixture (shared with the app)", () => {
     const f = JSON.parse(readFileSync(join(dir, "kickoff.json"), "utf8"));
     expect(renderTranscript(f.meta, f.segments)).toBe(readFileSync(join(dir, "kickoff.md"), "utf8"));
     expect(destinationFileName(f.meta)).toBe(f.file);
+  });
+});
+
+describe("bot looks and state", () => {
+  it("maps faces from before the shapes and picks a stable colour by name", async () => {
+    const { botLook, BOT_COLORS, BOT_SHAPES } = await import("../src/index.ts");
+    expect(botLook("Dev", { face: "round" }).face).toBe("pebble");
+    expect(botLook("Dev", { face: "tall" }).face).toBe("cap");
+    expect(botLook("Dev", { face: "wide" }).face).toBe("ridge");
+    expect(BOT_SHAPES).toContain(botLook("Dev", { face: "classic" }).face);
+    expect(botLook("Dev", { face: "classic" })).toEqual(botLook("Dev", { face: "classic" }));
+    expect(BOT_COLORS).toContain(botLook("Release notes", { face: "dome" }).color);
+    expect(botLook("x", { face: "drop", color: "moss", wear: ["cap", "cape"] })).toEqual({ face: "drop", color: "moss", wear: ["cap"] });
+  });
+
+  it("is done only while its last run's news is unread", async () => {
+    const { botState, unseenNews } = await import("../src/index.ts");
+    const base = { enabled: true, ready: true, lastRunStatus: "succeeded", openQuestion: false };
+    expect(botState({ ...base })).toBe("done");
+    expect(botState({ ...base, news: true })).toBe("done");
+    expect(botState({ ...base, news: false })).toBe("asleep");
+    expect(botState({ ...base, lastRunStatus: "failed", news: false })).toBe("stuck");
+    expect(unseenNews({ kind: "result", at: 20 }, 10, null)).toBe(true);
+    expect(unseenNews({ kind: "result", at: 20 }, 10, 25)).toBe(false);
+    expect(unseenNews({ kind: "result", at: 5 }, 10, null)).toBe(false);
+    expect(unseenNews({ kind: "question", at: 20 }, 10, null)).toBe(false);
+    expect(unseenNews(null, 10, null)).toBe(false);
   });
 });

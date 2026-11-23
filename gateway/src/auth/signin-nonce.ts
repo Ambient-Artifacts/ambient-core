@@ -1,5 +1,5 @@
-// Sign-in nonces: they tie an Apple or Microsoft ID token to this server. The app asks this
-// server for one (GET /v1/app/sign-in-nonce) before it signs in with Apple or Microsoft, which put
+// Sign-in nonces: they tie an Apple, Microsoft or Google ID token to this server. The app asks this
+// server for one (GET /v1/app/sign-in-nonce) before it signs in with Apple, Microsoft or Google, which put
 // it into the ID token they sign. Without it, a token the app gave one server (a hostile
 // "Use your own server", say) could be replayed to another, Ambient Cloud included, and sign the
 // person in there: the token's audience is the app, not the server.

@@ -28,14 +28,14 @@ if (!cfg.teamId) {
   });
   app.listen(cfg.port, cfg.host, () => console.log(`[team] pool server ${cfg.serverId} waiting for a team on ${cfg.host}:${cfg.port}`));
 } else {
-  const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir, {}, cfg.teamSecret));
+  const settings = new TeamSettingsStore(cfg.settingsFile, cfg.teamSecret);
+  await settings.load();
+  const wiki = await TeamWiki.open(cfg.wikiDir, cfg.teamId, cfg.teamName, new TeamRemote(join(cfg.dataDir, "remote.json"), cfg.wikiDir, {}, cfg.teamSecret), settings.get().ignore);
   const moved = await moveSessionNotes(wiki).catch((err) => {
     console.error(`[team] moving work sessions to sessions/ failed: ${(err as Error).message}`);
     return 0;
   });
   if (moved) console.log(`[team] moved ${moved} work session(s) to sessions/`);
-  const settings = new TeamSettingsStore(cfg.settingsFile, cfg.teamSecret);
-  await settings.load();
   // Tokens for Ambient's own Microsoft app arrive from the gateway; one store for settings and delivery.
   const graphTokens = new GraphTokens();
   const makeGraph = (conn: Parameters<typeof graphFor>[0]) => graphFor(conn, graphTokens);

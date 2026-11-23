@@ -16,6 +16,7 @@ import type { Directory, Team } from "../directory.ts";
 import type { PersonalStore } from "../personal.ts";
 import { TeamServerError, type TeamLink } from "../teams.ts";
 import { condense, homeRelative, matchBudget, normalizeRemote, parseClaudeCode, pickTeam, splitBlocks, type ParsedSession, type SessionPlace, type SessionRule } from "./condense.ts";
+import { ComputerUnavailable } from "../bots/computer.ts";
 
 /** How long a team copy waits, so the user can keep a session personal. */
 export const SHARE_HOLD_MS = 30 * 60_000;
@@ -68,6 +69,11 @@ export interface NoteSpec {
   /** Write the note into the personal wiki (false on a team-only connection). */
   personal: boolean;
   team: Team | null;
+  /**
+   * Send the team copy now instead of after the hold (a team-only connection: there is nothing
+   * personal to keep it in). If the team server doesn't take it, it is retried like a held copy.
+   */
+  immediate?: boolean;
 }
 
 export interface SessionDeps {
@@ -156,17 +162,23 @@ export class SessionService {
   }
 
   /** Summarize waiting sessions into notes. Failures are retried a few times, then flagged by the health check. */
-  async process(summarizer: SessionSummarizer, opts: { limit?: number; now?: number } = {}) {
+  /**
+   * Write the notes of uploaded work sessions. `summarizer`: one for everyone (a key), or each
+   * person's own (upkeep on their computer): a session whose person has no connected computer
+   * waits, without counting as a failed attempt.
+   */
+  async process(summarizer: SessionSummarizer | ((uid: string) => SessionSummarizer), opts: { limit?: number; now?: number; waitMs?: number } = {}) {
     const now = opts.now ?? Date.now();
+    const summarizerFor = typeof summarizer === "function" ? summarizer : () => summarizer;
     const items = await this.d.control.m(api.sessions.claim, { now, limit: opts.limit ?? 20, leaseMs: 10 * 60_000 });
-    const results: { sessionId: string; status: "written" | "skipped" | "failed"; path?: string; team?: string | null; error?: string; tokens?: number }[] = [];
+    const results: { sessionId: string; status: "written" | "skipped" | "failed" | "waiting"; path?: string; team?: string | null; error?: string; tokens?: number }[] = [];
     for (const item of items) {
       const uid = String(item.uid);
       try {
         const q = JSON.parse(await this.d.personal.open(uid, `session:${item.sessionId}`, item.iv, item.ciphertext)) as Queued;
         const user = await this.d.directory.user(uid);
         const team = await this.teamFor(uid, q.place);
-        const out = await summarizer.summarize({
+        const out = await summarizerFor(uid).summarize({
           transcript: q.transcript,
           tool: q.tool,
           person: user?.name ?? "the user",
@@ -214,6 +226,11 @@ export class SessionService {
         await this.d.control.m(api.sessions.done, { id: item.id });
         results.push({ sessionId: item.sessionId, status: "written", path: written.path, team: team?.slug ?? null, tokens });
       } catch (err) {
+        if (err instanceof ComputerUnavailable) {
+          await this.d.control.m(api.sessions.later, { id: item.id, waitMs: opts.waitMs ?? 15 * 60_000, now });
+          results.push({ sessionId: item.sessionId, status: "waiting", error: err.reason });
+          continue;
+        }
         const error = (err as Error).message;
         await this.d.control.m(api.sessions.failed, { id: item.id, error, now });
         results.push({ sessionId: item.sessionId, status: "failed", error });
@@ -235,7 +252,7 @@ export class SessionService {
   }
 
   /** Write (or rewrite) a session's note, and hold a copy for the team when there is one. */
-  async writeNote(uid: string, spec: NoteSpec, now = Date.now()): Promise<{ path: string; noteId: string; share: string | null }> {
+  async writeNote(uid: string, spec: NoteSpec, now = Date.now()): Promise<{ path: string; noteId: string; share: string | null; teamPath?: string }> {
     const existing = await this.d.control.q(api.sessions.noteFor, { uid: uid as never, sessionId: spec.sessionId });
     const noteId = existing?.noteId ?? newNoteId(now);
     const s = spec.summary;
@@ -291,6 +308,7 @@ export class SessionService {
     }
 
     let share: { teamId: never; iv: string; ciphertext: string; dueAt: number } | undefined;
+    let teamPath: string | undefined;
     if (spec.team) {
       const note: TeamNoteV1 = TeamNoteV1.parse({
         schema: "brain.team-note/v1",
@@ -318,8 +336,19 @@ export class SessionService {
         participants_hint: fullNames,
         client: { app: spec.source, transcriber: "none", compiler: "session-summary" },
       });
-      const sealed = await this.d.personal.seal(uid, `share:${spec.sessionId}`, JSON.stringify(note));
-      share = { teamId: spec.team.id as never, iv: sealed.iv, ciphertext: sealed.ciphertext, dueAt: now + (this.d.holdMs ?? SHARE_HOLD_MS) };
+      if (spec.immediate) {
+        try {
+          const out = await this.d.teams.deliver(spec.team, note, uid, spec.team.peopleSlug ?? null);
+          teamPath = out.path;
+        } catch (err) {
+          if (err instanceof TeamServerError && err.status === 409) throw err;
+          // Down for a moment: the worker sends it within a minute or two.
+        }
+      }
+      if (!teamPath) {
+        const sealed = await this.d.personal.seal(uid, `share:${spec.sessionId}`, JSON.stringify(note));
+        share = { teamId: spec.team.id as never, iv: sealed.iv, ciphertext: sealed.ciphertext, dueAt: now + (spec.immediate ? 0 : (this.d.holdMs ?? SHARE_HOLD_MS)) };
+      }
     }
     const saved = await this.d.control.m(api.sessions.saveNote, {
       uid: uid as never,
@@ -332,7 +361,7 @@ export class SessionService {
       share,
       now,
     });
-    return { path, noteId, share: saved.share };
+    return { path, noteId, share: teamPath ? "delivered" : saved.share, ...(teamPath ? { teamPath } : {}) };
   }
 
   /**
@@ -392,7 +421,8 @@ function validIso(s: string | null | undefined): string | null {
   return s && !Number.isNaN(Date.parse(s)) ? new Date(s).toISOString() : null;
 }
 
-function newNoteId(now: number): string {
+/** A note's id: base36 time and random hex (NoteId). Also suggest_correction's. */
+export function newNoteId(now: number): string {
   return `${now.toString(36).toUpperCase()}${randomBytes(5).toString("hex").toUpperCase()}`;
 }
 

@@ -42,7 +42,7 @@ Claude Code ──────▶  :443     :8080  │             encrypted per
 **Compared with Ambient Cloud:** everything on the server side is the same code, and the apps work the same once they point at your server. What a self-hosted server doesn't have:
 
 - **Push notifications** to the apps. They need Ambient's own Apple key.
-- **Continue with Microsoft**, for now. People sign in to the apps with Apple; anyone can also be given an account with the admin CLI.
+- **Continue with Microsoft or Google**, for now. People sign in to the apps with Apple; anyone can also be given an account with the admin CLI.
 - **Claude usage included.** You bring your own Anthropic API key.
 
 ## What you need
@@ -82,7 +82,7 @@ Your server lets in only the people you add. Accounts are made with the admin CL
 docker compose exec gateway admin user add you@example.com --name "Your Name" --upkeep
 ```
 
-`--upkeep` lets Claude keep this person's wiki current (it needs `ANTHROPIC_API_KEY`). Leave it out for anyone who hasn't agreed to their notes going to Anthropic. `docker compose exec gateway admin` lists all commands.
+`--upkeep` lets Claude keep this person's wiki current (on their computer, or on the server's key with `BRAIN_USE_SERVER_KEY=true`). Leave it out for anyone who hasn't agreed to their notes going to Anthropic. `docker compose exec gateway admin` lists all commands.
 
 Use the email of the person's Apple ID: when they sign in from the app, that's how the server knows the account is theirs (see [the iPhone and Mac apps](#the-iphone-and-mac-apps)).
 
@@ -105,7 +105,7 @@ claude plugin marketplace add Ambient-Artifacts/ambient-core
 claude plugin install ambient@ambient
 ```
 
-Claude Code asks for the token. Set **Ambient server** to `https://ambient.example.com` under `/plugin` → ambient → configure (it defaults to Ambient Cloud). On a machine without a terminal prompt, put `{"token":"ambient_pat_…","server":"https://ambient.example.com"}` in a file only you can read and run `claude plugin configure ambient@ambient --values-stdin < that-file`. Session notes are written by Claude, so they need `ANTHROPIC_API_KEY` on the server.
+Claude Code asks for the token. Set **Ambient server** to `https://ambient.example.com` under `/plugin` → ambient → configure (it defaults to Ambient Cloud). On a machine without a terminal prompt, put `{"token":"ambient_pat_…","server":"https://ambient.example.com"}` in a file only you can read and run `claude plugin configure ambient@ambient --values-stdin < that-file`. Session notes are written by Claude on the person's connected computer (or on the server's key with `BRAIN_USE_SERVER_KEY=true`).
 
 To skip session capture and use MCP alone: `claude mcp add --transport http ambient https://ambient.example.com/mcp`.
 
@@ -135,7 +135,9 @@ The default, `none`, lets in only the people you add. The server takes Sign in w
 
 ## Teams
 
-The compose file runs one team server, `team-1`. It waits in a pool until a team claims it, either from the app (**Settings → Teams → Create a team**, then invite people from there) or with the admin CLI:
+A team created in the app runs on a computer of its own, which its owner connects after creating it ([architecture](architecture.md), "A team on its own computer"). To give new teams a server from your own pool instead, set `BRAIN_TEAM_POOL=true` on the gateway and its jobs (the compose file does, for its `team-1`).
+
+The compose file runs one team server, `team-1`. It waits in a pool until a team claims it, either from the app (with `BRAIN_TEAM_POOL=true`: **Settings → Teams → Create a team**, then invite people from there) or with the admin CLI:
 
 ```sh
 docker compose exec gateway admin team create "Acme" --owner you@example.com
@@ -152,10 +154,16 @@ To run more than one team, see [More teams](#more-teams).
 
 ## Claude: notes, upkeep, consolidation
 
-Put an Anthropic API key in `.env` and restart:
+By default each person's upkeep and work-session notes run on **their own computer**, with their
+Claude plan ([architecture](architecture.md), "Upkeep on your computer"): nothing to set up on the
+server, and the server never pays. Their notes wait while no computer is connected.
+
+To let the server's own key do it instead (everyone's upkeep, session notes, and Ambient's chat for
+people without a computer), put an Anthropic API key in `.env`, opt in, and restart:
 
 ```sh
 echo 'ANTHROPIC_API_KEY=sk-ant-…' >> .env
+echo 'BRAIN_USE_SERVER_KEY=true' >> .env
 docker compose up -d
 ```
 
@@ -180,13 +188,87 @@ The repo must be empty, or already an Ambient wiki. A personal wiki syncs every 
 
 ## Routines
 
-A routine is a prompt that Claude Code runs on a schedule on a computer you control: Linux with systemd, Node 18+ and Claude Code signed in. People create routines from any connected AI app (`create_routine`, `run_routine`, …). To connect a computer to someone's account:
+A routine is a prompt that Claude Code runs on a schedule on a computer you control: Linux with systemd. People create routines from any connected AI app (`create_routine`, `run_routine`, …). To connect a computer to someone's account:
 
 ```sh
 docker compose exec gateway admin computer-code you@example.com --name "Build box"
 ```
 
-It prints two commands to run on that computer. The runner it downloads already points at your server.
+It prints one line to run on that computer, the same line the app shows under Bots → Connect a Computer. See [Connect a computer](#connect-a-computer).
+
+## Connect a computer
+
+A computer runs Ambient's chat, a person's (or a team's) bots and routines: any Linux server with systemd, such as a small VPS (2 GB of memory is plenty for a few bots), with the person's own Claude plan. One line, as root, with the code from the app:
+
+```sh
+curl -fsSL https://<your server>/install.sh | sudo bash -s ABCD-1234
+```
+
+`install.sh` (served by the gateway from `runner/install.sh`, with its address in it) does, in order:
+
+1. **Checks.** Root, Linux, systemd; a note (not a stop) under 1.5 GB of memory or 3 GB of free disk.
+2. **Installs only what's missing.** git; Node for the whole system (Node 22 from NodeSource with apt or dnf, only when there's no Node 18 or newer that root owns); Claude Code for the bots' user (Anthropic's native installer, only when that user has none).
+3. **The bots' user.** A system user `ambient` (home `/var/lib/ambient`, no password) that Ambient's sessions and bots run as. `--user NAME` picks an existing user instead; a computer set up before keeps the user it has.
+4. **Connects.** Downloads the runner from the same server and runs `ambient-runner.mjs setup <code>`.
+5. **Signs Claude in.** Unless the computer already has a sign-in, it runs `claude setup-token` in the terminal (open the link, sign in, paste the code back), checks the token with one tiny request, and stores it in Ambient as the computer's Claude plan (`POST /v1/host/claude`, sealed with the owner's key, fetched back by the computer). With no terminal, or when skipped, the app's Claude sheet does the same.
+
+Running it again does only what's still missing.
+
+### What the setup leaves alone
+
+The computer may already run things, Claude Code among them (Remote Control, other jobs):
+
+- It never upgrades or replaces an installed Node, nvm, or Claude Code, and never touches another service. The runner's units are named `ambient-runner*` and `ambient-routine-*`; it only ever removes units with those names. Its files are `/etc/ambient-runner`, `/opt/ambient-runner`, `/var/lib/ambient-runner` and, in the bots' user's home, `ambient/` and `ambient-routines/`.
+- `claude setup-token` runs with a settings folder of its own, deleted after: an existing Claude Code login stays as it is.
+- **Ambient's sessions never use the user's own Claude Code settings.** With a sign-in from Ambient (or a token or key in `extra.env`), every run gets `CLAUDE_CONFIG_DIR=/var/lib/ambient-runner/claude/<user>`: the user's `~/.claude` (hooks, plugins, MCP servers, settings, CLAUDE.md, history) never reaches Ambient's sessions, and Ambient's sessions never show up in the user's `claude --resume`. Every run gets only Ambient's MCP servers (`--strict-mcp-config`). A computer that signs in with Claude Code's own login (nothing stored) needs that user's folder, so its runs read only project and local settings (`--setting-sources project,local`). `AMBIENT_CLAUDE_CONFIG=own` in `/etc/ambient-runner/runner.env` keeps the user's settings for everything, for a computer whose bots should use the user's own MCP servers.
+- A computer set up before runner 0.10.0 moves to the runner's settings folder with the update: sessions kept in the user's folder can't be resumed from it, so the next chat message and the next run of each bot start a new session once (a bot continues from its handoff).
+
+By hand, without the script: install Node 18+ and Claude Code, download `https://<your server>/runner/ambient-runner.mjs` and run `sudo node ambient-runner.mjs setup <code> [--user NAME]`.
+
+Status: `sudo node /opt/ambient-runner/ambient-runner.mjs status`. Logs: `journalctl -u ambient-runner -u ambient-runner-ambient -u 'ambient-routine-*'`. Remove it: `sudo node /opt/ambient-runner/ambient-runner.mjs uninstall` (then remove the computer in the app; the `ambient` user stays: `sudo userdel -r ambient`).
+
+## Connect GitHub
+
+Bots work on GitHub through Ambient's own GitHub App: people tap Connect GitHub and pick their
+repos, and bots get GitHub's events and a short-lived token for just those repos
+([bots.md](bots.md#connect-github)). Set it up once per Ambient server:
+
+1. On GitHub: your organization's (or your own) Settings → Developer settings → GitHub Apps →
+   New GitHub App.
+   - **Name:** e.g. "Ambient Bots" (its URL name, the slug, is what `github.com/apps/<slug>` shows).
+   - **Homepage URL:** your gateway, e.g. `https://ambient.example.com`.
+   - **Callback URL:** leave empty; **Request user authorization (OAuth) during installation:** off.
+   - **Setup URL:** `https://<gateway>/v1/github/installed`, with **Redirect on update** on.
+   - **Webhook:** active; **Webhook URL** `https://<gateway>/v1/hooks/github-app`; **Webhook
+     secret:** a long random string (`openssl rand -hex 32`).
+   - **Repository permissions:** Contents read and write, Pull requests read and write, Issues
+     read and write, Checks read-only, Commit statuses read-only, Metadata read-only.
+   - **Subscribe to events:** Pull request, Pull request review, Pull request review comment,
+     Issue comment, Check run, Check suite, Push, Issues.
+   - **Where can this GitHub App be installed?** Any account (so your teams can install it on
+     theirs), or only this account.
+2. After creating it: note the **App ID**, and under Private keys **Generate a private key**
+   (a `.pem` file downloads).
+3. On the gateway's machine: put the key where only the gateway reads it, e.g.
+   `install -m 600 -o brain app.pem /etc/brain/github-app.pem`, and add to `/etc/brain/gateway.env`:
+
+   ```
+   BRAIN_GITHUB_APP_ID=<App ID>
+   BRAIN_GITHUB_APP_SLUG=<slug>
+   BRAIN_GITHUB_APP_KEY_FILE=/etc/brain/github-app.pem
+   BRAIN_GITHUB_APP_WEBHOOK_SECRET=<the webhook secret>
+   ```
+
+   then restart the gateway. `GET /v1/app/github` now answers `"app": { "slug": …, "configured": true }`.
+4. Check: in the app, a bot → GitHub → Connect GitHub; pick a repo on GitHub; you land on
+   "Connected". The App's page on GitHub (Advanced → Recent Deliveries) shows the deliveries.
+
+The template roles' Apps (Ambient Builder, Reviewer, Wiki Keeper: each its own GitHub user with
+just its role's access, [bots.md](bots.md#github-apps)) need no settings: for each, run
+`admin github-app new <builder|reviewer|wiki_keeper> --account <your-org>`, open the link it prints
+and tap Create on GitHub. App names are unique across GitHub, so each is named after your account
+("Ambient Reviewer (your-org)"); `--name` picks another. The gateway keeps the App (sealed in Convex) and it works at once. Then
+upload each one's icon in its settings on GitHub (Display information).
 
 ## Operating it
 
@@ -194,7 +276,7 @@ It prints two commands to run on that computer. The runner it downloads already 
 
 **Overview:** `docker compose exec gateway admin list` shows accounts, teams and team servers.
 
-**Health alerts:** set `BRAIN_ALERT_WEBHOOK` to a Slack-compatible incoming webhook. The health job posts new problems, recoveries and a daily summary. Problems it watches for include work sessions that keep failing, team copies that don't get through, notes waiting too long for upkeep, failing repo syncs and an empty team server pool. That last one is expected once your only team server is claimed; it only means `admin team create` has nowhere to put a new team.
+**Health alerts:** set `BRAIN_ALERT_WEBHOOK` to a Slack-compatible incoming webhook. The health job posts new problems, recoveries and a daily summary. Problems it watches for include work sessions that keep failing, team copies that don't get through, notes waiting too long for upkeep, failing repo syncs and, with `BRAIN_TEAM_POOL=true`, an empty team server pool. That last one is expected once your only team server is claimed; it only means a new team has nowhere to go.
 
 **Database dashboard:** `docker compose --profile dashboard up -d dashboard`, then open `http://127.0.0.1:6791` (over an SSH tunnel from your laptop: `ssh -L 6791:127.0.0.1:6791 -L 3210:127.0.0.1:3210 you@server`). Sign in with `CONVEX_SELF_HOSTED_ADMIN_KEY` from `.env`. Personal pages are encrypted there, as intended.
 
@@ -279,7 +361,7 @@ volumes:
   team-2-data:
 ```
 
-Then `docker compose up -d` and `docker compose exec gateway admin server add team-2 http://team-2:8090`. The next `admin team create` claims it. A team server can also run on another machine. It only has to be reachable from the gateway: register an `https://` address (put Caddy or another proxy with TLS in front of it), and let only the gateway's address through its firewall, since notes, transcripts and the team repo's token cross that link. Start it with `node --import tsx team/src/server.ts` and the variables in [configuration.md](configuration.md#team-server), and register its URL the same way.
+Then `docker compose up -d` and `docker compose exec gateway admin server add team-2 http://team-2:8090`. The next `admin team create` claims it. Each team needs its own owner: a person is in one team ([architecture](architecture.md), "One team per person"), so add that person first with `admin user add`. A team server can also run on another machine. It only has to be reachable from the gateway: register an `https://` address (put Caddy or another proxy with TLS in front of it), and let only the gateway's address through its firewall, since notes, transcripts and the team repo's token cross that link. Start it with `node --import tsx team/src/server.ts` and the variables in [configuration.md](configuration.md#team-server), and register its URL the same way.
 
 ## Security notes
 
@@ -304,7 +386,7 @@ Found a vulnerability? See [SECURITY.md](../SECURITY.md).
 | The app says it isn't an Ambient server, or can't reach it | Type the address the way people open it in a browser (`ambient.example.com`); `curl https://ambient.example.com/health` must answer `"service":"brain-gateway"`. |
 | An AI app says the sign-in failed | Codes work once, for 5 minutes, and ten wrong codes from one address lock it for a while. Make a new one with `admin connect-code`. |
 | `admin team create` says there's no free team server | The pool is empty: add a team server ([More teams](#more-teams)). |
-| Team notes don't show up | `log_work` and shared work sessions reach the team wiki after a 30-minute hold. Then check `docker compose logs jobs team`. |
-| Session notes never appear | `ANTHROPIC_API_KEY` set? `docker compose logs jobs \| grep sessions`. The plugin logs to `~/.claude/plugins/data/ambient-ambient/capture.log`. |
+| Team notes don't show up | Claude Code sessions shared by a folder rule reach the team wiki after a 30-minute hold; `save_note` and `log_work` arrive at once, but stay personal in a private project or when the app didn't say which project. Then check `docker compose logs jobs team`. |
+| Session notes never appear | Is the person's computer connected (or `BRAIN_USE_SERVER_KEY=true` with `ANTHROPIC_API_KEY`)? `docker compose logs jobs \| grep sessions`. The plugin logs to `~/.claude/plugins/data/ambient-ambient/capture.log`. |
 
 Still stuck? Open an issue with the output of `docker compose ps` and the relevant logs. Remove secrets and note text first.

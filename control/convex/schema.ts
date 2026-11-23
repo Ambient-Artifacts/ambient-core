@@ -10,11 +10,33 @@ export const runStatus = v.union(v.literal("running"), v.literal("succeeded"), v
 const weekday = v.union(v.literal("mon"), v.literal("tue"), v.literal("wed"), v.literal("thu"), v.literal("fri"), v.literal("sat"), v.literal("sun"));
 /** See RoutineSchedule in @brain/spec (the gateway validates before writing). */
 export const routineSchedule = v.object({
-  every: v.union(v.literal("hour"), v.literal("day"), v.literal("weekday"), v.literal("week")),
+  every: v.union(v.literal("hour"), v.literal("day"), v.literal("weekday"), v.literal("week"), v.literal("needed")),
   days: v.optional(v.array(weekday)),
   time: v.string(),
   timezone: v.string(),
 });
+
+/** See BotSettings in @brain/spec (the gateway validates before writing). */
+export const botSettings = v.object({
+  face: v.string(),
+  /** Its colour for life (BOT_COLORS); absent: picked by its name. */
+  color: v.optional(v.string()),
+  /** What it wears (BOT_WEAR); absent: nothing. */
+  wear: v.optional(v.array(v.string())),
+  runtime: v.string(),
+  isolation: v.union(v.literal("container"), v.literal("host")),
+  /** Absent: every secret of its owner's (a loop from before bots). */
+  secrets: v.optional(v.array(v.string())),
+  report: v.union(v.literal("news"), v.literal("every_run")),
+  /** Absent: the computer's default model. */
+  model: v.optional(v.object({ model: v.string(), effort: v.optional(v.string()), fallback: v.optional(v.string()) })),
+  /** What Ambient may answer for its owner: never, brain (default), most. */
+  delegate: v.optional(v.union(v.literal("never"), v.literal("brain"), v.literal("most"))),
+});
+/** A model choice: the model, its effort, and a model to fall back to (docs/bots.md). */
+export const modelChoice = v.object({ model: v.string(), effort: v.optional(v.string()), fallback: v.optional(v.string()) });
+const claudeCredential = v.object({ iv: v.string(), ct: v.string(), by: v.optional(v.string()), at: v.number() });
+export const botMessageKind = v.union(v.literal("result"), v.literal("failure"), v.literal("question"), v.literal("answer"), v.literal("message"));
 
 export default defineSchema({
   users: defineTable({
@@ -25,6 +47,8 @@ export default defineSchema({
      * the key: Microsoft lets it change and doesn't always verify it.
      */
     microsoftId: v.optional(v.string()),
+    /** Sign in with Google: the account's id ("sub"), stable and never reused. Email isn't the key either. */
+    googleSub: v.optional(v.string()),
     /**
      * An account made by a self-hosted server's admin (`admin user add`), for servers without
      * the apps' Apple or Microsoft sign-in: the lowercased email.
@@ -43,6 +67,12 @@ export default defineSchema({
     consolidate: v.optional(v.boolean()),
     /** The morning push of open action items ("waiting on you"): absent means on. */
     digest: v.optional(v.boolean()),
+    /**
+     * The app writes the notes of personal recordings with Apple's Private Cloud Compute (the
+     * transcript goes to Apple's servers for that, and isn't kept there) instead of the model on
+     * the device: absent means on.
+     */
+    pcc: v.optional(v.boolean()),
     /** The user's local date (YYYY-MM-DD) the last morning push was considered, so it goes once a day. */
     digestSentOn: v.optional(v.string()),
     /** The user deleted their account: everything is refused while their data is removed. */
@@ -59,6 +89,7 @@ export default defineSchema({
   })
     .index("by_appleSub", ["appleSub"])
     .index("by_microsoftId", ["microsoftId"])
+    .index("by_googleSub", ["googleSub"])
     .index("by_localId", ["localId"]),
 
   /**
@@ -100,6 +131,21 @@ export default defineSchema({
     masterKeyId: v.string(),
     wrapped: v.string(),
     createdAt: v.number(),
+  }).index("by_user", ["userId"]),
+
+  /**
+   * A user's voice fingerprint: the speaker embedding the apps compute on the device from their
+   * own recorded voice (numbers, never audio). Sealed with the user's data key (AAD = userId +
+   * "voice"). The gateway hands it to the user's devices and to the apps of everyone in their
+   * active teams, which match speakers on the device.
+   */
+  voices: defineTable({
+    userId: v.id("users"),
+    /** The model that made it (e.g. "fluidaudio-community-1"): only fingerprints of one model compare. */
+    model: v.string(),
+    iv: v.string(),
+    ciphertext: v.string(),
+    updatedAt: v.number(),
   }).index("by_user", ["userId"]),
 
   /** Encrypted personal wiki pages (AES-256-GCM, AAD = userId + path). */
@@ -337,8 +383,41 @@ export default defineSchema({
     codeExpiresAt: v.optional(v.number()),
     /** The computer's own token, once set up. */
     tokenHash: v.optional(v.string()),
-    info: v.optional(v.object({ hostname: v.string(), os: v.string(), runner: v.string(), claude: v.string() })),
+    info: v.optional(
+      v.object({
+        hostname: v.string(),
+        os: v.string(),
+        runner: v.string(),
+        claude: v.string(),
+        /** Codex's version on the computer, and how it's signed in there (runner 0.9.0 on). */
+        codex: v.optional(v.string()),
+        codexLogin: v.optional(v.union(v.literal("chatgpt"), v.literal("api_key"), v.literal("none"))),
+      }),
+    ),
     lastSeenAt: v.optional(v.number()),
+    /**
+     * How its runs and Ambient sign in to Claude (docs/bots.md): a stored plan token or API key,
+     * sealed with the owner's data key, and which one is used. Absent: the computer's own sign-in.
+     */
+    claude: v.optional(
+      v.object({
+        use: v.union(v.literal("plan"), v.literal("key"), v.literal("computer")),
+        plan: v.optional(claudeCredential),
+        key: v.optional(claudeCredential),
+      }),
+    ),
+    /**
+     * How its Codex bots sign in to OpenAI (docs/bots.md, "Codex next to Claude Code"): "plan" is
+     * the computer's own Codex sign-in (a ChatGPT plan, signed in there with a device code); "key"
+     * a stored OpenAI API key, sealed with the owner's data key. Absent: "plan".
+     */
+    openai: v.optional(v.object({ use: v.union(v.literal("plan"), v.literal("key")), key: v.optional(claudeCredential) })),
+    /** The default model for its runs and Ambient there; absent: Claude Code's own. */
+    model: v.optional(modelChoice),
+    /** What Ambient may do there: standard (its tools), admin (root after an approval), full (root). */
+    access: v.optional(v.union(v.literal("standard"), v.literal("admin"), v.literal("full"))),
+    /** Root commands approved with "Always" (exact command lines). */
+    allowed: v.optional(v.array(v.string())),
     createdAt: v.number(),
   })
     .index("by_user", ["userId"])
@@ -372,6 +451,20 @@ export default defineSchema({
     lastRun: v.optional(v.object({ status: runStatus, startedAt: v.number(), finishedAt: v.optional(v.number()) })),
     /** When its owner was last sent a push about a failed run (finishRun keeps it to news). */
     failureNoticeAt: v.optional(v.number()),
+    /** A bot: a loop with a face, a thread and a runtime (docs/bots.md). Absent on plain loops. */
+    bot: v.optional(botSettings),
+    /** The bot's question nobody has answered yet. */
+    openQuestionId: v.optional(v.id("botMessages")),
+    /** An answer or message the next run starts with (the run resumes `lastSessionId`). */
+    pendingMessageId: v.optional(v.id("botMessages")),
+    /** The runtime's session of the last run, to continue a conversation. */
+    lastSessionId: v.optional(v.string()),
+    /** Hash of the last result that reached the thread (report "news" skips a repeat). */
+    lastResultHash: v.optional(v.string()),
+    /** When someone last read the bot's thread: a result after it is news ("done"), docs/bots.md. */
+    seenAt: v.optional(v.number()),
+    /** Its next wake-up (botWakes), kept by the wake-up mutations; absent with none booked. */
+    nextWakeAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -396,7 +489,211 @@ export default defineSchema({
     costUsd: v.optional(v.number()),
     turns: v.optional(v.number()),
     sessionId: v.optional(v.string()),
-  }).index("by_routine", ["routineId", "startedAt"]),
+    /** A bot's run: the hash of its run token (asks the owner while the run is going). */
+    runTokenHash: v.optional(v.string()),
+  })
+    .index("by_routine", ["routineId", "startedAt"])
+    .index("by_run_token", ["runTokenHash"]),
+
+  /**
+   * A bot's thread: its results, questions and failures, and what people wrote to it. The text
+   * (with a question's choices) is sealed with the owner's data key, like the routine's prompt.
+   */
+  botMessages: defineTable({
+    routineId: v.id("routines"),
+    teamId: v.optional(v.id("teams")),
+    /** ambient: Ambient answered for the bot's owner (docs/bots.md, "Decisions"). */
+    role: v.union(v.literal("bot"), v.literal("user"), v.literal("ambient")),
+    kind: botMessageKind,
+    iv: v.string(),
+    ct: v.string(),
+    runId: v.optional(v.id("routineRuns")),
+    /** Who wrote it (user messages). */
+    authorId: v.optional(v.id("users")),
+    authorName: v.optional(v.string()),
+    /** Questions: when they were answered, and by which message. */
+    answeredAt: v.optional(v.number()),
+    answerId: v.optional(v.id("botMessages")),
+    /** An answer to an older question than the open one: that question (shown as an inline reply). */
+    replyTo: v.optional(v.id("botMessages")),
+    createdAt: v.number(),
+  }).index("by_routine", ["routineId", "createdAt"]),
+
+  /**
+   * GitHub Apps besides the one in the gateway's config (docs/bots.md, "GitHub Apps"): the
+   * template roles' apps (Ambient Builder, Reviewer, Wiki keeper), and a bot's own. Made through
+   * GitHub's manifest flow; the private key and the webhook secret are sealed with the gateway's
+   * master key (the gateway alone opens them).
+   */
+  githubApps: defineTable({
+    /** "builder", "reviewer" or "wiki_keeper" for a role's app; its slug for a bot's own. */
+    key: v.string(),
+    role: v.union(v.literal("builder"), v.literal("reviewer"), v.literal("wiki_keeper"), v.literal("bot")),
+    slug: v.string(),
+    appId: v.string(),
+    name: v.string(),
+    /** The GitHub account (organization or user) it belongs to. */
+    account: v.string(),
+    /** Its webhook's path part: /v1/hooks/github-app/<hookId>. */
+    hookId: v.string(),
+    /** A bot's own app: whose bot. */
+    routineId: v.optional(v.id("routines")),
+    keyIv: v.string(),
+    keyCt: v.string(),
+    secretIv: v.string(),
+    secretCt: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_key", ["key"])
+    .index("by_hook", ["hookId"])
+    .index("by_routine", ["routineId"]),
+
+  /**
+   * When each person last read a team bot's thread (a group chat: one person reading doesn't make
+   * it read for the others). A personal bot keeps `routines.seenAt`.
+   */
+  botReads: defineTable({
+    routineId: v.id("routines"),
+    userId: v.id("users"),
+    at: v.number(),
+  }).index("by_routine_user", ["routineId", "userId"]),
+
+  /**
+   * A wake-up a bot booked for itself (docs/bots.md, "Wake-ups"): at `at` its thread gets the
+   * note (role user, author "Wake-up") and a run starts with it. The note is sealed with the
+   * owner's data key, like the thread.
+   */
+  botWakes: defineTable({
+    routineId: v.id("routines"),
+    teamId: v.optional(v.id("teams")),
+    at: v.number(),
+    iv: v.string(),
+    ct: v.string(),
+    status: v.union(v.literal("pending"), v.literal("fired"), v.literal("cancelled")),
+    /** The run that booked it; absent when its owner booked it (the app, MCP). */
+    runId: v.optional(v.id("routineRuns")),
+    /** Who cancelled it: the bot, or its owner's name. */
+    cancelledBy: v.optional(v.string()),
+    firedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_routine", ["routineId", "status", "at"])
+    .index("by_due", ["status", "at"]),
+
+  /**
+   * A root command Ambient asked to run on a computer, waiting for the person who asked (or who
+   * may change the computer) to allow it. The command and why are sealed with the computer's
+   * owner's key.
+   */
+  approvals: defineTable({
+    hostId: v.id("routineHosts"),
+    uid: v.id("users"),
+    iv: v.string(),
+    ct: v.string(),
+    status: v.union(v.literal("pending"), v.literal("approved"), v.literal("denied"), v.literal("expired")),
+    decision: v.optional(v.union(v.literal("once"), v.literal("session"), v.literal("always"), v.literal("deny"))),
+    decidedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+  })
+    .index("by_user", ["uid", "createdAt"])
+    .index("by_host", ["hostId", "createdAt"]),
+
+  /** A person's chat with Ambient (the master bot), sealed with their own data key. */
+  /**
+   * A file sent with a message (Ambient's chat, a bot's thread), so it shows there again: sealed
+   * with its owner's key and kept in Convex file storage (`storageId`), its name and type sealed
+   * here (`metaIv`/`metaCt`). A personal one has `userId`, a team bot's thread's `teamId`;
+   * `routineId` says it's a bot's thread's, none: Ambient's chat. Goes with the chat's history
+   * (forgetChat), the bot (routines.remove) and the account.
+   */
+  attachments: defineTable({
+    userId: v.optional(v.id("users")),
+    teamId: v.optional(v.id("teams")),
+    routineId: v.optional(v.id("routines")),
+    storageId: v.id("_storage"),
+    iv: v.string(),
+    metaIv: v.string(),
+    metaCt: v.string(),
+    size: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId", "routineId", "createdAt"])
+    .index("by_routine", ["routineId"]),
+
+  ambientChat: defineTable({
+    userId: v.id("users"),
+    role: v.union(v.literal("user"), v.literal("ambient")),
+    iv: v.string(),
+    ct: v.string(),
+    /** A decision this message brings to the person (shown as a card). */
+    decisionId: v.optional(v.id("decisions")),
+    createdAt: v.number(),
+  }).index("by_user", ["userId", "createdAt"]),
+
+  /**
+   * Something only the person decides: a bot's question Ambient didn't answer itself, or Ambient's
+   * own (docs/bots.md, "Decisions"). Question, options and Ambient's suggestion are sealed with the
+   * person's key; so is the answer.
+   */
+  decisions: defineTable({
+    userId: v.id("users"),
+    routineId: v.optional(v.id("routines")),
+    questionId: v.optional(v.id("botMessages")),
+    iv: v.string(),
+    ct: v.string(),
+    status: v.union(v.literal("open"), v.literal("answered"), v.literal("expired")),
+    answerIv: v.optional(v.string()),
+    answerCt: v.optional(v.string()),
+    answeredBy: v.optional(v.string()),
+    via: v.optional(v.string()),
+    answeredAt: v.optional(v.number()),
+    urgent: v.boolean(),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId", "status", "createdAt"])
+    .index("by_question", ["questionId"]),
+
+  /** Ambient's heartbeat for a person: when it last looked, what it already told them, how often today. */
+  ambientState: defineTable({
+    userId: v.id("users"),
+    lastBeatAt: v.number(),
+    day: v.string(),
+    sentToday: v.number(),
+    seen: v.array(v.string()),
+    /** "New chat": the app shows the chat from here; older messages stay findable (docs/bots.md, "History"). */
+    chatClearedAt: v.optional(v.number()),
+    /** When the person last opened the chat in the app: Ambient's messages after it are unread. */
+    chatSeenAt: v.optional(v.number()),
+    /** The day (Vienna) Amb last went through the day to keep its memory. */
+    memoryDay: v.optional(v.string()),
+  }).index("by_user", ["userId"]),
+
+  /**
+   * Small sealed files with a version per change, for a person or a team: a bot's folder
+   * (AGENTS.md history, skills, memory.md), its handoffs, Amb's memory. Generic on purpose: a new
+   * kind of file needs no schema change and so no Convex deploy (docs/bots.md, "A bot's folder").
+   * The gateway seals the content (and why) with the owner's key and decides who may read and
+   * write; these functions only keep the versions.
+   */
+  records: defineTable({
+    ownerKind: v.union(v.literal("user"), v.literal("team")),
+    ownerId: v.string(),
+    kind: v.string(),
+    key: v.string(),
+    version: v.number(),
+    /** Only the newest version of a key is latest. */
+    latest: v.boolean(),
+    iv: v.string(),
+    ct: v.string(),
+    size: v.number(),
+    byKind: v.union(v.literal("user"), v.literal("bot"), v.literal("amb")),
+    byName: v.optional(v.string()),
+    deleted: v.optional(v.boolean()),
+    createdAt: v.number(),
+  })
+    .index("by_key", ["ownerKind", "ownerId", "kind", "key", "version"])
+    .index("by_latest", ["ownerKind", "ownerId", "kind", "latest", "key"]),
 
   /**
    * Values a routine's runs get as environment variables (a GitHub token, say), per user or per

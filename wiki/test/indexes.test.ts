@@ -76,6 +76,8 @@ describe("AGENTS.md", () => {
     expect(doc).toContain("Start with `index.md`");
     expect(doc).toContain("Rewrite only the part above `## Timeline`");
     expect(doc).toContain("`decisions/`");
+    expect(doc).toContain("`corrections/YYYY-MM/`");
     expect(agentsDoc({ kind: "personal", name: "Ambient wiki" })).toContain("`notes/YYYY/MM/`");
+    expect(agentsDoc({ kind: "personal", name: "Ambient wiki" })).not.toContain("corrections/");
   });
 });

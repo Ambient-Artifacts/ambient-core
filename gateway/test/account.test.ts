@@ -3,7 +3,7 @@
 import { exportPKCS8, generateKeyPair, decodeJwt, decodeProtectedHeader } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appleRevoker } from "../src/auth/apple-revoke.ts";
-import { appCall, fixturePersonalOps, INVITE, MICROSOFT_CLIENT, signIn, startStack, type Stack } from "./helpers.ts";
+import { appCall, fixturePersonalOps, INVITE, MICROSOFT_CLIENT, GOOGLE_CLIENT, signIn, startStack, type Stack } from "./helpers.ts";
 
 let s: Stack;
 beforeAll(async () => {
@@ -82,11 +82,11 @@ describe("deleting an account", () => {
 
   it("asks before Claude reads notes: upkeep is off until the user says yes", async () => {
     const u = await signIn(s, "apple-consent", "Clara Consent");
-    expect((await appCall(s, u.access_token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: false, consolidateAsked: false, digest: true });
-    expect((await appCall(s, u.access_token, "POST", "/v1/app/me/prefs", { consolidate: true })).json).toEqual({ prefs: { consolidate: true, consolidateAsked: true, digest: true } });
-    expect((await appCall(s, u.access_token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: true, consolidateAsked: true, digest: true });
+    expect((await appCall(s, u.access_token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: false, consolidateAsked: false, digest: true, pcc: true });
+    expect((await appCall(s, u.access_token, "POST", "/v1/app/me/prefs", { consolidate: true })).json).toEqual({ prefs: { consolidate: true, consolidateAsked: true, digest: true, pcc: true } });
+    expect((await appCall(s, u.access_token, "GET", "/v1/app/me")).json.prefs).toEqual({ consolidate: true, consolidateAsked: true, digest: true, pcc: true });
     // The morning push is its own switch; turning it off leaves upkeep as it was.
-    expect((await appCall(s, u.access_token, "POST", "/v1/app/me/prefs", { digest: false })).json).toEqual({ prefs: { consolidate: true, consolidateAsked: true, digest: false } });
+    expect((await appCall(s, u.access_token, "POST", "/v1/app/me/prefs", { digest: false })).json).toEqual({ prefs: { consolidate: true, consolidateAsked: true, digest: false, pcc: true } });
   });
 });
 
@@ -94,7 +94,7 @@ describe("launch config and invite links", () => {
   it("serves the minimum app version without sign-in", async () => {
     const res = await fetch(`${s.origin}/v1/app/config`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ minimumVersion: null, updateUrl: null, microsoftClientId: MICROSOFT_CLIENT, appleSignIn: true, microsoftConnect: false });
+    expect(await res.json()).toEqual({ minimumVersion: null, updateUrl: null, microsoftClientId: MICROSOFT_CLIENT, googleClientId: GOOGLE_CLIENT, appleSignIn: true, microsoftConnect: false });
   });
 
   it("serves a page that opens the app on a team invite, and nothing for junk", async () => {

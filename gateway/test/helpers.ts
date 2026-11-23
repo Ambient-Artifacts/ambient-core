@@ -19,6 +19,7 @@ import type { MicrosoftConnector } from "../src/microsoft-connect.ts";
 import type { MicrosoftConnection } from "@brain/spec";
 import { createApp } from "../src/app.ts";
 import { appleVerifier } from "../src/auth/apple.ts";
+import { googleVerifier } from "../src/auth/google.ts";
 import { microsoftVerifier } from "../src/auth/microsoft.ts";
 import { publicJwks } from "../src/auth/bearer.ts";
 import { generateSigningKey, type GatewayConfig } from "../src/config.ts";
@@ -30,6 +31,7 @@ export const FIXTURES = join(import.meta.dirname, "..", "..", "spec", "fixtures"
 export const BUNDLE_ID = "com.example.brain";
 export const INVITE = "ACME-2026";
 export const MICROSOFT_CLIENT = "00000000-0000-0000-0000-00000000abcd";
+export const GOOGLE_CLIENT = "123456789012-abcdefghijklmnop.apps.googleusercontent.com";
 const modules = import.meta.glob("../../control/convex/**/*.ts");
 
 function listen(server: Server): Promise<string> {
@@ -46,6 +48,24 @@ export async function startStack(
     /** Ambient's Microsoft app against a fake Microsoft; `microsoftFetch` also serves the team server's Graph calls. */
     microsoftConnect?: { connector: MicrosoftConnector; propagationDelayMs?: number };
     microsoftFetch?: typeof fetch;
+    /** Ambient's chat against a fake Anthropic (no heartbeat timer in tests). */
+    ambient?: { fetchImpl?: typeof fetch; apiKey?: string; triageMs?: number };
+    /** How long after a change bots are mirrored into git (tests: short; `idle()` waits). */
+    mirrorDelayMs?: number;
+    /** GitHub's events on one PR are gathered this long before they wake its bot. */
+    githubBatchMs?: number;
+    /** Ambient's GitHub App, against a stand-in GitHub API (`apiBase`). */
+    githubApp?: import("../src/bots/github-app.ts").GitHubAppConfig;
+    /** Bots' Slack apps against a stand-in Slack Web API. */
+    slackApi?: string;
+    /** MCP connections may point at a stand-in server on 127.0.0.1. */
+    mcpLocal?: boolean;
+    /** Amb's iMessage line against a stand-in Linq API. */
+    linq?: { api: string; webhookSecret: string; number?: string; transcribeUrl?: string };
+    /** How long after a signal Amb looks at a bot (learning.ts). */
+    learningAfterMs?: number;
+    /** The team brain for teams on their own computer (team-bundle.ts), instead of building it. */
+    teamBundle?: () => Promise<import("../src/team-bundle.ts").TeamBundle>;
   } = {},
 ) {
   const serviceSecret = randomBytes(24).toString("hex");
@@ -78,6 +98,19 @@ export async function startStack(
       .setExpirationTime("5m")
       .sign(microsoft.privateKey);
 
+  // Fake Google: RS256 ID tokens for the apps' OAuth client.
+  const google = await generateKeyPair("RS256", { extractable: true });
+  const googleJwk = { ...(await exportJWK(google.publicKey)), kid: "g1", alg: "RS256", use: "sig" };
+  const googleToken = (sub: string, claims: Record<string, unknown> = {}, opts: { aud?: string; iss?: string } = {}) =>
+    new SignJWT({ ...claims })
+      .setProtectedHeader({ alg: "RS256", kid: "g1" })
+      .setIssuer(opts.iss ?? "https://accounts.google.com")
+      .setAudience(opts.aud ?? GOOGLE_CLIENT)
+      .setSubject(sub)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(google.privateKey);
+
   // Gateway (listen first: the origin is part of the config).
   const gatewayServer = createServer();
   const origin = await listen(gatewayServer);
@@ -92,10 +125,14 @@ export async function startStack(
     serviceSecret,
     appleAudiences: [BUNDLE_ID],
     microsoftClientIds: [MICROSOFT_CLIENT],
+    googleClientIds: [GOOGLE_CLIENT],
     directoryTtlMs: 0,
     allowFileRepos: true,
     signups: opts.signups,
     requireSignInNonce: opts.requireSignInNonce,
+    githubApp: opts.githubApp,
+    ...(opts.linq ? { linq: { apiKey: "linq-test-key", webhookSecret: opts.linq.webhookSecret, ...(opts.linq.number ? { number: opts.linq.number } : {}) } } : {}),
+    ...(opts.linq?.transcribeUrl ? { transcribe: { apiKey: "stt-test-key", url: opts.linq.transcribeUrl, model: "gpt-4o-transcribe" } } : {}),
   };
 
   // Team server with a copy of the fixture team wiki.
@@ -134,16 +171,25 @@ export async function startStack(
   await t.mutation(internal.teams.registerServer, { serverId: "pool-1", url: poolUrl });
 
   // convex-test's generic signatures don't line up with ConvexHttpClient's; the runtime shape does.
-  const call = t as unknown as { query: (f: unknown, a: unknown) => Promise<never>; mutation: (f: unknown, a: unknown) => Promise<never> };
+  const call = t as unknown as { query: (f: unknown, a: unknown) => Promise<never>; mutation: (f: unknown, a: unknown) => Promise<never>; action: (f: unknown, a: unknown) => Promise<never> };
   const stack = createApp({
     config,
-    convex: { query: (fn, args) => call.query(fn, args), mutation: (fn, args) => call.mutation(fn, args) },
+    convex: { query: (fn, args) => call.query(fn, args), mutation: (fn, args) => call.mutation(fn, args), action: (fn, args) => call.action(fn, args) },
     apple: appleVerifier([BUNDLE_ID], { keys: [appleJwk] }),
     revisionPollMs: opts.revisionPollMs,
     streamMaxMs: opts.streamMaxMs,
     push: opts.push,
     microsoft: microsoftVerifier([MICROSOFT_CLIENT], { keys: [microsoftJwk] }),
+    google: googleVerifier([GOOGLE_CLIENT], { keys: [googleJwk] }),
     microsoftConnect: opts.microsoftConnect ? { ...opts.microsoftConnect, fetchImpl: opts.microsoftFetch } : undefined,
+    ambient: { ...opts.ambient, noHeartbeat: true },
+    mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
+    githubBatchMs: opts.githubBatchMs ?? 60_000,
+    ...(opts.slackApi ? { slack: { apiBase: opts.slackApi } } : {}),
+    ...(opts.mcpLocal ? { mcpConnections: { allowLocal: true } } : {}),
+    ...(opts.linq ? { linq: { apiBase: opts.linq.api } } : {}),
+    learning: { reviewAfterMs: opts.learningAfterMs ?? 60_000 },
+    teamBundle: opts.teamBundle,
   });
   gatewayServer.on("request", stack.app);
 
@@ -155,19 +201,28 @@ export async function startStack(
     config,
     teamId: String(teamId),
     teamServer,
+    teamWiki: wiki,
     dataDir,
     poolDir,
     appleToken,
     microsoftToken,
+    googleToken,
     control: stack.control,
     personal: stack.personal,
     directory: stack.directory,
     teams: stack.teams,
     notifier: stack.notifier,
     sessions: stack.sessions,
+    pats: stack.pats,
     revisions: stack.revisions,
     events: stack.events,
     microsoftConnect: stack.microsoftConnect,
+    bots: stack.bots,
+    ambient: stack.ambient,
+    decisions: stack.decisions,
+    heartbeat: stack.heartbeat,
+    folders: stack.folders,
+    automations: stack.automations,
     graphTokens,
     deliverer,
     close: async () => {
@@ -218,7 +273,7 @@ export async function tokenRequest(stack: Stack, key: CryptoKeyPair, params: Rec
   return { status: res.status, json: (await res.json()) as Record<string, string> };
 }
 
-type AppIdentity = { apple: string; name?: string } | { microsoft: string; nonce?: string; name?: string };
+type AppIdentity = { apple: string; name?: string } | { microsoft: string; nonce?: string; name?: string } | { google: string; name?: string };
 
 /**
  * The apps' sign-in, step by step: the authorization request (no browser: the app reads each
@@ -248,8 +303,8 @@ export async function appSignIn(stack: Stack, who: AppIdentity, key?: CryptoKeyP
   const interaction = start.headers.get("location");
   if (start.status !== 303 || !interaction?.startsWith("/interaction/")) return { status: start.status, step: "authorize" };
 
-  const body = "apple" in who ? { identityToken: who.apple, name: who.name } : { idToken: who.microsoft, nonce: who.nonce, name: who.name };
-  const step = await fetch(`${stack.origin}${interaction}/${"apple" in who ? "apple" : "microsoft"}`, {
+  const body = "apple" in who ? { identityToken: who.apple, name: who.name } : "google" in who ? { idToken: who.google, name: who.name } : { idToken: who.microsoft, nonce: who.nonce, name: who.name };
+  const step = await fetch(`${stack.origin}${interaction}/${"apple" in who ? "apple" : "google" in who ? "google" : "microsoft"}`, {
     method: "POST",
     headers: { cookie: jar.header(), "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -305,6 +360,12 @@ export async function appCall(stack: Stack, token: string, method: string, path:
   });
   const text = await res.text();
   return { status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
+}
+
+/** As appCall, the answer as it is (a file's bytes and headers). */
+export async function appRaw(stack: Stack, token: string, method: string, path: string): Promise<Response> {
+  const url = `${stack.origin}${path}`;
+  return fetch(url, { method, headers: await appHeaders(token, method, url) });
 }
 
 /** The fixture personal wiki as sync ops. */

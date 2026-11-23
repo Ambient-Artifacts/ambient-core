@@ -9,8 +9,11 @@ export const PageRef = z
 
 export const Scope = z.enum(["personal", "team"]);
 
-/** `session`: a work session with an AI agent (Claude Code, Claude, ChatGPT, Copilot), not a recording. */
-export const NoteKind = z.enum(["meeting", "call", "memo", "idea", "lecture", "other", "session"]);
+/**
+ * `session`: a work session with an AI agent (Claude Code, Claude, ChatGPT, Copilot), not a recording.
+ * `correction`: a team member saying what the team wiki got wrong (MCP suggest_correction), for whoever keeps the page.
+ */
+export const NoteKind = z.enum(["meeting", "call", "memo", "idea", "lecture", "other", "session", "correction"]);
 
 export const ConsentMode = z.enum(["all-agreed", "announced", "solo", "unknown"]);
 
@@ -198,6 +201,25 @@ export function withKind(v: unknown): unknown {
 }
 
 /**
+ * Folders and files of the team's repo that stay out of the brain: templates, scripts, a README are
+ * the repo's plumbing, not knowledge. Paths below the repo root; a folder takes everything in it.
+ */
+export const IgnorePaths = z
+  .array(z.string().min(1).max(200).refine((p) => !/[\u0000-\u001f\u007f\\]/.test(p) && !p.split("/").some((s) => s === ".."), "not a path in the repo"))
+  .max(50);
+
+/**
+ * Who writes a team's meeting notes. "ambient": the device that recorded writes the note, and
+ * it's the team's note. "own": the team's own pipeline writes it from the transcript it's sent
+ * (a recording then brings no note of Ambient's, only its transcript); the page it writes names
+ * the recording in its front matter (`recording_id`), so the app shows it on the recording.
+ * `pcc`: when the device writes it, it may use Apple's Private Cloud Compute (the transcript goes
+ * to Apple's servers for that) instead of the model on the device. Off unless an admin turns it on.
+ */
+export const MeetingNotes = z.object({ by: z.enum(["ambient", "own"]), pcc: z.boolean().default(false) });
+export type MeetingNotes = z.infer<typeof MeetingNotes>;
+
+/**
  * Per-team settings, kept on the team server (0600, the secret sealed). Who maintains the wiki
  * isn't one of them: a repo connected read-only means another tool does.
  */
@@ -205,6 +227,8 @@ export const TeamSettings = z.object({
   transcripts: TranscriptDestination.default({ kind: "repo", folder: "raw" }),
   work: WorkDestination.default({ kind: "none" }),
   microsoft: MicrosoftConnection.nullable().default(null),
+  ignore: IgnorePaths.default([]),
+  notes: MeetingNotes.default({ by: "ambient", pcc: false }),
 });
 export type TeamSettings = z.infer<typeof TeamSettings>;
 

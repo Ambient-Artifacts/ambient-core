@@ -2,6 +2,7 @@ export { createTeamApp, type TeamAppConfig } from "./app.ts";
 export { createUnclaimedApp, type UnclaimedConfig } from "./claim.ts";
 export { consolidate, consolidatePages, jobResult, normalizeUpdate, type ConsolidateOutcome, type PageUpdate, type PageUpdater, type PageUpdateInput, type Usage } from "./consolidate.ts";
 export { AnthropicDecisionFiler, AnthropicOverviewWriter, AnthropicResearcher, AnthropicSessionSummarizer, AnthropicUpdater, DEFAULT_MODEL, pagePrompt } from "./anthropic.ts";
+export { anthropicLlm, asLlm, checked, checking, claudeCodeAnswer, claudeCodeArgs, claudeCodeLlm, toWire, type Llm, type LlmAnswer, type LlmOrKey, type LlmRequest, type WireRequest } from "./llm.ts";
 export { PAGE_SECTIONS, SELF_SECTIONS, headParts, renderHead, sectionsFor, type EntityType } from "./consolidate.ts";
 export { dedupe, dedupPlan } from "./dedup.ts";
 export { normalizeResearch, readSite, seedPages, seedTeam, siteHost, type SiteResearcher } from "./seed.ts";

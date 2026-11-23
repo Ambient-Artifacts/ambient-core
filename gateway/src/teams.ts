@@ -74,7 +74,7 @@ export class TeamLink {
     this.keyPromise = importJWK(signingKey, "ES256");
   }
 
-  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health", subject?: string, extra: Record<string, string> = {}): Promise<string> {
+  async token(team: Pick<Team, "id" | "slug">, purpose: "query" | "inbox" | "repo" | "settings" | "graph" | "health" | "bots", subject?: string, extra: Record<string, string> = {}): Promise<string> {
     return new SignJWT({ ...extra, purpose, team_slug: team.slug })
       .setProtectedHeader({ alg: "ES256", kid: this.kid, typ: TEAM_TOKEN_TYP })
       .setIssuer(this.issuer)
@@ -149,7 +149,7 @@ export class TeamLink {
   }
 
   /** The team repo endpoints, passed through with their status (400s carry a message for the user). */
-  repo(team: Team, uid: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<{ status: number; json: unknown }> {
+  repo(team: Team, uid: string, method: "GET" | "POST" | "PATCH" | "DELETE", body?: unknown): Promise<{ status: number; json: unknown }> {
     return this.passThrough(team, uid, "repo", "/v1/repo", method, body, 120_000);
   }
 
@@ -182,6 +182,27 @@ export class TeamLink {
     }
     if (res.status >= 500) throw new TeamServerError(503, `team server answered ${res.status}`);
     return { status: res.status, json: await readJson(res) };
+  }
+
+  /**
+   * The team's bots' folders into its wiki's repo (docs/bots.md, "A bot's folder in git"). Answers
+   * with the team server's status: 200 mirrored, 409 the repo is another tool's (read-only).
+   */
+  async mirrorBots(team: Pick<Team, "id" | "slug" | "serverUrl">, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+    if (!team.serverUrl) throw new TeamServerError(503, `team ${team.slug} has no server yet`);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${team.serverUrl}/v1/bots`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", authorization: `Bearer ${await this.token(team, "bots")}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (err) {
+      throw new TeamServerError(503, `team server unreachable: ${(err as Error).message}`);
+    }
+    if (res.status >= 500) throw new TeamServerError(503, `team server answered ${res.status}`);
+    return { status: res.status, json: (await readJson(res)) as Record<string, unknown> };
   }
 
   /** A token for Ambient's own Microsoft app, for the team's company (microsoft-connect.ts). */

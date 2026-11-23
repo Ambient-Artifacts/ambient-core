@@ -63,8 +63,11 @@ describe("admin CLI", () => {
     const made = await admin("team", "create", "Analytical Engines", "--owner", "ada@example.com");
     expect(made).toContain('Created team "Analytical Engines" (slug analytical-engines) on pool-1');
     expect(made).toContain(`${s.origin}/t/analytical-engines/mcp`);
+    // A person is in one team.
+    await expect(admin("team", "create", "Second", "--owner", "ada@example.com")).rejects.toThrow(/in Analytical Engines already/);
     // The pool is empty now.
-    await expect(admin("team", "create", "Second", "--owner", "ada@example.com")).rejects.toThrow(/No free team server/);
+    await admin("user", "add", "grace@example.com", "--name", "Grace Hopper");
+    await expect(admin("team", "create", "Second", "--owner", "grace@example.com")).rejects.toThrow(/No free team server/);
 
     await admin("user", "add", "charles@example.com", "--name", "Charles Babbage");
     await expect(admin("token", "charles@example.com", "--team", "analytical-engines")).rejects.toThrow(/isn't in a team/);
@@ -93,8 +96,8 @@ describe("admin CLI", () => {
     expect(await admin("server", "add", "pool-2", "http://team-2:8090")).toBe("Updated team server pool-2 at http://team-2:8090 (free).");
     await expect(admin("server", "add", "pool-3", "team-3")).rejects.toThrow(/isn't a URL/);
     const out = await admin("computer-code", "ada@example.com", "--name", "Build box");
-    expect(out).toContain(`curl -fsSL ${s.origin}/runner/ambient-runner.mjs -o ambient-runner.mjs`);
-    expect(out).toMatch(/sudo node ambient-runner\.mjs setup [A-Z2-9]{4}-[A-Z2-9]{4}/);
+    expect(out).toContain(`curl -fsSL ${s.origin}/install.sh | sudo bash -s `);
+    expect(out).toMatch(/sudo bash -s [A-Z2-9]{4}-[A-Z2-9]{4}$/);
   });
 
   it("takes people out of a team, but never its last owner", async () => {
@@ -116,6 +119,15 @@ describe("admin CLI", () => {
     expect(await withToken("t0ken", "team", "repo", "acme", team)).toBe(`The acme team wiki is connected to ${team}. Every change is pushed there.`);
     expect(branches(team)).toContain("main");
     await expect(withToken("t0ken", "team", "repo", "nope", team)).rejects.toThrow(/No active team "nope"/);
+  });
+
+  it("leaves folders and files of a team's repo out of its brain", async () => {
+    expect(await admin("team", "ignore", "acme")).toBe("The acme brain leaves nothing out.");
+    expect(await admin("team", "ignore", "acme", "templates/", "./CLAUDE.md")).toBe("The acme brain leaves out: CLAUDE.md, templates.");
+    expect(await admin("team", "ignore", "acme")).toBe("The acme brain leaves out: CLAUDE.md, templates.");
+    await expect(admin("team", "ignore", "acme", "../outside")).rejects.toThrow(/refused/);
+    expect(await admin("team", "ignore", "acme", "--clear")).toBe("The acme brain leaves nothing out.");
+    await expect(admin("team", "ignore", "nope", "templates")).rejects.toThrow(/No active team "nope"/);
   });
 
   it("tells people where their sign-in code comes from: the app, the admin, or either", () => {

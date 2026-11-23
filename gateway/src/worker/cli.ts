@@ -18,37 +18,74 @@ import { TeamLink } from "../teams.ts";
 import { PersonalStore } from "../personal.ts";
 import { Revisions } from "../revisions.ts";
 import { PersonalRepos } from "../repos/personal.ts";
+import { RoutineKeys } from "../routines/keys.ts";
+import { BotFolder } from "../bots/folder.ts";
+import { BotMirror } from "../bots/mirror.ts";
 import { alerts, checkHealth, loadState, post, saveState, systemdUnit } from "./health.ts";
 import { runPersonalWorker } from "./personal.ts";
 import { runDigest } from "../digest.ts";
+import { computerLlm, GatewayUpkeep, useServerKey } from "../upkeep.ts";
+import { gatewayRelay, relayingFetch } from "../relay.ts";
 import { apnsSender, Notifier } from "../push.ts";
 
 const [cmd, ...flags] = process.argv.slice(2);
 const config = loadConfig();
 const convex = new ConvexHttpClient(config.convexUrl);
-const control = new Control({ query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args) }, config.serviceSecret);
+const control = new Control({ query: (fn, args) => convex.query(fn, args), mutation: (fn, args) => convex.mutation(fn, args), action: (fn, args) => convex.action(fn, args) }, config.serviceSecret);
+
+/**
+ * Where upkeep's model runs: "computer" (each person's own, the default) or "key": the server's
+ * ANTHROPIC_API_KEY, only with BRAIN_USE_SERVER_KEY=true (self-hosting, where the server pays).
+ */
+function upkeepMode(): "computer" | "key" {
+  return useServerKey() ? "key" : "computer";
+}
+
+/** fetch for team servers: a team on its own computer is reached through the gateway's relay (relay.ts). */
+function teamFetch(): typeof fetch {
+  return relayingFetch(gatewayRelay(process.env.BRAIN_HEALTH_GATEWAY_URL || `http://127.0.0.1:${process.env.PORT ?? 8080}`, config.serviceSecret));
+}
+
+/** The gateway's way to people's computers (its internal routes, with the service secret). */
+function gatewayUpkeep(): GatewayUpkeep {
+  return new GatewayUpkeep(process.env.BRAIN_HEALTH_GATEWAY_URL || `http://127.0.0.1:${process.env.PORT ?? 8080}`, config.serviceSecret);
+}
 
 if (cmd === "personal") {
   const personal = new PersonalStore(control, config.masterKey);
-  // 1. Claude upkeep. Without a key there is nothing to do; notes stay pending until one is set.
-  const key = process.env.ANTHROPIC_API_KEY;
+  // 1. Claude upkeep, on each person's own computer (upkeep.ts): their notes wait while it isn't
+  //    connected. BRAIN_USE_SERVER_KEY=true runs it on ANTHROPIC_API_KEY instead (self-hosting).
   const model = process.env.BRAIN_CONSOLIDATE_MODEL ?? "claude-haiku-4-5";
-  const runs = key
-    ? await runPersonalWorker({
-        control,
-        personal,
-        updater: new AnthropicUpdater(key, model, "personal"),
-        overview: new AnthropicOverviewWriter(key, model),
-        version: VERSION,
-      })
-    : [];
+  const key = process.env.ANTHROPIC_API_KEY;
+  const viaKey = upkeepMode() === "key";
+  const computers = viaKey ? undefined : gatewayUpkeep();
+  const runs =
+    viaKey && !key
+      ? []
+      : await runPersonalWorker({
+          control,
+          personal,
+          ...(viaKey ? { updater: new AnthropicUpdater(key!, model, "personal"), overview: new AnthropicOverviewWriter(key!, model) } : {}),
+          ...(computers
+            ? {
+                computers: {
+                  computerFor: (uid: string) => computers.computerFor(uid),
+                  writers: (uid: string) => ({ updater: new AnthropicUpdater(computerLlm(computers, uid), model, "personal"), overview: new AnthropicOverviewWriter(computerLlm(computers, uid), model) }),
+                },
+              }
+            : {}),
+          version: VERSION,
+        });
   // 2. Users' own repos, after upkeep so its changes go out in the same pass. Their failures
   //    (a revoked token) are the health check's business, not an OnFailure alert every 15 min.
-  const repos = await new PersonalRepos(control, personal).syncAll();
+  //    Their bots' folders go along (docs/bots.md, "A bot's folder in git").
+  const keys = new RoutineKeys({ control, personal, master: config.masterKey });
+  const mirror = new BotMirror({ control, keys, folder: new BotFolder({ control, keys }) });
+  const repos = await new PersonalRepos(control, personal, {}, { files: (uid) => mirror.personalFiles(uid) }).syncAll();
   console.log(
     JSON.stringify({
       at: new Date().toISOString(),
-      ...(key ? {} : { upkeep: "skipped: ANTHROPIC_API_KEY is not set" }),
+      ...(viaKey && !key ? { upkeep: "skipped: BRAIN_USE_SERVER_KEY=true but ANTHROPIC_API_KEY is not set" } : {}),
       users: runs.length,
       runs,
       repos: repos.map((r) => ({ uid: r.uid, ok: r.ok, error: r.error ?? null, ...(r.result ?? {}) })),
@@ -59,22 +96,31 @@ if (cmd === "personal") {
   const personal = new PersonalStore(control, config.masterKey);
   const directory = new Directory(control, 60_000);
   const revisions = new Revisions(control);
-  const teams = new TeamLink(config.origin, config.signingKeys[0]!, fetch, (team) => revisions.teamChanged(team.id));
+  const teams = new TeamLink(config.origin, config.signingKeys[0]!, teamFetch(), (team) => revisions.teamChanged(team.id));
   const sessions = new SessionService({ control, personal, directory, teams });
+  // Each session's note is written on its person's computer (upkeep.ts); BRAIN_USE_SERVER_KEY=true: on the key.
   const key = process.env.ANTHROPIC_API_KEY;
   const model = process.env.BRAIN_SESSION_MODEL ?? DEFAULT_MODEL;
+  const viaKey = upkeepMode() === "key";
   const moved = await sessions.moveLegacyNotes();
-  const written = key ? await sessions.process(new AnthropicSessionSummarizer(key, model)) : [];
+  const computers = viaKey ? null : gatewayUpkeep();
+  const written = viaKey
+    ? key
+      ? await sessions.process(new AnthropicSessionSummarizer(key, model))
+      : []
+    : await sessions.process((uid) => new AnthropicSessionSummarizer(computerLlm(computers!, uid), model));
   const delivered = await sessions.deliverDue();
-  if (written.length || delivered.length || moved || !key) {
-    console.log(JSON.stringify({ at: new Date().toISOString(), ...(key ? {} : { sessions: "skipped: ANTHROPIC_API_KEY is not set" }), moved, written, delivered }));
+  const skipped = viaKey && !key;
+  // Sessions waiting for a computer aren't news every minute.
+  if (written.some((w) => w.status !== "waiting") || delivered.length || moved || skipped) {
+    console.log(JSON.stringify({ at: new Date().toISOString(), ...(skipped ? { sessions: "skipped: BRAIN_USE_SERVER_KEY=true but ANTHROPIC_API_KEY is not set" } : {}), moved, written: written.filter((w) => w.status !== "waiting"), waiting: written.filter((w) => w.status === "waiting").length, delivered }));
   }
   process.exit(0);
 } else if (cmd === "digest") {
   // The morning push of open action items, in each user's time zone (digest.ts).
   const personal = new PersonalStore(control, config.masterKey);
   const directory = new Directory(control, 60_000);
-  const teams = new TeamLink(config.origin, config.signingKeys[0]!, fetch);
+  const teams = new TeamLink(config.origin, config.signingKeys[0]!, teamFetch());
   const notifier = new Notifier({ control, send: apnsSender(config.apns) });
   const runs = await runDigest({ control, personal, teams, directory, notifier });
   const sent = runs.filter((r) => r.status === "sent").length;
@@ -89,7 +135,10 @@ if (cmd === "personal") {
     gatewayUrl: process.env.BRAIN_HEALTH_GATEWAY_URL || `http://127.0.0.1:${process.env.PORT ?? 8080}`,
     now,
     unit: systemdUnit,
-    teamToken: (team) => new TeamLink(config.origin, config.signingKeys[0]!, fetch).token(team, "health"),
+    teamToken: (team) => new TeamLink(config.origin, config.signingKeys[0]!, teamFetch()).token(team, "health"),
+    // A team on its own computer is checked through the gateway's relay (relay.ts).
+    fetchImpl: teamFetch(),
+    poolInUse: process.env.BRAIN_TEAM_POOL === "true",
   });
   const out = alerts(await loadState(stateFile), problems, now, flags.includes("--daily"), summary);
   for (const m of out.messages) await post(process.env.BRAIN_ALERT_WEBHOOK, m).catch((err) => console.error(`alert failed: ${(err as Error).message}`));

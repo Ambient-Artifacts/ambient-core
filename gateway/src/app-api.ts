@@ -1,9 +1,9 @@
 // /v1/app/*: the iOS app's API. In the MVP the app talks only to the gateway;
 // Convex sits behind it.
-import { randomInt } from "node:crypto";
+import { CLAUDE_CODE_PLUGIN, claudeCodeInstall, clientKind, connectLinks, type AgentKind } from "./connect-agents.ts";
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { z } from "zod";
-import { SyncRequest, TeamNoteV1, parsePage, slugify } from "@brain/spec";
+import { SyncRequest, TeamNoteV1 } from "@brain/spec";
 import { GitError, HasContent, QueryRequest, dispatchQuery, fileLinks, renderListing, type WikiReader } from "@brain/wiki";
 import type { AppAccess } from "./auth/app-access.ts";
 import type { AppleRevoker } from "./auth/apple-revoke.ts";
@@ -13,24 +13,39 @@ import { api, type Control } from "./control.ts";
 import { sha256Hex } from "./crypto.ts";
 import type { Directory } from "./directory.ts";
 import { addressKey, inFlight, limiter } from "./limiter.ts";
-import { MAX_ABOUT, ME_PATH, writeAbout } from "./me.ts";
 import { appStores, meetingBrief, waitingOn } from "./briefs.ts";
 import { localDay, validZone } from "./digest.ts";
 import type { PersonalStore } from "./personal.ts";
 import type { PersonalRepos } from "./repos/personal.ts";
 import { routineAppRoutes } from "./routines/route.ts";
+import { botAppRoutes } from "./bots/route.ts";
+import type { BotService } from "./bots/service.ts";
+import type { AmbientChat } from "./bots/ambient.ts";
+import type { AdminService } from "./bots/admin.ts";
+import type { DecisionService } from "./bots/decisions.ts";
+import type { Folders } from "./bots/files.ts";
 import type { RoutineService } from "./routines/service.ts";
 import type { SessionService } from "./sessions/service.ts";
 import type { EventHub, Revisions } from "./revisions.ts";
+import type { LiveText } from "./bots/live.ts";
 import { TeamServerError, type TeamLink } from "./teams.ts";
+import { SettingsService, type Reply } from "./team-admin.ts";
 import type { CodeHasher } from "./auth/codes.ts";
 import type { MicrosoftConnectFlow } from "./microsoft-connect.ts";
 import type { SignInNonces } from "./auth/signin-nonce.ts";
+import { VoiceBody, Voices } from "./voices.ts";
+import { upkeepOf, type UpkeepComputers } from "./upkeep.ts";
+import { serverKind } from "./relay.ts";
+import { PeopleService } from "./people.ts";
 
 export interface AppApiDeps {
   /** An AI app's name, by its client id (oidc-provider's registered clients). */
   clientName?: (clientId: string) => Promise<string | undefined>;
-  /** Sign-in nonces for Apple and Microsoft (auth/signin-nonce.ts). */
+  /** An OAuth client's name and redirect URIs (which AI app it is: connect-agents.ts). */
+  clientInfo?: (clientId: string) => Promise<{ name?: string; redirectUris: string[] } | undefined>;
+  /** This server's public address (connect links and the Claude Code plugin's server). */
+  origin?: string;
+  /** Sign-in nonces for Apple, Microsoft and Google (auth/signin-nonce.ts). */
   signInNonces: SignInNonces;
   /** Invite codes are stored keyed (auth/codes.ts). */
   codes: CodeHasher;
@@ -45,9 +60,23 @@ export interface AppApiDeps {
   repos: PersonalRepos;
   sessions: SessionService;
   routines: RoutineService;
+  /** Teams and the person's profile (people.ts): the same service as the AI apps' tools. */
+  people?: PeopleService;
+  /** Where the person's brain upkeep runs (upkeep.ts): their own computer. */
+  upkeep?: UpkeepComputers;
+  /** Bots and the chat with Ambient (docs/bots.md). */
+  bots?: BotService;
+  ambient?: AmbientChat;
+  admin?: AdminService;
+  decisions?: DecisionService;
+  folders?: Folders;
+  /** A recorded meeting landed in someone's brain: automations may listen (docs/bots.md, "Automations"). */
+  onMeetingNote?: (e: { uid: string; title: string; ref: string; team: string | null }) => void;
   appleRevoke: AppleRevoker;
   /** Microsoft's app registration id the apps sign in with (/v1/app/config), when there is one. */
   microsoftClientId?: string;
+  /** Google's OAuth client id the apps sign in with (/v1/app/config), when there is one. */
+  googleClientId?: string;
   /** Whether the apps can sign in with Apple here (a self-hosted server may take only Microsoft, or neither). */
   appleSignIn: boolean;
   /** "Connect Microsoft 365" with Ambient's own Microsoft app, when this server has it. */
@@ -56,11 +85,14 @@ export interface AppApiDeps {
   appConfig: { minimumVersion?: string; updateUrl?: string };
   revisions: Revisions;
   events: EventHub;
+  /** Bots' answers as they're written (event: bot_live), for the threads the user may read. */
+  live?: LiveText;
   /** How long an event stream stays open before the app reconnects (with a fresh token). */
   streamMaxMs?: number;
 }
 
-const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
+const SessionRules = z.object({ rules: z.array(z.object({ match: z.string().trim().min(2).max(200), team: z.string().min(1).max(80) })).max(50) });
+const InviteBody = z.object({ role: z.enum(["admin", "member"]).optional(), uses: z.number().int().min(1).max(100).optional(), days: z.number().int().min(1).max(90).optional() });
 
 const DeleteAccount = z.object({ authorizationCode: z.string().min(10).max(4000).optional() });
 
@@ -83,6 +115,15 @@ export const MAX_STREAMS = 8;
 
 export function appApiRouter(d: AppApiDeps): Router {
   const r = express.Router();
+  const settings = new SettingsService(d);
+  // Teams and the person's own profile (people.ts), shared with the AI apps' tools.
+  const people = d.people ?? new PeopleService({ control: d.control, directory: d.directory, teams: d.teams, codes: d.codes, personal: d.personal, microsoftConnect: d.microsoftConnect });
+  /** A service's answer as the route's response (204: no body). */
+  const send = (res: Response, out: Reply) => {
+    if (out.status === 204) res.status(204).end();
+    else res.status(out.status).json(out.json);
+  };
+  const voices = new Voices(d);
   // Sync batches may carry transcripts; the app splits batches well below this. Routes put `auth`
   // before `json`, so nobody can make the gateway inflate and buffer a body without signing in,
   // and an account has a few bodies in the works at a time (its devices), not hundreds at 8 MB.
@@ -117,7 +158,7 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // ---- launch config (no sign-in needed) ----
 
-  // A nonce for Sign in with Apple or Microsoft: the app puts it into the request, they sign it
+  // A nonce for Sign in with Apple, Microsoft or Google: the app puts it into the request, they sign it
   // into the ID token, and this server's sign-in step takes only its own (auth/signin-nonce.ts).
   const nonceLimit = limiter(60);
   r.get("/v1/app/sign-in-nonce", (req, res) => {
@@ -138,6 +179,8 @@ export function appApiRouter(d: AppApiDeps): Router {
       updateUrl: d.appConfig.updateUrl ?? null,
       // The apps show "Continue with Microsoft" only when this is set,
       microsoftClientId: d.microsoftClientId ?? null,
+      // And "Continue with Google" only when this is.
+      googleClientId: d.googleClientId ?? null,
       // and "Continue with Apple" unless this is false (apps before it always show it).
       appleSignIn: d.appleSignIn,
       // Team settings offer "Connect Microsoft 365" (Ambient's own Microsoft app) when true.
@@ -179,7 +222,14 @@ export function appApiRouter(d: AppApiDeps): Router {
       if (!res.writableEnded) res.write(chunk);
     };
     send("retry: 5000\n\n");
-    const stop = d.events.subscribe(uid, (revisions) => send(`event: revisions\ndata: ${JSON.stringify(revisions)}\n\n`));
+    const stopRevisions = d.events.subscribe(uid, (revisions) => send(`event: revisions\ndata: ${JSON.stringify(revisions)}\n\n`));
+    const stopLive = d.live?.subscribe(uid, (e) => send(`event: bot_live\ndata: ${JSON.stringify(e)}\n\n`));
+    const stopChats = d.live?.subscribeChats(uid, (e) => send(`event: chat\ndata: ${JSON.stringify(e)}\n\n`));
+    const stop = () => {
+      stopRevisions();
+      stopLive?.();
+      stopChats?.();
+    };
     const ping = setInterval(() => send(": ping\n\n"), 25_000);
     let done = false;
     const finish = () => {
@@ -205,6 +255,11 @@ export function appApiRouter(d: AppApiDeps): Router {
     while (list.length > MAX_STREAMS) list.shift()!();
   });
 
+  // How the brain's upkeep is doing (upkeep.ts): pages current, notes waiting for the computer, or why not.
+  r.get("/v1/app/me/upkeep", auth, async (_req, res) => {
+    res.json(await upkeepOf(d, uidOf(res)));
+  });
+
   r.get("/v1/app/me", auth, async (_req, res) => {
     const uid = uidOf(res);
     const [user, teams, record, aiApp] = await Promise.all([
@@ -215,9 +270,10 @@ export function appApiRouter(d: AppApiDeps): Router {
     ]);
     res.json({
       user,
-      teams: teams.map((t) => ({ slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug })),
+      // Where each team's brain runs: Ambient's server ("hosted"), the team's computer, or nowhere yet.
+      teams: teams.map((t) => ({ slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: serverKind(t.serverUrl) })),
       // Claude upkeep is opt-in: the app asks once (consolidateAsked) and it's off until then.
-      prefs: { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true },
+      prefs: { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true, pcc: record?.pcc ?? true },
       // What's left to set up (the app's reminder dot).
       setup: { aiAppConnected: aiApp.connected },
     });
@@ -225,8 +281,9 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // Delete the account and everything of it: tokens stop working at once, owned teams pass to the
   // longest-standing admin or member (a team with nobody else is canceled), personal pages,
-  // keys, repos, sessions, routines, secrets and AI-app connections are deleted, and Apple's
-  // token is revoked when the app sent a fresh authorization code (App Store 5.1.1(v)).
+  // keys, the voice fingerprint, repos, sessions, routines, secrets and AI-app connections are
+  // deleted, and Apple's token is revoked when the app sent a fresh authorization code (App Store
+  // 5.1.1(v)).
   r.delete("/v1/app/me", auth, json, async (req, res) => {
     const body = DeleteAccount.safeParse(req.body ?? {});
     if (!body.success) {
@@ -251,13 +308,12 @@ export function appApiRouter(d: AppApiDeps): Router {
   r.post("/v1/app/me/prefs", auth, json, async (req, res) => {
     const consolidate = typeof req.body?.consolidate === "boolean" ? (req.body.consolidate as boolean) : undefined;
     const digest = typeof req.body?.digest === "boolean" ? (req.body.digest as boolean) : undefined;
-    if (consolidate === undefined && digest === undefined) {
+    const pcc = typeof req.body?.pcc === "boolean" ? (req.body.pcc as boolean) : undefined;
+    if (consolidate === undefined && digest === undefined && pcc === undefined) {
       res.status(400).json({ error: "bad_request" });
       return;
     }
-    await d.control.m(api.users.setPrefs, { uid: uidOf(res) as never, consolidate, digest });
-    const record = await d.control.q(api.users.get, { uid: uidOf(res) });
-    res.json({ prefs: { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true } });
+    res.json({ prefs: await settings.prefs(uidOf(res), { consolidate, digest, pcc }) });
   });
 
   // ---- before a meeting, and what's waiting on you (briefs.ts) ----
@@ -285,41 +341,49 @@ export function appApiRouter(d: AppApiDeps): Router {
   // ---- about you: the `me` page every AI app starts from (me.ts) ----
 
   r.get("/v1/app/me/about", auth, async (_req, res) => {
-    const text = await d.personal.readPage(uidOf(res), ME_PATH);
-    if (!text) {
-      res.json({ about: null, page: null });
-      return;
-    }
-    const page = parsePage(text);
-    res.json({
-      about: typeof page.frontmatter.about === "string" ? page.frontmatter.about : null,
-      page: { title: String(page.frontmatter.title ?? ""), summary: String(page.frontmatter.summary ?? ""), updated: String(page.frontmatter.updated ?? ""), body: page.body.trim() },
-    });
+    res.json(await people.about(uidOf(res)));
   });
 
   // What they write about themselves, kept word for word; Claude's upkeep writes the rest of
   // the page from it and their notes (when upkeep is on).
   r.put("/v1/app/me/about", auth, json, async (req, res) => {
-    const about = typeof req.body?.about === "string" ? req.body.about.trim() : "";
-    if (!about || about.length > MAX_ABOUT) {
-      res.status(400).json({ error: "bad_request", message: `Write a few sentences, at most ${MAX_ABOUT} characters.` });
-      return;
-    }
-    const uid = uidOf(res);
-    const [user, prev] = await Promise.all([d.directory.user(uid), d.personal.readPage(uid, ME_PATH)]);
-    const text = writeAbout(prev, about, user?.name ?? "", new Date().toISOString().slice(0, 10));
-    await d.personal.serverWrite(uid, [{ path: ME_PATH, content: text }]);
-    res.json({ about, path: ME_PATH });
+    send(res, await people.setAbout(uidOf(res), req.body?.about));
   });
 
   r.post("/v1/app/me/name", auth, json, async (req, res) => {
-    const name = typeof req.body?.name === "string" ? req.body.name : "";
-    if (!name.trim()) {
-      res.status(400).json({ error: "bad_request" });
+    send(res, await people.rename(uidOf(res), req.body?.name));
+  });
+
+  // ---- your voice (voices.ts) ----
+
+  // The fingerprint a device learned from the user's own voice. It replaces the one stored, goes
+  // to the user's other devices, and to every active team they're in, so the members' apps can
+  // name them in recordings.
+  r.put("/v1/app/me/voice", auth, json, async (req, res) => {
+    const body = VoiceBody.safeParse(req.body ?? {});
+    if (!body.success) {
+      res.status(400).json({ error: "bad_request", message: "Send the fingerprint as 64 to 1024 numbers, with the model that made it." });
       return;
     }
-    await d.control.m(api.users.rename, { uid: uidOf(res) as never, name });
-    d.directory.invalidate(uidOf(res));
+    if (!(await voices.put(uidOf(res), body.data))) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    res.status(204).end();
+  });
+
+  r.get("/v1/app/me/voice", auth, async (_req, res) => {
+    res.set("Cache-Control", "no-store");
+    const voice = await voices.get(uidOf(res));
+    if (!voice) {
+      res.status(404).json({ error: "no_voice" });
+      return;
+    }
+    res.json(voice);
+  });
+
+  r.delete("/v1/app/me/voice", auth, async (_req, res) => {
+    await voices.remove(uidOf(res));
     res.status(204).end();
   });
 
@@ -392,21 +456,62 @@ export function appApiRouter(d: AppApiDeps): Router {
   // The AI apps connected over OAuth ("Disconnect any time in the app", the consent page says):
   // disconnecting one ends its grant and refresh tokens at once. An access token it already has is
   // a signed JWT nothing stores, so it works until it expires (accessTokenTtl, an hour by default).
+  // Each one says which AI app it is (`kind`, docs/connect-agents.md), so the app can tick off
+  // "Connected" per app. The Claude Code plugin signs in with a token instead of OAuth: its tokens
+  // are listed here too (`via: "token"`), and disconnecting one revokes it.
   r.get("/v1/app/connections", auth, async (_req, res) => {
-    const grants = await d.control.q(api.oauth.listGrants, { accountId: uidOf(res), now: Date.now() });
-    const connections = await Promise.all(
-      grants.map(async (g) => ({ id: g.grantId, clientId: g.clientId, name: (await d.clientName?.(g.clientId).catch(() => undefined)) ?? g.clientId, since: g.since })),
+    const uid = uidOf(res);
+    const grants = await d.control.q(api.oauth.listGrants, { accountId: uid, now: Date.now() });
+    const oauth = await Promise.all(
+      grants.map(async (g) => {
+        const info = d.clientInfo ? await d.clientInfo(g.clientId).catch(() => undefined) : undefined;
+        const name = info?.name ?? (await d.clientName?.(g.clientId).catch(() => undefined)) ?? g.clientId;
+        return { id: g.grantId, clientId: g.clientId, name, since: g.since, kind: clientKind(name, info?.redirectUris), via: "oauth" as const, lastUsedAt: null };
+      }),
     );
-    res.json({ connections });
+    const plugin = (await d.pats.list(uid))
+      .filter((p) => p.scopes.includes("sessions:write"))
+      .map((p) => ({ id: p.id, clientId: null, name: p.label, since: p.createdAt, kind: "claude-code" as AgentKind, via: "token" as const, lastUsedAt: null }));
+    res.json({ connections: [...oauth, ...plugin] });
   });
 
   r.delete("/v1/app/connections/:id", auth, async (req, res) => {
     const id = String(req.params.id);
-    if (id.length > 200 || !(await d.control.m(api.oauth.revokeGrant, { accountId: uidOf(res), grantId: id })).ok) {
+    const uid = uidOf(res);
+    const ok =
+      id.length <= 200 &&
+      ((await d.control.m(api.oauth.revokeGrant, { accountId: uid, grantId: id })).ok ||
+        (/^[a-z0-9]{10,64}$/.test(id) && (await d.pats.list(uid)).some((p) => p.id === id && p.scopes.includes("sessions:write")) && (await d.pats.revoke(uid, id))));
+    if (!ok) {
       res.status(404).json({ error: "not_found" });
       return;
     }
     res.status(204).end();
+  });
+
+  // ---- connecting AI apps in one step (docs/connect-agents.md) ----
+
+  r.get("/v1/app/connect-links", auth, (_req, res) => {
+    if (!d.origin) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    res.json(connectLinks(d.origin));
+  });
+
+  // The Mac app installs the Claude Code plugin for the person: a fresh plugin token and the exact
+  // command, so nothing is copied by hand. The token is shown once, like any token.
+  r.post("/v1/app/connect/claude-code", auth, json, async (req, res) => {
+    if (!d.origin) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    const body = z.object({ device: z.string().trim().max(60).optional() }).safeParse(req.body ?? {});
+    const uid = uidOf(res);
+    await d.control.m(api.users.markAppConnected, { uid: uid as never, now: Date.now() });
+    const label = `Claude Code${body.success && body.data.device ? ` on ${body.data.device}` : ""}`;
+    const made = await d.pats.create({ uid, scopes: ["personal:read", "personal:write", "team:read", "sessions:write"], resource: { kind: "personal" }, label });
+    res.json({ token: made.token, id: made.id, server: d.origin, command: claudeCodeInstall(d.origin, made.token), plugin: CLAUDE_CODE_PLUGIN });
   });
 
   // ---- work sessions (Claude Code and AI apps) ----
@@ -428,20 +533,12 @@ export function appApiRouter(d: AppApiDeps): Router {
   });
 
   r.put("/v1/app/sessions/rules", auth, json, async (req, res) => {
-    const uid = uidOf(res);
-    const body = z.object({ rules: z.array(z.object({ match: z.string().trim().min(2).max(200), team: z.string().min(1).max(80) })).max(50) }).safeParse(req.body);
+    const body = SessionRules.safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Each rule needs a folder or repo and a team." });
       return;
     }
-    const mine = new Set((await d.directory.teamsOf(uid)).map((t) => t.slug));
-    const unknown = body.data.rules.find((r) => !mine.has(r.team));
-    if (unknown) {
-      res.status(400).json({ error: "not_a_member", message: `You're not in the team "${unknown.team}".` });
-      return;
-    }
-    await d.control.m(api.sessions.setRules, { uid: uid as never, rules: body.data.rules });
-    res.json({ rules: body.data.rules });
+    send(res, await people.setSessionRules(uidOf(res), body.data.rules));
   });
 
   r.post("/v1/app/sessions/:sessionId/keep", auth, async (req, res) => {
@@ -456,79 +553,17 @@ export function appApiRouter(d: AppApiDeps): Router {
   // ---- routines (prompts Claude Code runs on a schedule on the user's computers) ----
 
   routineAppRoutes(r, { routines: d.routines, directory: d.directory, auth, json });
+  if (d.bots && d.ambient) botAppRoutes(r, { routines: d.routines, bots: d.bots, ambient: d.ambient, admin: d.admin, decisions: d.decisions, files: d.folders?.files, folder: d.folders?.folder, automations: () => d.folders?.automations, github: () => d.folders?.github, githubApp: () => d.folders?.githubApp, slack: () => d.folders?.slack, learning: () => d.folders?.learning, ambSettings: () => d.folders?.ambSettings, imessage: () => d.folders?.imessage, mcp: () => d.folders?.mcp, reach: () => d.folders?.reach, wakes: () => d.folders?.wakes, history: () => d.folders?.history, directory: d.directory, auth, json });
 
   // ---- teams ----
 
   r.post("/v1/app/teams/join", auth, json, async (req, res) => {
-    const code = typeof req.body?.code === "string" ? req.body.code.trim().toUpperCase() : "";
-    if (!code || !authLimit(`join:${uidOf(res)}`)) {
-      res.status(400).json({ error: "bad_request" });
-      return;
-    }
-    const uid = uidOf(res);
-    const user = await d.directory.user(uid);
-    let out!: Awaited<ReturnType<typeof join>>;
-    const join = (codeHash: string) =>
-      d.control.m(api.teams.joinWithInvite, { uid: uid as never, codeHash, peopleSlug: `people/${slugify(user?.name ?? "member") || "member"}`, now: Date.now() });
-    for (const codeHash of d.codes.candidates("invite", code)) {
-      out = await join(codeHash);
-      if (out.ok || out.error !== "invalid_code") break;
-    }
-    d.directory.invalidate(uid);
-    if (!out.ok) {
-      res.status(400).json({ error: out.error });
-      return;
-    }
-    res.json({ team: { slug: out.team.slug, name: out.team.name, role: out.team.role, peopleSlug: out.team.peopleSlug } });
+    send(res, await people.joinTeam(uidOf(res), req.body?.code));
   });
 
-  // Create a team (the user owns it) on a free server from the pool.
+  // Create a team (the user owns it): on a computer of its own, or a pool server (people.ts).
   r.post("/v1/app/teams", auth, json, async (req, res) => {
-    const uid = uidOf(res);
-    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
-    if (!name || name.length > 80 || !authLimit(`create:${uid}`)) {
-      res.status(400).json({ error: "bad_request", message: "Give the team a name (up to 80 characters)." });
-      return;
-    }
-    const user = await d.directory.user(uid);
-    const made = await d.control.m(api.teams.createOwned, {
-      uid: uid as never,
-      name,
-      peopleSlug: `people/${slugify(user?.name ?? "member") || "member"}`,
-      now: Date.now(),
-    });
-    if (!made.ok) {
-      if (made.error === "no_server") {
-        console.warn("[gateway] team creation refused: the server pool is empty");
-        res.status(503).json({ error: "no_server", message: "We're setting up more team servers. Try again in a few hours; we've been told." });
-      } else if (made.error === "too_many_teams") {
-        res.status(403).json({ error: made.error, message: "You already own three teams. Write to us if you need another." });
-      } else {
-        res.status(400).json({ error: made.error, message: "Give the team a name." });
-      }
-      return;
-    }
-    try {
-      await d.teams.claim(made.server, { id: made.team.id, name: made.team.name });
-    } catch (err) {
-      const claim = err instanceof TeamServerError ? err.claim : undefined;
-      console.error(`[gateway] claiming pool server ${made.server.serverId} failed (${claim ?? "error"}): ${(err as Error).message}`);
-      // It may have taken the claim before the answer was lost: keep the team, as when the server
-      // is slow to restart. Freeing it then would hand a server that now serves a deleted team to
-      // the next team, and every creation after would fail on it.
-      if (claim !== "uncertain") {
-        // A server that says it's taken stays out of the pool; one that surely didn't claim goes back.
-        await d.control.m(api.teams.abandonCreate, { teamId: made.team.id as never, release: claim !== "taken" });
-        d.directory.invalidate(uid);
-        res.status(503).json({ error: "team_unavailable", message: "The team's server didn't answer. Try again in a minute." });
-        return;
-      }
-    }
-    d.directory.invalidate(uid);
-    // Best effort: the server restarts as the team's; notes queue on the phone until it's up.
-    await d.teams.ready(made.server.url);
-    const t = made.team;
-    res.json({ team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug } });
+    send(res, await people.createTeam(uidOf(res), req.body?.name));
   });
 
   const managed = async (req: Request, res: Response) => {
@@ -546,77 +581,43 @@ export function appApiRouter(d: AppApiDeps): Router {
   };
 
   r.get("/v1/app/teams/:slug/members", auth, async (req, res) => {
-    const team = await managed(req, res);
-    if (!team) return;
-    const members = await d.control.q(api.teams.members, { uid: uidOf(res) as never, slug: team.slug });
-    if (!members) {
-      refused(res, "not_a_member");
+    send(res, await people.members(uidOf(res), String(req.params.slug)));
+  });
+
+  // Every member's voice fingerprint (theirs included), for the app to name who speaks in a
+  // recording. Any member reads them; someone who left or was removed is gone from the list at once.
+  r.get("/v1/app/teams/:slug/voices", auth, async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const list = await voices.ofTeam(uidOf(res), String(req.params.slug));
+    if (!list) {
+      res.status(403).json({ error: "not_a_member" });
       return;
     }
-    res.json({ team: { slug: team.slug, name: team.name, status: team.status, role: team.role }, members });
+    res.json({ voices: list });
   });
 
   r.post("/v1/app/teams/:slug/invites", auth, json, async (req, res) => {
-    const team = await managed(req, res);
-    if (!team) return;
-    const body = z
-      .object({ role: z.enum(["admin", "member"]).optional(), uses: z.number().int().min(1).max(100).optional(), days: z.number().int().min(1).max(90).optional() })
-      .safeParse(req.body ?? {});
+    const body = InviteBody.safeParse(req.body ?? {});
     if (!body.success) {
-      res.status(400).json({ error: "bad_request" });
+      // A team the user isn't in answers not_a_member first, as before.
+      const team = await d.directory.membership(uidOf(res), String(req.params.slug));
+      if (!team) res.status(403).json({ error: "not_a_member" });
+      else res.status(400).json({ error: "bad_request" });
       return;
     }
-    const part = () => Array.from({ length: 4 }, () => INVITE_ALPHABET[randomInt(INVITE_ALPHABET.length)]).join("");
-    const prefix = team.slug.replace(/[^a-z0-9]/g, "").slice(0, 4).toUpperCase() || "TEAM";
-    const code = `${prefix}-${part()}-${part()}`;
-    const uses = body.data.uses ?? 10;
-    const out = await d.control.m(api.teams.invite, {
-      uid: uidOf(res) as never,
-      slug: team.slug,
-      codeHash: d.codes.hash("invite", code),
-      role: body.data.role,
-      uses,
-      days: body.data.days ?? 14,
-      now: Date.now(),
-    });
-    if (!out.ok) {
-      refused(res, out.error);
-      return;
-    }
-    res.json({ code, role: out.role, uses, expiresAt: out.expiresAt });
+    send(res, await people.invite(uidOf(res), String(req.params.slug), body.data));
   });
 
   r.delete("/v1/app/teams/:slug/members/:uid", auth, async (req, res) => {
-    const team = await managed(req, res);
-    if (!team) return;
-    const target = String(req.params.uid);
-    const out = await d.control.m(api.teams.removeMemberBy, { uid: uidOf(res) as never, slug: team.slug, target });
-    d.directory.invalidate(target);
-    if (!out.ok) refused(res, out.error);
-    else res.status(204).end();
+    send(res, await people.removeMember(uidOf(res), String(req.params.slug), String(req.params.uid)));
   });
 
   r.post("/v1/app/teams/:slug/members/:uid/role", auth, json, async (req, res) => {
-    const team = await managed(req, res);
-    if (!team) return;
-    const role = req.body?.role;
-    if (role !== "admin" && role !== "member") {
-      res.status(400).json({ error: "bad_request" });
-      return;
-    }
-    const target = String(req.params.uid);
-    const out = await d.control.m(api.teams.setRole, { uid: uidOf(res) as never, slug: team.slug, target, role });
-    d.directory.invalidate(target);
-    if (!out.ok) refused(res, out.error);
-    else res.status(204).end();
+    send(res, await people.setRole(uidOf(res), String(req.params.slug), String(req.params.uid), req.body?.role));
   });
 
   r.post("/v1/app/teams/:slug/leave", auth, async (req, res) => {
-    const uid = uidOf(res);
-    const out = await d.control.m(api.teams.leaveBySlug, { uid: uid as never, slug: String(req.params.slug) });
-    d.directory.invalidate(uid);
-    if (!out.ok) refused(res, out.error);
-    else res.status(204).end();
+    send(res, await people.leave(uidOf(res), String(req.params.slug)));
   });
 
   r.post("/v1/app/teams/:slug/notes", auth, json, async (req, res) => {
@@ -633,12 +634,17 @@ export function appApiRouter(d: AppApiDeps): Router {
       return;
     }
     try {
-      res.json(await d.teams.deliver(team, parsed.data, uid, team.peopleSlug ?? null));
+      const delivered = await d.teams.deliver(team, parsed.data, uid, team.peopleSlug ?? null);
+      if (parsed.data.kind === "meeting" || parsed.data.kind === "call") {
+        const title = typeof parsed.data.entry_page.frontmatter.title === "string" ? parsed.data.entry_page.frontmatter.title : "A meeting";
+        d.onMeetingNote?.({ uid, title, ref: `team:${team.slug}:${parsed.data.note_id}`, team: team.name });
+      }
+      res.json(delivered);
     } catch (err) {
       if (err instanceof TeamServerError && err.status === 409) {
         // The team's repo is kept by another tool (connected read-only): it takes no notes. 403,
         // so the phone sets the note aside instead of retrying it (and holding up the rest).
-        res.status(403).json({ error: "read_only", message: "This team's wiki is kept by another tool, so Ambient can't add notes to it. Record it as Personal." });
+        res.status(403).json({ error: "read_only", message: "Another tool keeps this team's brain, and it has no folder set for recordings. Record it as Personal, or ask an admin to set a folder under Transcripts and work logs." });
         return;
       }
       if (err instanceof TeamServerError) {
@@ -681,7 +687,20 @@ export function appApiRouter(d: AppApiDeps): Router {
       res.status(400).json({ error: "bad_request", issues: body.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
       return;
     }
-    res.json(await d.personal.sync(uidOf(res), body.data.ops, body.data.since_seq, body.data.device_id));
+    const uid = uidOf(res);
+    const out = await d.personal.sync(uid, body.data.ops, body.data.since_seq, body.data.device_id);
+    // A recorded meeting's note arriving in the personal brain (a new note under wiki/notes/).
+    if (d.onMeetingNote) {
+      const rejected = new Set(out.rejected.map((r) => r.path));
+      for (const op of body.data.ops) {
+        if (op.op !== "upsert" || rejected.has(op.path) || !/^wiki\/notes\/\d{4}\/\d{2}\/[^/]+\.md$/.test(op.path)) continue;
+        const front = /^---\n([\s\S]*?)\n---/.exec(op.content)?.[1] ?? "";
+        if (!/^kind:\s*["']?(meeting|call)["']?\s*$/m.test(front)) continue;
+        const title = /^title:\s*["']?(.+?)["']?\s*$/m.exec(front)?.[1] ?? "A meeting";
+        d.onMeetingNote({ uid, title, ref: `personal:${op.path.replace(/^wiki\//, "").replace(/\.md$/, "")}`, team: null });
+      }
+    }
+    res.json(out);
   });
 
   // What the server holds (paths and hashes only): a device removes pages it synced before
@@ -775,108 +794,27 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.status(204).end();
   });
 
-  // A team wiki's own repo: any member sees the status; owners and admins connect it.
-  const teamRepo = (method: "GET" | "POST" | "DELETE") => async (req: Request, res: Response) => {
-    const uid = uidOf(res);
-    // Changing the repo: the role as it is now, not as cached a minute ago.
-    const team = method === "GET" ? await d.directory.membership(uid, String(req.params.slug)) : await d.directory.freshMembership(uid, String(req.params.slug));
-    if (!team || team.status !== "active") {
-      res.status(403).json({ error: "not_a_member" });
-      return;
-    }
-    if (method !== "GET" && team.role !== "owner" && team.role !== "admin") {
-      res.status(403).json({ error: "admins_only", message: "Only team owners and admins can change the team repo." });
-      return;
-    }
-    try {
-      const body =
-        method === "POST"
-          ? {
-              url: String(req.body?.url ?? ""),
-              token: String(req.body?.token ?? ""),
-              // How: Ambient keeps the wiki (two-way), or another tool does and Ambient only reads.
-              mode: req.body?.mode === "read-only" ? "read-only" : "two-way",
-              // The person saw what the repo already holds (the 409 has_content answer) and connects it anyway.
-              existing: req.body?.existing === true,
-            }
-          : undefined;
-      const out = await d.teams.repo(team, uid, method, body);
-      if (out.status === 204) res.status(204).end();
-      else res.status(out.status).json(out.json);
-    } catch (err) {
-      if (err instanceof TeamServerError) {
-        res.status(err.status).json({ error: "team_unavailable", message: "The team server didn't answer. Try again in a minute." });
-        return;
-      }
-      throw err;
-    }
+  // A team wiki's own repo: any member sees the status; owners and admins connect it (SettingsService).
+  const teamRepo = (method: "GET" | "POST" | "PATCH" | "DELETE") => async (req: Request, res: Response) => {
+    const out = await settings.teamRepo(uidOf(res), String(req.params.slug), method, (req.body ?? {}) as Record<string, unknown>);
+    if (out.status === 204) res.status(204).end();
+    else res.status(out.status).json(out.json);
   };
   r.get("/v1/app/teams/:slug/repo", auth, teamRepo("GET"));
   r.post("/v1/app/teams/:slug/repo", auth, json, teamRepo("POST"));
+  r.patch("/v1/app/teams/:slug/repo", auth, json, teamRepo("PATCH"));
   r.delete("/v1/app/teams/:slug/repo", auth, teamRepo("DELETE"));
 
-  // Team settings (product/sources.md): where transcripts and copies of work logs go, and the
-  // Microsoft 365 connection. Members see them (never the secret); owners and admins change them.
+  // Team settings (product/sources.md): where transcripts and copies of work logs go, the
+  // Microsoft 365 connection and who writes meeting notes. Members see them (never the secret);
+  // owners and admins change them (SettingsService, which AI apps use too).
   const teamSettings = (method: "GET" | "PUT") => async (req: Request, res: Response) => {
-    const uid = uidOf(res);
-    const team = method === "GET" ? await d.directory.membership(uid, String(req.params.slug)) : await d.directory.freshMembership(uid, String(req.params.slug));
-    if (!team || team.status !== "active") {
-      res.status(403).json({ error: "not_a_member" });
-      return;
-    }
-    if (method !== "GET" && team.role !== "owner" && team.role !== "admin") {
-      res.status(403).json({ error: "admins_only", message: "Only team owners and admins can change the team settings." });
-      return;
-    }
-    try {
-      const b = (req.body ?? {}) as Record<string, unknown>;
-      // Ambient's own Microsoft app is connected only through "Connect Microsoft 365", where an
-      // admin of that company approved it: never by naming a tenant here.
-      const m = b.microsoft as { kind?: unknown } | null | undefined;
-      if (method === "PUT" && m && typeof m === "object" && m.kind === "ambient") {
-        res.status(400).json({ error: "settings", message: "Use Connect Microsoft 365 to connect Ambient's Microsoft app." });
-        return;
-      }
-      const body = method === "PUT"
-        ? Object.fromEntries((["transcripts", "work", "microsoft"] as const).filter((k) => k in b).map((k) => [k, b[k]]))
-        : undefined;
-      const out = await d.teams.settings(team, uid, method, body);
-      // Disconnected (or switched to the company's own app): no more tokens for that tenant.
-      if (method === "PUT" && out.status === 200 && "microsoft" in b) {
-        await d.control.m(api.teams.setMicrosoftTenant, { slug: team.slug, tenantId: null });
-      }
-      res.status(out.status).json(out.json);
-    } catch (err) {
-      if (err instanceof TeamServerError) {
-        res.status(err.status).json({ error: "team_unavailable", message: "The team server didn't answer. Try again in a minute." });
-        return;
-      }
-      throw err;
-    }
+    const out = await settings.teamSettings(uidOf(res), String(req.params.slug), method, (req.body ?? {}) as Record<string, unknown>);
+    res.status(out.status).json(out.json);
   };
   // "Connect Microsoft 365": the address the app opens in a browser sheet, for an owner or admin.
   r.post("/v1/app/teams/:slug/microsoft/connect", auth, json, async (req, res) => {
-    if (!d.microsoftConnect) {
-      res.status(501).json({ error: "unavailable", message: "This server has no Microsoft app for Connect Microsoft 365. Use your company's own Entra app instead." });
-      return;
-    }
-    const uid = uidOf(res);
-    const team = await d.directory.freshMembership(uid, String(req.params.slug));
-    if (!team || team.status !== "active") {
-      res.status(403).json({ error: "not_a_member" });
-      return;
-    }
-    if (team.role !== "owner" && team.role !== "admin") {
-      res.status(403).json({ error: "admins_only", message: "Only team owners and admins can connect Microsoft 365." });
-      return;
-    }
-    if (!team.serverUrl) {
-      res.status(503).json({ error: "team_unavailable", message: "The team's server isn't ready yet." });
-      return;
-    }
-    const requester = (await d.directory.user(uid))?.name ?? "a team admin";
-    const purpose = req.body?.for === "work" ? "work" : "transcripts";
-    res.json({ url: d.microsoftConnect.start({ uid, team, requester, purpose }) });
+    send(res, await people.microsoftLink(uidOf(res), String(req.params.slug), req.body?.for === "work" ? "work" : "transcripts"));
   });
   r.get("/v1/app/teams/:slug/settings", auth, teamSettings("GET"));
   r.put("/v1/app/teams/:slug/settings", auth, json, teamSettings("PUT"));

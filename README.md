@@ -17,23 +17,23 @@
 
 Agents are only as good as their context. Every agent in a company should know what the other agents and the people did and decided, and a company wiki only works if something keeps it current. Ambient does both: it turns what happens at work into wiki pages (people, projects, topics, decisions), keeps them up to date with Claude, and serves them to any AI app over MCP.
 
-This repository is Ambient's server: the MCP gateway, the personal and team wikis, the Claude Code plugin and the runner for loops. The iPhone and Mac apps that record meetings are separate.
+This repository is Ambient's server: the MCP gateway, the personal and team wikis, the Claude Code plugin and the runner for bots. The iPhone and Mac apps that record meetings are separate.
 
 ## ✨ Features
 
-- **One MCP server for every AI app.** OAuth 2.1 with dynamic client registration for Claude, ChatGPT and other MCP clients; personal access tokens for the rest. Tools: `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items`, `transcript`, `save_note` and `log_work`.
+- **One MCP server for every AI app.** OAuth 2.1 with dynamic client registration for Claude, ChatGPT and other MCP clients; personal access tokens for the rest. Tools: `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items`, `transcript`, `save_note`, `log_work`, `suggest_correction` and `share_with_team`, plus tools for settings, teams and bots.
 - **Personal wikis, encrypted at rest.** Each user's pages are sealed with their own data key (AES-256-GCM) before they reach the database. The key that wraps those keys never leaves the gateway.
 - **Team wikis in git.** Each team's wiki is a git repository on the team's own server: plain markdown with front matter, one commit per change. Connect your own GitHub or GitLab repo and the wiki stays in step with it, both ways.
 - **Work sessions become notes.** The [Claude Code plugin](integrations/claude-code) sends finished sessions; the gateway cuts them down, strips secrets in the formats it knows, and Claude writes a short note. Folder rules route sessions to a team after a 30-minute hold.
 - **Wikis that keep themselves current.** Every night Claude folds the day's notes into the living pages (people, projects, topics), files decisions and writes an overview. It also checks for broken links, orphans and stale pages.
-- **Loops.** Prompts that Claude Code runs on a schedule on your own machines, with secrets, run history and live progress, managed from any AI app. (In the code and the MCP tools they're still called routines: `list_routines`, `create_routine`.)
+- **Bots.** Every loop is a bot: a prompt that Claude Code or Codex runs on a schedule on your own machines, by default in its own container with only the secrets you grant it, with run history, live progress and a thread where it reports and asks you when it needs a decision. Bots can have their own Slack app and use any service's MCP server you connect. Ambient (Amb), the master bot, answers from the brain in the app's chat and on iMessage, and looks after the bots. All of it is managed from any AI app. (In the code and the MCP tools they're still called routines: `list_routines`, `create_routine`.) See [docs/bots.md](docs/bots.md).
 - **Search that understands German and English**: SQLite FTS5 with umlaut folding and trigram matching.
 
 ## 📦 Deploy Ambient
 
 ### Ambient Cloud
 
-The fastest way: install the app, sign in with Apple or Microsoft, and connect your AI apps. No servers. Personal wikis are free; teams get a managed team server in Germany. See [ambientartifacts.si](https://ambientartifacts.si).
+The fastest way: install the app, sign in with Apple, Microsoft or Google, and connect your AI apps. Personal wikis are free and need no server; a team's brain runs on a Linux computer of the team's own, connected with one command (no domain or open port needed). See [ambientartifacts.si](https://ambientartifacts.si).
 
 ### Self-host Ambient
 
@@ -54,9 +54,9 @@ Then add `https://ambient.example.com/mcp` as a connector in Claude (Settings �
 | Personal wikis (encrypted at rest) and team wikis (git) | ✓ | ✓ |
 | Your own GitHub/GitLab repo as the wiki | ✓ | ✓ |
 | Work-session notes, nightly upkeep, overviews | ✓, included | ✓, with your Anthropic API key |
-| Loops | ✓ | ✓ |
+| Bots | ✓ | ✓ |
 | iPhone and Mac apps: recording, on-device transcription | ✓ | ✓, "Use your own server" at sign-in |
-| Sign-in | Apple, Microsoft; anyone can sign up | Apple; only people you add or allow |
+| Sign-in | Apple, Microsoft, Google; anyone can sign up | Apple; only people you add or allow |
 | Push notifications | ✓ | – |
 | Updates, backups, monitoring | We run them | You run them |
 
@@ -66,9 +66,11 @@ Then add `https://ambient.example.com/mcp` as a connector in Claude (Settings �
 |---|---|
 | Claude (web, desktop, mobile) | Settings → Connectors → Add custom connector → `https://<server>/mcp` |
 | Claude Code | The [plugin](integrations/claude-code) (also sends finished sessions), or `claude mcp add --transport http ambient https://<server>/mcp` |
-| ChatGPT | Developer mode → add an MCP connector with the same URL |
+| Codex | `codex mcp add ambient --url https://<server>/mcp`; Codex signs in on first use |
+| Cursor, VS Code (Copilot) | The install link from the Ambient app, then sign in |
+| ChatGPT | chatgpt.com/plugins → **+** → **Add custom MCP server** with the same URL |
 | Microsoft 365 Copilot | The team-only URL `https://<server>/t/<team>/mcp`; it never shows personal notes |
-| Codex and other clients without OAuth | A personal access token as `Authorization: Bearer` |
+| Other clients without OAuth | A personal access token as `Authorization: Bearer` |
 
 ## 🏗️ How it's built
 
@@ -85,7 +87,7 @@ Claude Code ───▶    └──signed 60 s tokens──▶ team server (gi
 | `control/` | Convex functions and schema: the control plane. Every call carries a service secret; clients never talk to Convex directly |
 | `wiki/` | The wiki store: SQLite FTS5 search, indexes, git |
 | `spec/` | Shared contracts: zod schemas, JSON Schema export for the Swift apps, fixture wikis |
-| `runner/` | `ambient-runner.mjs`: runs loops on a user's computer with systemd and `claude -p`. One file, no dependencies |
+| `runner/` | `ambient-runner.mjs`: runs bots on a user's or a team's computer with systemd and `claude -p` (or Codex), by default each in its own Podman container. One file, no dependencies |
 | `integrations/claude-code/` | The Claude Code plugin |
 | `ops/` | `docker/` for self-hosting; the rest is how we run Ambient Cloud on Hetzner ([runbook](ops/README.md)) |
 

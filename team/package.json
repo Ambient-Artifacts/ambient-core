@@ -12,12 +12,12 @@
     "consolidate": "tsx src/cli.ts consolidate"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.131.0",
+    "@anthropic-ai/sdk": "^0.133.0",
     "@brain/spec": "*",
     "@brain/wiki": "*",
     "express": "^5.2.1",
     "jose": "^6.2.12",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/express": "^5.0.6"

@@ -7,6 +7,8 @@ import { mutation, query } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
 
 const MAX_ATTEMPTS = 5;
+/** lastError of a session waiting for its person's computer (`later`): not stuck on our side. */
+const WAITING = "waiting for the person's computer";
 
 // ---- inbox ----
 
@@ -62,6 +64,33 @@ export const failed = mutation({
     if (!row) return;
     const attempts = row.attempts + 1;
     await ctx.db.patch(id, { attempts, lastError: error.slice(0, 300), leaseUntil: now + attempts * 2 * 60_000 });
+  },
+});
+
+/**
+ * Not now, and not a failure: the person's computer isn't connected, so the session waits (no
+ * attempt counted) and is looked at again after `waitMs`.
+ */
+export const later = mutation({
+  args: { ...secretArg, id: v.id("sessionInbox"), waitMs: v.number(), now: v.number() },
+  handler: async (ctx, { secret, id, waitMs, now }) => {
+    assertService(secret);
+    if (await ctx.db.get(id)) await ctx.db.patch(id, { leaseUntil: now + Math.max(60_000, waitMs), lastError: WAITING });
+  },
+});
+
+/** Sessions that ran out of attempts get them back (an operator's command, after the cause is fixed). */
+export const unstick = mutation({
+  args: { ...secretArg, now: v.number() },
+  handler: async (ctx, { secret, now }) => {
+    assertService(secret);
+    let n = 0;
+    for await (const row of ctx.db.query("sessionInbox")) {
+      if (row.attempts < MAX_ATTEMPTS) continue;
+      await ctx.db.patch(row._id, { attempts: 0, leaseUntil: now });
+      n++;
+    }
+    return n;
   },
 });
 
@@ -260,7 +289,7 @@ export const backlog = query({
       if (row.attempts >= MAX_ATTEMPTS) {
         failedForGood++;
         lastError = row.lastError ?? lastError;
-      } else if (row.receivedAt < now - 30 * 60_000) stuck++;
+      } else if (row.receivedAt < now - 30 * 60_000 && row.lastError !== WAITING) stuck++;
     }
     // Overdue: past the hold by 30 minutes, or refused by the team server three times or more.
     const pendingShares = await ctx.db

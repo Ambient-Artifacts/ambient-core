@@ -1,6 +1,7 @@
 // Destinations and team settings (product/sources.md): transcripts to raw/ in the repo by default
 // or to a OneDrive/SharePoint folder through Microsoft Graph, copies of work logs to a folder,
-// retries, and a repo kept by another tool (read-only), where only the files go out.
+// retries, a repo kept by another tool (read-only), where only the files go out, and meeting notes
+// written by the team's own pipeline, found again by the recording's id.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -57,8 +58,8 @@ const graphTokensFor = new Map<string, GraphTokens>();
 /** Each test server has its own pushed-token store, as on a real team server. */
 const graphForTeam = (teamId: string) => (conn: MicrosoftConnection): MicrosoftGraph => realGraphFor(conn, graphTokensFor.get(teamId)!, fakeFetch);
 
-async function token(teamId: string, purpose: string) {
-  return new SignJWT({ purpose })
+async function token(teamId: string, purpose: string, claims: Record<string, string> = {}) {
+  return new SignJWT({ purpose, ...claims })
     .setProtectedHeader({ alg: "ES256", kid: "k1", typ: "brain-team+jwt" })
     .setIssuer(ISSUER)
     .setAudience(`team:${teamId}`)
@@ -75,7 +76,7 @@ interface Server {
   settings: TeamSettingsStore;
   deliverer: Deliverer;
   teamId: string;
-  call: (method: string, path: string, purpose: string, body?: unknown) => Promise<{ status: number; text: string; json: Record<string, any> }>;
+  call: (method: string, path: string, purpose: string, body?: unknown, claims?: Record<string, string>) => Promise<{ status: number; text: string; json: Record<string, any> }>;
   health: () => Promise<Record<string, any>>;
   close: () => void;
 }
@@ -97,10 +98,10 @@ async function start(teamId: string, remote?: (dataDir: string) => TeamRemote, p
   const server = createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const call = async (method: string, path: string, purpose: string, body?: unknown) => {
+  const call = async (method: string, path: string, purpose: string, body?: unknown, claims?: Record<string, string>) => {
     const res = await fetch(`${base}${path}`, {
       method,
-      headers: { "content-type": "application/json", authorization: `Bearer ${await token(teamId, purpose)}` },
+      headers: { "content-type": "application/json", authorization: `Bearer ${await token(teamId, purpose, claims)}` },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
@@ -144,6 +145,22 @@ function session(teamId: string, id: string): TeamNoteV1 {
       body_md: "# Pricing page rewrite\n\nRewrote the pricing page.\n\n## Decisions\n- Monthly plans only\n\n## Related\n- [Anna](../people/anna.md)\n",
     },
     client: { app: "gateway", transcriber: "none", compiler: "session-summary" },
+  });
+}
+
+/** A team member's correction (MCP suggest_correction), as the gateway sends it. */
+function correction(teamId: string, id: string): TeamNoteV1 {
+  return note(teamId, id, {
+    kind: "correction",
+    duration_s: 0,
+    transcript: null,
+    meeting: undefined,
+    speakers: undefined,
+    entry_page: {
+      frontmatter: { title: "Correction: Acme kickoff", summary: "Acme starts in December, not November." },
+      body_md: "# Correction: Acme kickoff\n\n## What the wiki says\n> Acme starts in November.\n\n## What is true\nAcme starts in December.\n",
+    },
+    client: { app: "ai:claude", transcriber: "none", compiler: "none" },
   });
 }
 
@@ -335,6 +352,10 @@ describe("a repo kept by another tool (connected read-only)", () => {
     execFileSync("git", ["-c", "protocol.file.allow=always", "clone", "-q", bare, work], { env });
     mkdirSync(join(work, "clients"), { recursive: true });
     writeFileSync(join(work, "clients", "acme.md"), "---\ntitle: Acme\ntype: client\n---\n# Acme\n");
+    writeFileSync(join(work, "clients", "_index.md"), "# clients\n\nOne page per client: overview and history.\n\n## Pages\n\n| Page | Description |\n|---|---|\n| [acme.md](acme.md) | Acme |\n");
+    mkdirSync(join(work, "templates"), { recursive: true });
+    writeFileSync(join(work, "templates", "client.md"), "---\ntitle: <Client name>\ntype: client\n---\n# <Client name>\n");
+    writeFileSync(join(work, "README.md"), "# Acme wiki\n\nHow this repo works.\n");
     execFileSync("git", ["-C", work, "add", "-A"], { env });
     execFileSync("git", ["-C", work, "commit", "-qm", "theirs"], { env });
     execFileSync("git", ["-C", work, "-c", "protocol.file.allow=always", "push", "-q", "origin", "HEAD:main"], { env });
@@ -376,12 +397,148 @@ describe("a repo kept by another tool (connected read-only)", () => {
     expect(await ro.deliverer.outbox.all()).toEqual([]);
   });
 
+  it("leaves out what the team says isn't knowledge, and says what a folder holds in the team's words", async () => {
+    expect(ro.wiki.store.getByRef("templates/client")).toBeDefined();
+    expect(ro.wiki.store.getByRef("README")).toBeDefined();
+    const folder = async () => (await ro.call("POST", "/v1/query", "query", { op: "listing", folder: "clients" })).json.result;
+    expect((await folder()).about).toBe("One page per client: overview and history.");
+
+    const bad = await ro.call("PUT", "/v1/settings", "settings", { ignore: ["../outside"] });
+    expect(bad).toMatchObject({ status: 400, json: { error: "settings" } });
+    expect(ro.settings.get().ignore).toEqual([]);
+
+    const put = await ro.call("PUT", "/v1/settings", "settings", { ignore: ["./templates/", "README.md", "templates"] });
+    expect(put.status).toBe(200);
+    expect(put.json.settings.ignore).toEqual(["README.md", "templates"]);
+    expect(ro.wiki.store.getByRef("templates/client")).toBeUndefined();
+    expect(ro.wiki.store.getByRef("README")).toBeUndefined();
+    expect(ro.wiki.store.getByRef("clients/acme")).toBeDefined();
+    expect((await ro.call("GET", "/v1/settings", "settings")).json.settings.ignore).toEqual(["README.md", "templates"]);
+    expect(JSON.parse(readFileSync(join(ro.dataDir, "settings.json"), "utf8")).ignore).toEqual(["README.md", "templates"]);
+    // The repo is read-only: nothing was written to it.
+    expect(existsSync(join(ro.dataDir, "wiki", "templates", "client.md"))).toBe(true);
+
+    // A reload (the repo changed, the server restarted) keeps them out; putting nothing brings them back.
+    ro.wiki.reload();
+    expect(ro.wiki.store.getByRef("templates/client")).toBeUndefined();
+    expect((await ro.call("PUT", "/v1/settings", "settings", { ignore: [] })).json.settings.ignore).toEqual([]);
+    expect(ro.wiki.store.getByRef("templates/client")).toBeDefined();
+    expect((await folder()).about).toBe("One page per client: overview and history.");
+  });
+
   it("takes work sessions only when the team set a work log folder", async () => {
     expect((await ro.call("POST", "/v1/inbox", "inbox", session("t_ro", "01JDESTRO00000000000000003"))).status).toBe(409);
     await ro.call("PUT", "/v1/settings", "settings", { work: { kind: "drive", drive_id: "b!drive-0001", folder_id: "01FOLDER0002" } });
     const res = await ro.call("POST", "/v1/inbox", "inbox", session("t_ro", "01JDESTRO00000000000000003"));
     expect(res).toMatchObject({ status: 201, json: { path: "drive:2026-10/2026-10-12-pricing-page-rewrite-000003.md" } });
     expect((await ro.health()).consolidate?.pendingNotes ?? 0).toBe(0);
+  });
+
+  it("refuses a correction: it has no file for the drive folders, and the repo takes no pages", async () => {
+    const before = commits();
+    expect(await ro.call("POST", "/v1/inbox", "inbox", correction("t_ro", "01JDESTRO00000000000000004"))).toMatchObject({ status: 409, json: { error: "read_only" } });
+    expect(await ro.deliverer.outbox.all()).toEqual([]);
+    expect(commits()).toBe(before);
+  });
+});
+
+describe("who changed what", () => {
+  const lena = { recorded_by_slug: "people/lena-vogel" };
+  it("commits a note and its transcript with the person as author and in the message; Ambient stays the committer", async () => {
+    const s = await start("t_authors");
+    try {
+      expect((await s.call("POST", "/v1/inbox", "inbox", note("t_authors", "01JAUTHOR00000000000000001"), lena)).status).toBe(201);
+      const ingest = git(join(s.dataDir, "wiki"), "log", "-1", "--format=%an <%ae>|%cn|%s");
+      expect(ingest.trim()).toBe("Lena Vogel <lena-vogel@people.ambient.invalid>|Ambient Bot|ingest: Kickoff (000001) by Lena Vogel");
+      await s.deliverer.run();
+      const transcript = git(join(s.dataDir, "wiki"), "log", "-1", "--format=%an|%cn|%s", "--", "raw");
+      expect(transcript.trim()).toBe("Lena Vogel|Ambient Bot|transcript: Kickoff mit Acme (000001) by Lena Vogel");
+      expect(readFileSync(join(s.dataDir, "wiki", "log.md"), "utf8")).toContain("ingest | Kickoff (000001) by Lena Vogel");
+      // Without a name from the gateway (and for Ambient's own upkeep), the bot is the author.
+      await s.call("POST", "/v1/inbox", "inbox", note("t_authors", "01JAUTHOR00000000000000002", { recorded_by_name: undefined }));
+      expect(git(join(s.dataDir, "wiki"), "log", "-1", "--format=%an|%s").trim()).toBe("Ambient Bot|ingest: Kickoff (000002)");
+    } finally {
+      s.close();
+    }
+  });
+});
+
+describe("meeting notes written by the team's own pipeline", () => {
+  let s: Server;
+  beforeAll(async () => {
+    s = await start("t_own");
+  });
+  afterAll(() => s.close());
+
+  it("can only be chosen when the transcripts reach that pipeline", async () => {
+    expect((await s.call("GET", "/v1/settings", "settings")).json.settings.notes).toEqual({ by: "ambient", pcc: false });
+    const nowhere = await s.call("PUT", "/v1/settings", "settings", { transcripts: { kind: "none" }, notes: { by: "own" } });
+    expect(nowhere.status).toBe(400);
+    expect(nowhere.json.message).toMatch(/choose where transcripts go first/);
+    expect((await s.call("PUT", "/v1/settings", "settings", { notes: { by: "someone" } })).status).toBe(400);
+    // Apple's Private Cloud Compute, on its own: who writes them stays.
+    expect((await s.call("PUT", "/v1/settings", "settings", { notes: { pcc: true } })).json.settings.notes).toEqual({ by: "ambient", pcc: true });
+    expect((await s.call("PUT", "/v1/settings", "settings", { notes: { pcc: "yes" } })).status).toBe(400);
+    const ok = await s.call("PUT", "/v1/settings", "settings", { notes: { by: "own" } });
+    expect(ok.status).toBe(200);
+    expect(ok.json.settings).toMatchObject({ transcripts: { kind: "repo" }, notes: { by: "own", pcc: true } });
+    // And transcripts can't be switched off under it.
+    expect((await s.call("PUT", "/v1/settings", "settings", { transcripts: { kind: "none" } })).status).toBe(400);
+  });
+
+  it("takes a recording as its transcript only: no page from Ambient, the file committed by the person", async () => {
+    const res = await s.call("POST", "/v1/inbox", "inbox", note("t_own", "01JOWNNOTES000000000000001"), { recorded_by_slug: "people/lena-vogel" });
+    expect(res.status).toBe(201);
+    expect(res.json.path).toBe("raw/2026-10/2026-10-12-kickoff-mit-acme-000001.md");
+    expect(s.wiki.store.findById("01JOWNNOTES000000000000001")).toBeUndefined();
+    expect(existsSync(join(s.dataDir, "wiki", "notes"))).toBe(false);
+    await s.deliverer.run();
+    expect(existsSync(join(s.dataDir, "wiki", res.json.path))).toBe(true);
+    expect(git(join(s.dataDir, "wiki"), "log", "-1", "--format=%an|%s").trim()).toBe("Lena Vogel|transcript: Kickoff mit Acme (000001) by Lena Vogel");
+    // Sent twice (the phone retries): still one file, still no page.
+    expect((await s.call("POST", "/v1/inbox", "inbox", note("t_own", "01JOWNNOTES000000000000001"))).json.status).toBe("duplicate");
+  });
+
+  it("still files work sessions: the setting is about meetings", async () => {
+    expect((await s.call("POST", "/v1/inbox", "inbox", session("t_own", "01JOWNNOTES000000000000002"))).status).toBe(201);
+    expect(s.wiki.store.findById("01JOWNNOTES000000000000002")?.type).toBe("note");
+  });
+
+  it("still files corrections: they're for whoever keeps the page, not meeting notes", async () => {
+    const res = await s.call("POST", "/v1/inbox", "inbox", correction("t_own", "01JOWNNOTES000000000000003"), { recorded_by_slug: "people/lena-vogel" });
+    expect(res).toMatchObject({ status: 201, json: { path: "corrections/2026-10/2026-10-12-correction-acme-kickoff-000003.md" } });
+    expect(s.wiki.store.findById("01JOWNNOTES000000000000003")?.frontmatter.kind).toBe("correction");
+  });
+
+  it("finds the team's page for a recording: the one the pipeline wrote, by recording_id", async () => {
+    // The team's pipeline writes its meeting page into the repo, as another process.
+    const dir = join(s.dataDir, "wiki");
+    mkdirSync(join(dir, "meetings", "2026-10"), { recursive: true });
+    writeFileSync(join(dir, "meetings", "2026-10", "2026-10-12-acme-kickoff.md"),
+      '---\ntitle: "Kickoff with Acme"\ntype: meeting\nsummary: "Acme starts in November."\nrecording_id: "01JOWNNOTES000000000000001"\n---\n# Meeting: Kickoff with Acme\n\nAcme starts in November.\n');
+    git(dir, "add", "meetings");
+    git(dir, "-c", "user.name=Pipeline", "-c", "user.email=pipeline@example.com", "commit", "-q", "-m", "meetings: kickoff with Acme");
+    const found = await s.call("POST", "/v1/query", "query", { op: "recording", id: "01JOWNNOTES000000000000001" });
+    expect(found.status).toBe(200);
+    expect(found.json.result).toMatchObject({ ref: "meetings/2026-10/2026-10-12-acme-kickoff", title: "Kickoff with Acme" });
+    expect((await s.call("POST", "/v1/query", "query", { op: "recording", id: "01JNOSUCHRECORDING00000001" })).json.result).toBeNull();
+    expect((await s.call("POST", "/v1/query", "query", { op: "recording", id: "../people/x" })).status).toBe(400);
+    // The apps list it among the team's recordings: the entries name the recording.
+    const entries = (await s.call("POST", "/v1/query", "query", { op: "entries" })).json.result as { ref: string; recordingId?: string }[];
+    expect(entries.find((e) => e.ref === "meetings/2026-10/2026-10-12-acme-kickoff")?.recordingId).toBe("01JOWNNOTES000000000000001");
+    expect(entries.filter((e) => e.recordingId).map((e) => e.ref)).toEqual(["meetings/2026-10/2026-10-12-acme-kickoff"]);
+  });
+
+  it("records a note written with Apple's Private Cloud Compute as such", async () => {
+    await two.call("POST", "/v1/inbox", "inbox", note("t_acme", "01JPCCNOTE0000000000000001", { client: { app: "2.0 (1)", transcriber: "Parakeet", compiler: "fm-pcc" } }));
+    const page = two.wiki.store.findById("01JPCCNOTE0000000000000001");
+    expect(page?.frontmatter.compile).toMatchObject({ engine: "fm-pcc", status: "compiled", fallback: "none" });
+  });
+
+  it("and for a team whose notes Ambient writes, the note filed under the recording's id", async () => {
+    await two.call("POST", "/v1/inbox", "inbox", note("t_acme", "01JRECORDNOTE0000000000001"));
+    const found = await two.call("POST", "/v1/query", "query", { op: "recording", id: "01JRECORDNOTE0000000000001" });
+    expect(found.json.result).toMatchObject({ type: "note", title: "Kickoff" });
   });
 });
 
