@@ -300,6 +300,9 @@ export interface Routine {
   enabled: boolean;
   /** "Run now" was pressed; the computer starts it within a minute. */
   runRequested: boolean;
+  /** Since when (ms since 1970), or null. Apps stop showing a bot as working when a requested run
+   *  hasn't started for minutes (its computer offline, the runner stopped). */
+  runRequestedAt: number | null;
   source: string;
   lastRun: { status: string; startedAt: number; finishedAt: number | null } | null;
   /** A bot's settings and how it's doing; null for a plain loop. */
@@ -600,6 +603,7 @@ export class RoutineService {
       folder: r.folder,
       enabled: r.enabled,
       runRequested: r.runRequestedAt !== null,
+      runRequestedAt: r.runRequestedAt,
       source: r.source,
       lastRun: r.lastRun ? { status: r.lastRun.status, startedAt: r.lastRun.startedAt, finishedAt: r.lastRun.finishedAt ?? null } : null,
       bot: await this.botView(r, Boolean(host?.ready), latest?.get(r.id), host?.id),
