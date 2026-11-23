@@ -97,6 +97,16 @@ beforeAll(async () => {
           return json({ ok: true, upload_url: `${slackBase}/upload/F1`, file_id: "F1" });
         case "files.completeUploadExternal":
           return json({ ok: true, files: [{ id: "F1" }] });
+        case "conversations.replies":
+          return json({
+            ok: true,
+            messages: [
+              { user: "U_MAX", text: "the export is broken again", ts: "1700000000.5" },
+              { user: "U_LENA", text: "since this morning, see the screenshot", ts: "1700000000.6", files: [{ name: "error.png" }] },
+              { user: "U_BOT", text: "I looked at it yesterday", ts: "1700000000.65" },
+              { user: "U_LENA", text: "<@U_BOT> can you check again?", ts: "1700000000.7" },
+            ],
+          });
         case "chat.update":
           return json({ ok: true });
         case "reactions.add":
@@ -404,6 +414,19 @@ describe("a bot's own Slack app", () => {
     expect(uploads).toEqual([{ bytes: PNG.length, type: "image/png" }]);
     expect(calls.find((c) => c.method === "files.completeUploadExternal")!.args).toMatchObject({ channel_id: "D1", thread_ts: "1800000011.0001" });
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Done." });
+    await s.folders.slack!.idle();
+  });
+
+  it("reads the thread it's tagged in: what people said before, also to each other", async () => {
+    await sendEvent({ type: "event_callback", event_id: "EvT1", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> can you check again?", channel: "C7", ts: "1700000000.7", thread_ts: "1700000000.5" } });
+    await s.folders.slack!.idle();
+    const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { text: string }[];
+    const last = thread.at(-1)!.text;
+    expect(last).toContain("Lena wrote to you on Slack (in #anomalies): can you check again?");
+    expect(last).toContain("The thread so far (oldest first):\n- Max: the export is broken again\n- Lena: since this morning, see the screenshot [error.png]\n- you: I looked at it yesterday");
+    expect(last).not.toContain("- Lena: @you can you check again?");
+    const drain = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await hostCall(host, "POST", `/v1/host/runs/${drain.run.id}`, { status: "succeeded", summary: "Checked." });
     await s.folders.slack!.idle();
   });
 

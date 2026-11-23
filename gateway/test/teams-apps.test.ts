@@ -69,6 +69,17 @@ const microsoft: typeof fetch = async (input, init) => {
     if (method === "DELETE") return json(200, {});
     return json(404, { error: { code: "NotFound" } });
   }
+  if (url.hostname === "graph.microsoft.com" && auth === "Bearer bot-token" && url.pathname.includes("/messages/root-9")) {
+    // The bot's own app reads its channel's thread (resource-specific consent).
+    if (url.pathname.endsWith("/replies")) {
+      return json(200, { value: [
+        { id: "r2", createdDateTime: "2026-11-23T08:02:00Z", from: { user: { displayName: "Sonja Example" } }, body: { content: "<p>the total is 35, the list has 60</p>" } },
+        { id: "r1", createdDateTime: "2026-11-23T08:01:00Z", from: { application: { id: BOT_APP, displayName: "Chatty" } }, body: { content: "I counted 96 rows." } },
+        { id: "now", createdDateTime: "2026-11-23T08:03:00Z", from: { user: { displayName: "Lena Vogel" } }, body: { content: "<at>Chatty</at> which is right?" } },
+      ] });
+    }
+    return json(200, { id: "root-9", createdDateTime: "2026-11-23T08:00:00Z", from: { user: { displayName: "Klaus Example" } }, body: { content: "<p>Weihnachtsgeschenke: please check the list</p>" } });
+  }
   if (url.hostname === "graph.microsoft.com") {
     if (!auth.startsWith("Bearer graph-")) return json(401, { error: { code: "InvalidAuthenticationToken" } });
     const path = url.pathname.replace(/^\/v1\.0/, "");
@@ -276,7 +287,7 @@ describe("a bot's own Teams app", () => {
     const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[];
     const fromTeams = thread.filter((m) => m.author === "Teams");
     expect(fromTeams).toHaveLength(1);
-    expect(fromTeams[0]!.text).toContain("Lena Vogel wrote to you on Microsoft Teams (in a channel): what broke last night?");
+    expect(fromTeams[0]!.text).toContain("Lena Vogel wrote to you on Microsoft Teams (in Engineering › anomalies): what broke last night?");
     const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; prompt?: string; resume: { message: string } | null };
     expect(JSON.stringify(start)).toContain("You're in Microsoft Teams as Chatty");
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "**Two things** broke." });
@@ -388,7 +399,7 @@ describe("a bot's own Teams app", () => {
     const postId = "msg-1";
     await send(activity({ text: "why?", conversation: { id: `19:chan@thread.tacv2;messageid=${postId}`, conversationType: "channel", tenantId: TENANT }, channelData: { tenant: { id: TENANT }, channel: { id: "19:chan@thread.tacv2" } } }));
     const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[];
-    expect(thread.filter((m) => m.author === "Teams").at(-1)!.text).toContain("(in the thread under your post): why?");
+    expect(thread.filter((m) => m.author === "Teams").at(-1)!.text).toContain("(in the thread under your post in anomalies): why?");
     // Only the app: no channel.
     const none = await call("PUT", `/v1/app/routines/${bot}/teams/news`, { channel: null });
     expect(none.json).toMatchObject({ news: { channel: null } });
@@ -396,6 +407,18 @@ describe("a bot's own Teams app", () => {
     const mcp2 = await mcpClient(`${s.origin}/mcp`, pat);
     expect(text(await mcp2.callTool({ name: "teams_for_bot", arguments: { bot, news_channel: "19:chan@thread.tacv2" } }))).toContain("posts its news in anomalies");
     await mcp2.close();
+  });
+
+  it("reads the channel thread it's tagged in, by name, its own messages as \"you\"", async () => {
+    await send(activity({ id: "now", text: "<at>Chatty</at> which is right?", conversation: { id: "19:chan@thread.tacv2;messageid=root-9", conversationType: "channel", tenantId: TENANT }, entities: [{ type: "mention", mentioned: { id: `28:${BOT_APP}` } }], channelData: { tenant: { id: TENANT }, team: { id: "19:team@thread.tacv2", name: "Engineering", aadGroupId: "group-1" }, channel: { id: "19:chan@thread.tacv2", name: "anomalies" } } }));
+    const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[];
+    const last = thread.filter((m) => m.author === "Teams").at(-1)!.text;
+    expect(last).toContain("(in Engineering › anomalies): which is right?");
+    expect(last).toContain("The thread so far (oldest first):\n- Klaus Example: Weihnachtsgeschenke: please check the list\n- you: I counted 96 rows.\n- Sonja Example: the total is 35, the list has 60");
+    expect(last).not.toContain("which is right?\n\n- ");
+    const drain = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await hostCall(host, "POST", `/v1/host/runs/${drain.run.id}`, { status: "succeeded", summary: "" });
+    await s.folders.teams!.idle();
   });
 
   it("gets its face as a new version of its app, and only at Teams' size", async () => {

@@ -25,7 +25,7 @@ import type { MasterKey } from "../crypto.ts";
 import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
-import { download, leftLine, takeFiles, type OfferedFile } from "../channels/channel-files.ts";
+import { download, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile } from "../channels/channel-files.ts";
 import { AMB, forAmb, type AmbDoorDeps } from "../channels/amb-doors.ts";
 import type { AmbChannel, OutFile } from "../channels/reach.ts";
 
@@ -623,7 +623,8 @@ export class SlackApps {
     const offered = (e.files ?? []).filter((f) => f.mode !== "tombstone" && f.mode !== "external");
     if (!text && !offered.length) return;
     const who = await this.nameOf(app.botToken, e.user);
-    const where = dm ? "in a direct message" : underOwnPost ? "in the thread under your post" : "in a channel";
+    const channelName = dm ? undefined : app.channels?.find((c) => c.id === e.channel)?.name;
+    const where = dm ? "in a direct message" : underOwnPost ? `in the thread under your post${channelName ? ` in #${channelName}` : ""}` : channelName ? `in #${channelName}` : "in a channel";
     // Its files, kept in its thread like a file sent from the app: its run gets them on disk.
     const canRead = SlackApps.canFiles(app);
     const token = app.botToken;
@@ -638,7 +639,9 @@ export class SlackApps {
     );
     const files: FileRef[] = incoming.length && this.d.attachments ? await this.d.attachments.save(owner, { routineId }, incoming) : [];
     const said = text ? slackToPlain(text) : `sent ${files.length === 1 ? "a file" : "files"}`;
-    const body = `${who} wrote to you on Slack (${where}): ${said}${leftLine(left)}\n\n(Your answer goes back to that Slack thread on its own.)`;
+    // The thread it's in: what people said there before, also to each other.
+    const before = e.thread_ts && e.thread_ts !== e.ts ? await this.threadLines(app, e.channel, e.thread_ts, e.ts) : "";
+    const body = `${who} wrote to you on Slack (${where}): ${said}${leftLine(left)}${before}\n\n(Your answer goes back to that Slack thread on its own.)`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();
       // Old ones nobody answered go; the newest stay.
@@ -802,13 +805,29 @@ export class SlackApps {
         await reply("In a channel I answer from a team's brain, and this workspace is connected for one person. Write to me directly instead.");
         return;
       }
-      const answer = await amb.teamTurn(owner.teamId, account, `slack:${e.channel}:${thread}`, `${text}${leftLine(all)}`, files).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
+      const before = e.thread_ts && e.thread_ts !== e.ts ? await this.threadLines(app, e.channel, e.thread_ts, e.ts) : "";
+      const answer = await amb.teamTurn(owner.teamId, account, `slack:${e.channel}:${thread}`, `${text}${leftLine(all)}${before}`, files).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
       if (answer?.text) await this.post(token, e.channel, thread, answer.text);
       return;
     }
     // A direct message: their own Amb, and this chat is their Slack door to it.
     await this.put({ kind: "user", uid: account.uid }, AMB_LINK, "link", { ...refOf(owner, AMB), channel: e.channel, lastTs: e.ts, at: this.now() } satisfies AmbLink);
     await amb.inbox.sendQueued(account.uid, await amb.inbox.nameOf(account.uid).catch(() => account.name), `${text || `sent ${files.length === 1 ? "a file" : "files"}`}${leftLine(all)}`, "slack", files);
+  }
+
+  /** A thread's messages before `beforeTs`, by name (its own as "you"): conversations.replies. */
+  private async threadLines(app: AppRecord, channel: string, threadTs: string, beforeTs: string): Promise<string> {
+    if (!app.botToken) return "";
+    const out = await this.call<{ messages?: { user?: string; bot_id?: string; text?: string; ts?: string; files?: { name?: string }[] }[] }>("conversations.replies", app.botToken, { channel, ts: threadTs, limit: String(THREAD_MAX + 1) }, { form: true }).catch(() => null);
+    if (!out?.ok || !out.messages) return "";
+    const lines: { who: string; text: string }[] = [];
+    for (const m of out.messages) {
+      if (!m.ts || Number(m.ts) >= Number(beforeTs)) continue;
+      const who = m.user === app.botUserId ? "you" : m.user ? await this.nameOf(app.botToken, m.user) : "a bot";
+      const files = m.files?.length ? ` [${m.files.map((f) => f.name ?? "file").join(", ")}]` : "";
+      lines.push({ who, text: `${slackToPlain((m.text ?? "").replace(new RegExp(`<@${app.botUserId}>`, "g"), "@you"))}${files}` });
+    }
+    return threadSoFar(lines);
   }
 
   /** The Slack user's email (Amb's app may read it: users:read.email). */

@@ -125,3 +125,17 @@ export async function download(fetchImpl: typeof fetch, url: string, headers: Re
   if ((res.headers.get("content-type") ?? "").startsWith("text/html") && buf.subarray(0, 200).toString("utf8").toLowerCase().includes("<!doctype html")) throw new Error("the channel sent a web page instead of the file");
   return buf;
 }
+
+/** At most this many earlier messages of a thread go with a message, each cut to this length. */
+export const THREAD_MAX = 30;
+const THREAD_LINE_MAX = 600;
+
+/**
+ * A thread's earlier messages (oldest first), as the bot or Amb reads them with the new one: who
+ * said what, also what people said to each other before tagging it. Empty: nothing before.
+ */
+export function threadSoFar(lines: { who: string; text: string }[]): string {
+  const kept = lines.filter((l) => l.text.trim()).slice(-THREAD_MAX);
+  if (!kept.length) return "";
+  return `\n\nThe thread so far (oldest first):\n${kept.map((l) => `- ${l.who}: ${l.text.replace(/\s+/g, " ").trim().slice(0, THREAD_LINE_MAX)}`).join("\n")}`;
+}

@@ -6,7 +6,7 @@ import type { Team } from "../src/directory.ts";
 
 const team: Team = { id: "t1", slug: "acme", name: "Acme", status: "active", serverUrl: null };
 
-function setup(o: { connected: boolean; apiKey?: string }) {
+function setup(o: { connected: boolean; apiKey?: string; store?: import("../src/bots/team-amb.ts").ThreadStore; now?: () => number }) {
   const asked: { job: { mode?: string; instructions: string; text: string; history: { role: string; text: string }[] }; opts: { teamId?: string } }[] = [];
   const computers = {
     connected: () => o.connected,
@@ -27,6 +27,8 @@ function setup(o: { connected: boolean; apiKey?: string }) {
     },
     apiKey: o.apiKey,
     model: "m",
+    ...(o.store ? { store: o.store } : {}),
+    ...(o.now ? { now: o.now } : {}),
   });
   return { amb, asked };
 }
@@ -51,5 +53,20 @@ describe("a team's Amb in a channel", () => {
     expect((await amb.turn("t1", { uid: "u2", name: "Max" }, "teams:x", "hi")).text).toContain("not in this team");
     expect((await amb.turn("t1", { uid: "u1", name: "Lena" }, "teams:x", "hi")).text).toContain("No computer runs Acme's Ambient yet");
     expect(asked).toHaveLength(0);
+  });
+
+  it("keeps a thread's turns with the team like any chat, so a follow-up weeks later is understood", async () => {
+    const kept = new Map<string, { turns: { role: "user" | "assistant"; text: string }[]; at: number }>();
+    let now = 1_000_000;
+    const store = { get: async (t: string, c: string) => kept.get(`${t}|${c}`) ?? null, put: async (t: string, c: string, v: { turns: { role: "user" | "assistant"; text: string }[]; at: number }) => void kept.set(`${t}|${c}`, v) };
+    const { amb, asked } = setup({ connected: true, store, now: () => now });
+    await amb.turn("t1", { uid: "u1", name: "Lena" }, "teams:x", "who decides on pricing?");
+    expect(kept.get("t1|teams:x")!.turns).toHaveLength(2);
+    now += 5 * 24 * 3600_000;
+    await amb.turn("t1", { uid: "u1", name: "Lena" }, "teams:x", "and for discounts?");
+    expect(asked[1]!.job.history).toHaveLength(2);
+    now += 90 * 24 * 3600_000;
+    await amb.turn("t1", { uid: "u1", name: "Lena" }, "teams:x", "hello again");
+    expect(asked[2]!.job.history).toHaveLength(4);
   });
 });

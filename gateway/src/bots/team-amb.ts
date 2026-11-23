@@ -9,16 +9,23 @@
 //   no computer for the team ──▶ the server's key, where the operator pays (upkeep.ts), with the
 //                              team's tools in-process; else it says how to connect one
 //
-// A channel's last turns are kept in memory for a few hours (a restart forgets them), so a
-// follow-up in the thread is understood; they never reach anyone's own chat with Amb.
+// A thread's turns are kept like any chat's (sealed, with the team: `store`), with no end date, so
+// a follow-up in the thread is understood weeks later too; the last 20 go with each turn. They
+// never reach anyone's own chat with Amb.
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { toolLoop, type Turn } from "../ai/loop.ts";
 import type { Team } from "../directory.ts";
 import type { IncomingFile } from "./attachments.ts";
 import type { AmbientComputers } from "./computer.ts";
 
-const HISTORY_TURNS = 12;
-const HISTORY_MS = 6 * 3600_000;
+/** How many of a thread's last turns go with a turn (the thread itself is kept whole). */
+const HISTORY_TURNS = 20;
+
+/** Where a thread's turns are kept (the team's sealed records; tests: in memory). */
+export interface ThreadStore {
+  get(teamId: string, conversation: string): Promise<{ turns: Turn[]; at: number } | null>;
+  put(teamId: string, conversation: string, value: { turns: Turn[]; at: number }): Promise<void>;
+}
 
 /** What a team's Amb may use where it runs without a computer: reading the team's brain, suggesting corrections. */
 const TEAM_TOOLS = new Set(["index", "search", "fetch", "brief", "get_entity", "list_recent", "list_decisions", "list_action_items", "transcript", "suggest_correction"]);
@@ -47,8 +54,21 @@ export class TeamAmb {
       model: string;
       fetchImpl?: typeof fetch;
       now?: () => number;
+      store?: ThreadStore;
     },
   ) {}
+
+  private async load(teamId: string, conversation: string): Promise<Turn[]> {
+    const v = this.d.store ? await this.d.store.get(teamId, conversation).catch(() => null) : (this.history.get(`${teamId}:${conversation}`) ?? null);
+    return v?.turns.slice(-HISTORY_TURNS) ?? [];
+  }
+
+  private async save(teamId: string, conversation: string, turns: Turn[]): Promise<void> {
+    // Kept whole, like a chat; a very long thread keeps its last 500 turns.
+    const value = { turns: turns.slice(-500), at: this.now() };
+    if (this.d.store) await this.d.store.put(teamId, conversation, value).catch((err: Error) => console.warn(`[team-amb] a thread wasn't kept: ${err.message}`));
+    else this.history.set(`${teamId}:${conversation}`, value);
+  }
 
   private now(): number {
     return this.d.now?.() ?? Date.now();
@@ -60,9 +80,7 @@ export class TeamAmb {
     if (!team) return { text: `${asker.name}, you're not in this team in Ambient, so I can't answer from its brain for you.` };
     const where = conversation.startsWith("slack:") ? "Slack" : "Microsoft Teams";
     const instructions = teamAmbInstructions({ team: team.name, asker: asker.name, where });
-    const now = this.now();
-    for (const [k, v] of this.history) if (now - v.at > HISTORY_MS) this.history.delete(k);
-    const history = this.history.get(conversation)?.turns ?? [];
+    const history = await this.load(teamId, conversation);
     const asked = `${asker.name}: ${text}`;
     let answer: string;
     const host = (await this.d.computersOf(asker.uid).catch(() => [])).find((h) => h.teamId === teamId && this.d.computers.connected(h.id));
@@ -76,7 +94,7 @@ export class TeamAmb {
       return { text: `No computer runs ${team.name}'s Ambient yet. An owner or admin connects one on the team's page in the Ambient app (Computers); then I answer here.` };
     }
     answer = answer.trim() || "I don't have an answer to that.";
-    this.history.set(conversation, { turns: [...history, { role: "user" as const, text: asked }, { role: "assistant" as const, text: answer }].slice(-HISTORY_TURNS), at: now });
+    await this.save(teamId, conversation, [...history, { role: "user" as const, text: asked }, { role: "assistant" as const, text: answer }]);
     return { text: answer };
   }
 }

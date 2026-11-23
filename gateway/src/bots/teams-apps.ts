@@ -28,7 +28,7 @@ import { sealMessage } from "./messages.ts";
 import { splitText } from "./slack-apps.ts";
 import { pngSize, teamsPackage } from "./teams-package.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
-import { download, FILES_BYTES_MAX, leftLine, takeFiles, type OfferedFile } from "../channels/channel-files.ts";
+import { download, FILES_BYTES_MAX, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile } from "../channels/channel-files.ts";
 import { AMB, forAmb, type AmbDoorDeps } from "../channels/amb-doors.ts";
 import type { AmbChannel, OutFile, Question } from "../channels/reach.ts";
 
@@ -767,12 +767,15 @@ export class TeamsApps {
     const offered = this.offered(client, a, kind);
     if (!text && !offered.length) return;
     const who = a.from.name ?? "Someone";
-    const where = kind === "personal" ? "in a direct message" : underOwnPost ? "in the thread under your post" : kind === "groupChat" ? "in a group chat" : "in a channel";
+    const placeName = a.channelData?.channel?.name ?? app.channels?.find((c) => c.id === (a.channelData?.channel?.id ?? conv))?.name;
+    const placeLabel = placeName ? `${a.channelData?.team?.name ? `${a.channelData.team.name} › ` : ""}${placeName}` : "";
+    const where = kind === "personal" ? "in a direct message" : underOwnPost ? `in the thread under your post${placeLabel ? ` in ${placeLabel}` : ""}` : kind === "groupChat" ? "in a group chat" : placeLabel ? `in ${placeLabel}` : "in a channel";
     // Its files, kept in its thread like a file sent from the app: its run gets them on disk.
     const { files: incoming, left } = await takeFiles(offered);
     const files: FileRef[] = incoming.length && this.d.attachments ? await this.d.attachments.save(owner, { routineId }, incoming) : [];
     const said = text || `sent ${files.length === 1 ? "a file" : "files"}`;
-    const body = `${who} wrote to you on Microsoft Teams (${where}): ${said}${leftLine(left)}\n\n(Your answer goes back to that Teams thread on its own.)`;
+    const before = kind === "channel" && root ? await this.threadLines(app, a, root) : "";
+    const body = `${who} wrote to you on Microsoft Teams (${where}): ${said}${leftLine(left)}${before}\n\n(Your answer goes back to that Teams thread on its own.)`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();
       const kept = r.targets.filter((t) => now - t.at <= REPLY_FOR_MS && !(t.conv === target && !t.runId));
@@ -873,7 +876,8 @@ export class TeamsApps {
         await client.send(a.serviceUrl, target, { text: "In a channel I answer from a team's brain, and Teams is connected for one person here. Write to me directly instead.", textFormat: "markdown" });
         return;
       }
-      const answer = await amb.teamTurn(owner.teamId, account, `teams:${target}`, `${text}${leftLine(all)}`, files).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
+      const before = kind === "channel" && root ? await this.threadLines(app, a, root) : "";
+      const answer = await amb.teamTurn(owner.teamId, account, `teams:${target}`, `${text}${leftLine(all)}${before}`, files).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
       if (answer?.text) for (const part of splitText(answer.text)) await client.send(a.serviceUrl, target, { text: part, textFormat: "markdown" });
       return;
     }
@@ -944,6 +948,40 @@ export class TeamsApps {
       };
       await client.send(serviceUrl, conv, { attachments: [{ contentType: ADAPTIVE_CARD, content: card }], summary: f.ref.name });
     }
+  }
+
+  /** A Graph token as the bot's own app (its resource-specific consent lets it read its teams' channels). */
+  private graphTokens = new Map<string, { value: string; until: number }>();
+  private async botGraphToken(app: AppRecord): Promise<string | null> {
+    const cached = this.graphTokens.get(app.appId!);
+    if (cached && cached.until > this.now()) return cached.value;
+    const out = await this.tokenCall(app.tenantId, { grant_type: "client_credentials", client_id: app.appId!, client_secret: app.secret!, scope: "https://graph.microsoft.com/.default" }).catch(() => null);
+    if (!out?.access_token) return null;
+    this.graphTokens.set(app.appId!, { value: out.access_token, until: this.now() + Math.max(60, (out.expires_in ?? 3600) - 300) * 1000 });
+    return out.access_token;
+  }
+
+  /** A channel thread's messages before this one (its root and replies), by name: Graph, as the bot. */
+  private async threadLines(app: AppRecord, a: Activity, root: string): Promise<string> {
+    const teamId = a.channelData?.team?.aadGroupId;
+    const channelId = a.channelData?.channel?.id;
+    if (!teamId || !channelId || !app.secret) return "";
+    const token = await this.botGraphToken(app);
+    if (!token) return "";
+    type GraphMessage = { id?: string; from?: { user?: { displayName?: string }; application?: { id?: string; displayName?: string } }; body?: { content?: string }; attachments?: { name?: string }[]; createdDateTime?: string };
+    const get = async (path: string) => {
+      const res = await this.fetch(`${this.graph}${path}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+      return res?.ok ? ((await res.json().catch(() => null)) as GraphMessage & { value?: GraphMessage[] }) : null;
+    };
+    const base = `/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(root)}`;
+    const [first, replies] = await Promise.all([get(base), get(`${base}/replies?$top=${THREAD_MAX}`)]);
+    const all = [...(first ? [first] : []), ...[...(replies?.value ?? [])].sort((x, y) => String(x.createdDateTime).localeCompare(String(y.createdDateTime)))].filter((m) => m.id !== a.id);
+    return threadSoFar(
+      all.map((m) => ({
+        who: m.from?.application?.id === app.appId ? "you" : (m.from?.user?.displayName ?? m.from?.application?.displayName ?? "someone"),
+        text: `${teamsToPlain(m.body?.content ?? "")}${m.attachments?.some((x) => x.name) ? ` [${m.attachments.filter((x) => x.name).map((x) => x.name).join(", ")}]` : ""}`,
+      })),
+    );
   }
 
   /** The question waiting in this chat or thread, if any (24 hours at most). */

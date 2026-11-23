@@ -1183,7 +1183,12 @@ serves depends on where it's written to, decided in code, never by the model:
   only where a team connected the workspace; it runs on the team's own computer (the one for its
   bots) as a short session apart from anyone's chat, with the asker's token for that team alone
   (`resource: team`), so no personal note, bot or chat can reach a channel; what it may change, it
-  may as the asker. The thread's last 12 turns are kept in memory for 6 hours, for a follow-up.
+  may as the asker. A thread is kept like any chat (sealed with the team, kind `team-amb:thread`, no
+  end date), and its last 20 turns go with each turn, so a follow-up weeks later is understood.
+- **A thread is read as a thread.** Tagged inside a Slack or Teams thread, a bot or Amb gets what
+  was said there before, also what people said to each other (Slack: `conversations.replies`;
+  Teams: Graph with the bot's own app and its resource-specific consent), by name, its own
+  messages as "you", and where it is ("in #anomalies", "in Engineering › anomalies").
   Without a team computer, the server's key answers where the operator pays (read-only team tools),
   else it says how to connect one.
 

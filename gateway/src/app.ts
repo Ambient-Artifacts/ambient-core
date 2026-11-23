@@ -38,6 +38,7 @@ import { GitHubApps } from "./bots/github-apps.ts";
 import { SlackApps } from "./bots/slack-apps.ts";
 import { TeamsApps } from "./bots/teams-apps.ts";
 import { TeamAmb } from "./bots/team-amb.ts";
+import { sha256Hex } from "./crypto.ts";
 import type { AmbDoorDeps } from "./channels/amb-doors.ts";
 import { BotFolder } from "./bots/folder.ts";
 import { BotFiles, type Folders } from "./bots/files.ts";
@@ -437,6 +438,20 @@ export function createApp(deps: AppDeps) {
     apiKey: deps.ambient ? deps.ambient.apiKey : useServerKey() ? process.env.ANTHROPIC_API_KEY : undefined,
     model: config.ambientModel ?? "claude-sonnet-5-5",
     fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
+    // A channel thread's turns with the team's Amb: sealed with the team's key, in its records.
+    store: {
+      get: async (teamId, conversation) => {
+        const owner = { kind: "team" as const, teamId };
+        const key = sha256Hex(conversation).slice(0, 40);
+        const r = (await control.q(api.records.get, { ownerKind: "team", ownerId: teamId, kind: "team-amb:thread", key })) as { iv: string; ct: string; deleted: boolean } | null;
+        if (!r || r.deleted) return null;
+        return JSON.parse(await routineKeys.open(owner, "record:team-amb:thread", r.iv, r.ct)) as { turns: { role: "user" | "assistant"; text: string }[]; at: number };
+      },
+      put: async (teamId, conversation, value) => {
+        const sealed = await routineKeys.seal({ kind: "team", teamId }, "record:team-amb:thread", JSON.stringify(value));
+        await control.m(api.records.put, { ownerKind: "team", ownerId: teamId, kind: "team-amb:thread", key: sha256Hex(conversation).slice(0, 40), iv: sealed.iv, ct: sealed.ciphertext, size: sealed.ciphertext.length, byKind: "user", keep: 1, now: Date.now() });
+      },
+    },
   });
   const ambDoors: AmbDoorDeps = {
     inbox: ambient,
