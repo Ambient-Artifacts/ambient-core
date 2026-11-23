@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { BotInput, ModelChoice, RoutineSchedule, botLook, botSettings, modelRuntime, botState, describeSchedule, nextRun, onCalendar, storedModel, unseenNews, type BotColor, type BotSettings, type BotShape, type BotState, type BotWear } from "@brain/spec";
-import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix } from "../bots/messages.ts";
+import { MESSAGE_PURPOSE, claudeFix, openMessage, resultHash, sealMessage, type ClaudeFix, type MessageBody } from "../bots/messages.ts";
 import { api, type Control } from "../control.ts";
 import { sha256Hex } from "../crypto.ts";
 import type { Team } from "../directory.ts";
@@ -420,6 +420,12 @@ export class RoutineService {
   slackToken?: (owner: Owner, routineId: string) => Promise<string | null>;
   /** What a bot in Slack is told at the start of a run: its handle and where its news goes; null: not in Slack. */
   slackFor?: (owner: Owner, routineId: string) => Promise<{ handle: string; workspace: string | null; news: string | null } | null>;
+  /** What a bot in Teams is told at the start of a run: its name and where its news goes; null: not in Teams. */
+  teamsFor?: (owner: Owner, routineId: string) => Promise<{ handle: string; news: string | null } | null>;
+  /** A bot's conversation lanes (bots/bot-lanes.ts): a thread's session, resumed when it writes again. */
+  botLanes?: import("../bots/bot-lanes.ts").BotLanes;
+  /** Which lane a running bot's run is answering (its session is kept for that lane when it ends). */
+  private runLanes = new Map<string, { owner: Owner; routineId: string; lane: string; place?: { label: string; url?: string } }>();
   /** The MCP servers a bot was given (bots/mcp-connections.ts): the name its tools carry and its address at the gateway. */
   mcpFor?: (owner: Owner, routineId: string) => Promise<{ name: string; path: string }[]>;
   /** A bot said something at the end of a run (its result): Slack answers the thread that asked. */
@@ -466,11 +472,11 @@ export class RoutineService {
    * Where Ambient can run for a user, in order: their own computers, then their teams' servers
    * (Ambient's own machine for the team, one session per person there).
    */
-  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null }[]> {
+  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null; teamId: string | null }[]> {
     const teams = ((await this.d.teamsOf?.(uid).catch(() => [])) ?? []).filter((t) => t.status === "active");
     const out = (await this.d.control.q(api.routines.list, { uid: uid as never, teamIds: teams.map((t) => t.id) as never })) as unknown as { hosts: HostRow[] };
     const ready = out.hosts.filter((h) => h.ready);
-    return [...ready.filter((h) => !h.teamId), ...ready.filter((h) => h.teamId)].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null }));
+    return [...ready.filter((h) => !h.teamId), ...ready.filter((h) => h.teamId)].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null, teamId: h.teamId ? String(h.teamId) : null }));
   }
 
   get keys(): RoutineKeys {
@@ -1168,14 +1174,21 @@ export class RoutineService {
     }
     let resume: { sessionId: string | null; message: string; files?: FileRef[] } | null = null;
     if (r.bot && out.resume) {
-      const body = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch(() => ({ text: "", files: undefined }));
+      const body: MessageBody = await openMessage(this.d.keys, owner, out.resume.iv, out.resume.ct).catch((): MessageBody => ({ text: "" }));
       const who = out.resume.authorName ?? "Your owner";
+      // A thread's message resumes that thread's session (or starts fresh with handoffs); the main
+      // lane's (the app, a DM) resumes the bot's last conversation, as before lanes.
+      let sessionId = out.resume.sessionId;
+      if (body.lane && this.botLanes) {
+        sessionId = (await this.botLanes.get(owner, r.id, body.lane).catch(() => null))?.session ?? null;
+        this.runLanes.set(String(out.runId), { owner, routineId: r.id, lane: body.lane, ...(body.place ? { place: body.place } : {}) });
+      }
       resume = {
-        sessionId: out.resume.sessionId,
+        sessionId,
         message:
           out.resume.kind === "answer"
             ? `${who} answered your question: ${body.text}`
-            : (out.resume.authorName === "GitHub" || out.resume.authorName === "Slack") && !(out.resume as { authorId?: string | null }).authorId
+            : (out.resume.authorName === "GitHub" || out.resume.authorName === "Slack" || out.resume.authorName === "Teams") && !(out.resume as { authorId?: string | null }).authorId
               ? body.text
               : out.resume.authorName === "Wake-up" && !(out.resume as { authorId?: string | null }).authorId
                 ? `Wake-up: ${body.text}`
@@ -1193,7 +1206,8 @@ export class RoutineService {
       const github = this.githubFor ? await this.githubFor(owner, r.id).catch(() => null) : null;
       const wakes = this.wakesFor ? await this.wakesFor({ id: r.id, teamId: r.teamId, createdBy: r.createdBy, timezone: r.schedule.timezone }).catch(() => null) : null;
       const slack = this.slackFor ? await this.slackFor(owner, r.id).catch(() => null) : null;
-      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github, wakes, slack, scheduled: r.schedule.every !== "needed" });
+      const teams = this.teamsFor ? await this.teamsFor(owner, r.id).catch(() => null) : null;
+      const woken = await this.d.folder.wake({ owner, routineId: r.id, name: r.name, agents: prompt, computer: host.name, trigger: out.trigger, contained: r.bot.isolation === "container", previous, resume, thread, github, wakes, slack, teams, scheduled: r.schedule.every !== "needed" });
       prompt = woken.prompt;
       resume = woken.resume;
       workspace = woken.workspace;
@@ -1233,7 +1247,9 @@ export class RoutineService {
     const sealed = clipped ? await this.d.keys.seal(owner, "routine:run", clipped) : undefined;
     // A bot's thread gets the result too (Convex decides whether it's news).
     // Substance of its own (a draft, a report): shown even when the run also asked something.
-    const message = who.bot && clipped ? { ...(await sealMessage(this.d.keys, owner, { text: clipped })), hash: resultHash(clipped), keep: clipped.length > KEEP_RESULT_CHARS } : undefined;
+    // An answer to a thread belongs to that thread's card in the app.
+    const lane = this.runLanes.get(runId);
+    const message = who.bot && clipped ? { ...(await sealMessage(this.d.keys, owner, { text: clipped, ...(lane ? { lane: lane.lane, ...(lane.place ? { place: lane.place } : {}) } : {}) })), hash: resultHash(clipped), keep: clipped.length > KEEP_RESULT_CHARS } : undefined;
     const out = await this.d.control.m(api.routines.finishRun, {
       hostId: host.id as never,
       runId,
@@ -1248,6 +1264,11 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    // The session it answered a thread in is that thread's from now on.
+    if (lane) {
+      this.runLanes.delete(runId);
+      if (result.sessionId && this.botLanes) await this.botLanes.put(lane.owner, lane.routineId, lane.lane, { session: result.sessionId, seen: this.now() }).catch((err: Error) => console.warn(`[bots] a thread's session wasn't kept: ${err.message}`));
+    }
     // A bot's handoff and memory for its next run (docs/bots.md, "How a bot wakes up").
     if (who.bot && this.d.folder) {
       const w = who as unknown as { routineId: string; startedAt: number; name: string };

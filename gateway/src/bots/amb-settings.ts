@@ -58,7 +58,7 @@ export class AmbSettings {
 
   async set(uid: string, patch: Partial<AmbSettingsView>): Promise<AmbSettingsView> {
     if (patch.reach && patch.reach !== "app" && !(await this.d.canReach?.(uid, patch.reach).catch(() => false))) {
-      throw new AmbSettingsError("not_connected", patch.reach === "imessage" ? "iMessage isn't connected yet. Connect it first, then choose it." : `There's no "${patch.reach}" to reach you on.`);
+      throw new AmbSettingsError("not_connected", patch.reach === "imessage" ? "iMessage isn't connected yet. Connect it first, then choose it." : patch.reach === "slack" || patch.reach === "teams" ? `Write to Ambient once in ${patch.reach === "slack" ? "Slack" : "Microsoft Teams"} (a direct message), then choose it.` : `There's no "${patch.reach}" to reach you on.`);
     }
     const next = { ...(await this.get(uid)), ...patch };
     const content = JSON.stringify(next);

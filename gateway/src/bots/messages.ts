@@ -17,20 +17,24 @@ export interface MessageBody {
   files?: FileRef[];
   /** Where it was written or sent when that's not the app ("imessage"; channels/reach.ts). */
   via?: string;
+  /** The conversation lane it belongs to, when it isn't the main one (a Slack or Teams thread; bots/bot-lanes.ts). */
+  lane?: string;
+  /** That lane's place, as the app shows it: "#anomalies › Error rate tripled", and a link to the thread. */
+  place?: { label: string; url?: string };
 }
 
 export async function sealMessage(keys: RoutineKeys, owner: Owner, body: MessageBody, purpose = MESSAGE_PURPOSE) {
-  const sealed = await keys.seal(owner, purpose, JSON.stringify({ t: body.text, ...(body.choices?.length ? { c: body.choices } : {}), ...(body.details ? { d: body.details } : {}), ...(body.files?.length ? { f: body.files } : {}), ...(body.via && body.via !== "app" ? { v: body.via } : {}) }));
+  const sealed = await keys.seal(owner, purpose, JSON.stringify({ t: body.text, ...(body.choices?.length ? { c: body.choices } : {}), ...(body.details ? { d: body.details } : {}), ...(body.files?.length ? { f: body.files } : {}), ...(body.via && body.via !== "app" ? { v: body.via } : {}), ...(body.lane ? { l: body.lane } : {}), ...(body.place ? { p: body.place } : {}) }));
   return { iv: sealed.iv, ct: sealed.ciphertext };
 }
 
 export async function openMessage(keys: RoutineKeys, owner: Owner, iv: string, ct: string, purpose = MESSAGE_PURPOSE): Promise<MessageBody> {
   const raw = await keys.open(owner, purpose, iv, ct);
   try {
-    const j = JSON.parse(raw) as { t?: unknown; c?: unknown; d?: unknown; f?: unknown; v?: unknown };
+    const j = JSON.parse(raw) as { t?: unknown; c?: unknown; d?: unknown; f?: unknown; v?: unknown; l?: unknown; p?: { label?: unknown; url?: unknown } };
     if (typeof j.t === "string") {
       const files = fileRefs(j.f);
-      return { text: j.t, ...(Array.isArray(j.c) ? { choices: j.c.filter((x): x is string => typeof x === "string") } : {}), ...(typeof j.d === "string" && j.d ? { details: j.d } : {}), ...(files.length ? { files } : {}), ...(typeof j.v === "string" && j.v ? { via: j.v } : {}) };
+      return { text: j.t, ...(Array.isArray(j.c) ? { choices: j.c.filter((x): x is string => typeof x === "string") } : {}), ...(typeof j.d === "string" && j.d ? { details: j.d } : {}), ...(files.length ? { files } : {}), ...(typeof j.v === "string" && j.v ? { via: j.v } : {}), ...(typeof j.l === "string" && j.l ? { lane: j.l } : {}), ...(j.p && typeof j.p.label === "string" ? { place: { label: j.p.label, ...(typeof j.p.url === "string" && /^https:\/\//.test(j.p.url) ? { url: j.p.url } : {}) } } : {}) };
     }
   } catch {
     // Not ours: shown as it is.

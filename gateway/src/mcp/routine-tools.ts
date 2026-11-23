@@ -12,6 +12,7 @@ import type { Decision, DecisionService } from "../bots/decisions.ts";
 import type { Folders } from "../bots/files.ts";
 import { FolderError, type Author } from "../bots/folder.ts";
 import { SlackError } from "../bots/slack-apps.ts";
+import { TeamsError } from "../bots/teams-apps.ts";
 import { AmbSettingsError } from "../bots/amb-settings.ts";
 import { IMessageError } from "../channels/imessage.ts";
 import { McpConnectionError } from "../bots/mcp-connections.ts";
@@ -191,7 +192,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError || err instanceof SlackError || err instanceof IMessageError || err instanceof AmbSettingsError || err instanceof McpConnectionError) return error(err.message);
+      if (err instanceof RoutineError || err instanceof FolderError || err instanceof GitHubError || err instanceof SlackError || err instanceof TeamsError || err instanceof IMessageError || err instanceof AmbSettingsError || err instanceof McpConnectionError) return error(err.message);
       throw err;
     }
   };
@@ -582,6 +583,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
   if (hasBots && folders) registerFolderTools(server, principal, actor, folders, source, guard);
   if (hasBots && folders?.github) registerGitHubTools(server, principal, actor, routines, folders.github, guard, folders.githubApp);
   if (hasBots && folders?.slack) registerSlackTools(server, principal, actor, routines, folders.slack, guard);
+  if (hasBots && folders?.teams) registerTeamsTools(server, principal, actor, routines, folders.teams, guard);
   if (hasBots && folders) registerLearningTools(server, principal, actor, routines, folders, source, guard);
 
   if (!hasBots || !bots) return;
@@ -1110,6 +1112,8 @@ function registerSlackTools(
         refresh_token: z.string().max(500).optional().describe("The configuration token's refresh token (xoxe-…)."),
         ...teamArg,
         disconnect: z.boolean().optional(),
+        ambient: z.enum(["add", "remove", "status"]).optional().describe("Ambient itself in the workspace: add gives the Allow link for its own app (direct messages reach each person's own Ambient; in a channel it answers from the team's brain), remove takes it out."),
+        ambient_name: z.string().trim().min(1).max(35).optional().describe('Its name in Slack, when the user wants another than "Ambient" (e.g. "ACME Brain").'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -1117,6 +1121,12 @@ function registerSlackTools(
       guard(async () => {
         const team = typeof args.team === "string" ? args.team : null;
         const owner = routines.botOwner(actor, team);
+        if (args.ambient === "status") return result(JSON.stringify(await slack.ambStatus(owner)), await slack.ambStatus(owner));
+        if (args.ambient === "remove") return result((await slack.remove(owner, "amb")) ? "Ambient's Slack app is deleted." : "Ambient isn't in Slack.");
+        if (args.ambient === "add") {
+          const out = await slack.addAmb(owner, actor.uid, typeof args.ambient_name === "string" ? args.ambient_name : undefined);
+          return result(out.installed ? "Ambient is in Slack already. Message it directly, or invite it to a channel and mention it." : `[Add Ambient to Slack](${out.url}): tap Allow. Then message it directly, or invite it to a channel and mention it.`, out);
+        }
         if (args.disconnect === true) {
           await slack.disconnect(owner);
           return result("Slack is disconnected. Bots already in Slack stay there; new ones need it connected again.");
@@ -1167,6 +1177,91 @@ function registerSlackTools(
           return result(`${f.name} is in Slack already. Mention @${f.name} in a channel it's invited to, or message it directly.${where}`, { ...out, news: st.news });
         }
         return result(`[Add ${f.name} to Slack](${out.url}): tap Allow. Then invite it to a channel with /invite @${f.name}.`, out);
+      }),
+  );
+}
+
+// ---- Microsoft Teams: a bot's own Teams app (docs/bots.md, "Microsoft Teams") ----
+
+function registerTeamsTools(
+  server: McpServer,
+  principal: Principal,
+  actor: Actor,
+  routines: RoutineService,
+  teams: import("../bots/teams-apps.ts").TeamsApps,
+  guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>,
+) {
+  const teamArg: Record<string, z.ZodTypeAny> = principal.teams.length ? { team: z.string().max(80).optional().describe("A team's slug, for the team's bots; leave out for the user's own.") } : {};
+
+  server.registerTool(
+    "connect_teams",
+    {
+      title: "Connect Microsoft Teams for bots",
+      description:
+        "Connect the company's Microsoft 365 once, so bots can get their own Teams apps (teams_for_bot). Returns a Microsoft sign-in link for an admin of the company (Global admin, or Application admin + Teams admin, who can also create resources in an Azure subscription): give it as a Markdown link, [Connect Microsoft Teams](<url>); it works for 15 minutes. Each bot then gets an app registration and a free Azure Bot in the company's own tenant and subscription (resource group ambient-bots). status: true says whether it's connected; subscription switches the Azure subscription for new bots; disconnect: true forgets it.",
+      inputSchema: {
+        ...teamArg,
+        status: z.boolean().optional(),
+        subscription: z.string().max(64).optional().describe("An Azure subscription id from `subscriptions`, for new bots."),
+        disconnect: z.boolean().optional(),
+        ambient: z.enum(["add", "remove", "status"]).optional().describe("Ambient itself in the company's Teams: add makes its own Teams app (direct chats reach each person's own Ambient; in a channel it answers from the team's brain) and gives the link to open it; remove takes it out."),
+        ambient_name: z.string().trim().min(1).max(30).optional().describe('Its name in Teams, when the user wants another than "Ambient" (e.g. "ACME Brain").'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async (args: Record<string, unknown>) =>
+      guard(async () => {
+        const team = typeof args.team === "string" ? args.team : null;
+        const owner = routines.botOwner(actor, team);
+        if (args.ambient === "status") return result(JSON.stringify(await teams.ambStatus(owner)), await teams.ambStatus(owner));
+        if (args.ambient === "remove") return result((await teams.remove(owner, "amb")) ? "Ambient is out of Teams: its app, Azure Bot and app registration are deleted." : "Ambient isn't in Teams.");
+        if (args.ambient === "add") {
+          const out = await teams.addAmb(owner, actor.uid, typeof args.ambient_name === "string" ? args.ambient_name : undefined);
+          return result(`[Open Ambient in Teams](${out.url}): tap Add. Then chat with it directly, or add it to a team and mention it in a channel.`, out);
+        }
+        if (args.disconnect === true) {
+          await teams.disconnect(owner);
+          return result("Microsoft Teams is disconnected. Bots already in Teams stay there; new ones need it connected again.");
+        }
+        if (typeof args.subscription === "string") {
+          await teams.setSubscription(owner, args.subscription);
+          const c = await teams.connection(owner);
+          return result(`New bots go into the Azure subscription ${c.subscription?.name ?? args.subscription}.`, c);
+        }
+        const c = await teams.connection(owner);
+        if (c.connected && args.status !== false) return result(`Microsoft Teams is connected (by ${c.admin}, Azure subscription ${c.subscription?.name ?? "none"}). Put a bot in Teams with teams_for_bot.`, c);
+        const { url } = teams.connectUrl(owner, actor.uid);
+        return result(`[Connect Microsoft Teams](${url}): an admin of the company signs in with Microsoft and accepts once for the organisation.`, { connected: false, url });
+      }),
+  );
+
+  server.registerTool(
+    "teams_for_bot",
+    {
+      title: "Put a bot in Microsoft Teams",
+      description:
+        "Give a bot its own Microsoft Teams app, so in Teams it's its own name and face: messaged directly or mentioned in a channel, it answers in the thread, and it posts news of its own (an alert, a result) in one channel its owner chooses (news_channel; by default the first channel it was mentioned in). Ambient makes it in the company's tenant and puts it in the company's Teams app catalog; give the user the returned link as a Markdown link, [Open <bot> in Teams](<url>): they tap Add. To use it in a channel, they add it to the team (Apps → the bot → Add to a team) and mention it. It takes instructions only from the person who added it. Needs Teams connected first (connect_teams). remove: true deletes its Teams app, Azure Bot and app registration. Only when the user asked.",
+      inputSchema: {
+        bot: z.string().max(64).describe("The bot (its id)."),
+        remove: z.boolean().optional(),
+        news_channel: z.string().max(200).optional().describe('Where the bot posts news of its own: the id of a channel it was mentioned in (see `news.channels`), or "none" for only the Ambient app.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ bot, remove, news_channel }) =>
+      guard(async () => {
+        const f = await routines.folderOf(actor, bot, true);
+        if (remove) {
+          const gone = await teams.remove(f.owner, f.routineId);
+          return result(gone ? `${f.name} is out of Teams: its app, Azure Bot and app registration are deleted.` : `${f.name} isn't in Teams.`);
+        }
+        if (news_channel !== undefined) {
+          const news = await teams.setNews(f.owner, f.routineId, news_channel === "none" ? null : news_channel);
+          return result(news.channel ? `${f.name} posts its news in ${news.channel.name ?? news.channel.id}.` : `${f.name}'s news stays in the Ambient app.`, { news });
+        }
+        const out = await teams.add(f.owner, { id: f.routineId, name: f.name }, actor.uid);
+        if (out.installed) return result(`${f.name} is in Teams already ([open it](${out.url})). Message it directly, or add it to a team and mention it in a channel. It listens to ${out.installer}.`, out);
+        return result(`[Open ${f.name} in Teams](${out.url}): tap Add. It listens to ${out.installer}.`, out);
       }),
   );
 }
@@ -1404,14 +1499,14 @@ function registerLearningTools(
       {
         title: "Ambient's settings",
         description:
-          'Two things about how Ambient reaches the user. notify: whether it tells them when one of their bots needs them ("important": a failed run, a decision waiting long, an approval; "never"). reach: where it writes first when it does ("app": a push; "imessage": a text, once they connected iMessage with connect_imessage). An answer always goes back where they asked, whatever reach is. Change either only when they ask.',
-        inputSchema: { notify: z.enum(["important", "never"]).optional(), reach: z.enum(["app", "imessage"]).optional() },
+          'Two things about how Ambient reaches the user. notify: whether it tells them when one of their bots needs them ("important": a failed run, a decision waiting long, an approval; "never"). reach: where it writes first when it does ("app": a push; "imessage": a text, once they connected iMessage with connect_imessage; "slack" or "teams": a direct message from Ambient there, once they wrote to it there once). An answer always goes back where they asked, whatever reach is. Change either only when they ask.',
+        inputSchema: { notify: z.enum(["important", "never"]).optional(), reach: z.enum(["app", "imessage", "slack", "teams"]).optional() },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
       async ({ notify, reach }) =>
         guard(async () => {
           const v = notify || reach ? await settings.set(actor.uid, { ...(notify ? { notify } : {}), ...(reach ? { reach } : {}) }) : await settings.get(actor.uid);
-          const where = v.reach === "imessage" ? "It writes to them first on iMessage." : "It writes to them first in the app (a push).";
+          const where = v.reach === "imessage" ? "It writes to them first on iMessage." : v.reach === "slack" ? "It writes to them first in Slack." : v.reach === "teams" ? "It writes to them first in Microsoft Teams." : "It writes to them first in the app (a push).";
           return result(`${v.notify === "never" ? "Ambient doesn't tell them about their bots on its own." : "Ambient tells them when a bot needs them (failed runs, decisions waiting, approvals)."} ${where}`, { settings: v });
         }),
     );

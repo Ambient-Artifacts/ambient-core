@@ -117,6 +117,8 @@ export interface Folders {
   githubApp?: import("./github-apps.ts").GitHubApps;
   /** Bots' own Slack apps (docs/bots.md, "Slack"). */
   slack?: import("./slack-apps.ts").SlackApps;
+  /** Bots' own Microsoft Teams apps (docs/bots.md, "Microsoft Teams"). */
+  teams?: import("./teams-apps.ts").TeamsApps;
   /** How bots learn: signals, scorecards, lessons (docs/bots.md, "How bots learn"). */
   learning?: import("./learning.ts").BotLearning;
   /** Amb's settings per person (docs/bots.md, "Amb's settings"). */

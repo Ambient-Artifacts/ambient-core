@@ -24,6 +24,7 @@ export const BOT_TOOLS = new Set([
   "suggest_correction",
   "log_work",
   "post_to_slack",
+  "post_to_teams",
 ]);
 
 /** A bot run's principal from its run token; null when the header holds another kind of token. */

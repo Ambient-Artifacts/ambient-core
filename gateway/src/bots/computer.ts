@@ -67,6 +67,13 @@ export interface ComputerJob {
   attachments?: { name: string; type: string; data: string }[];
   /** The person's token for Ambient's MCP (the same until it's renewed). */
   token: string;
+  /**
+   * The lane (docs/bots.md, "Conversations and sessions"): a shared thread's id; none for the
+   * person's main lane. The runner keeps one session per lane, in a folder of its own.
+   */
+  lane?: string;
+  /** The lane's session as the gateway last heard of it (from another computer, maybe): resumed when it's there. */
+  session?: string;
 }
 
 interface Waiter {
@@ -78,6 +85,10 @@ interface Waiter {
 const CONNECTED_MS = 60_000;
 const TOKEN_TTL_MS = 24 * 3600_000;
 const TOKEN_RENEW_MS = 3600_000;
+/** In a token's key: it's for one team only. */
+const TEAM_KEY = "#team:";
+/** After a turn of a lane, its computer may back up and fetch the lane's session this long. */
+const LANE_GRANT_MS = 2 * 3600_000;
 const REPLY_TIMEOUT_MS = 15 * 60_000;
 /** How long one of upkeep's answers may take on the computer (the runner stops Claude Code at 4 min). */
 const COMPLETE_TIMEOUT_MS = 5 * 60_000;
@@ -97,6 +108,10 @@ export class AmbientComputers {
   private tokens = new Map<string, { token: string; expiresAt: number }>();
   /** Files that came with a reply, until `askWithFiles` takes them. */
   private replyFiles = new Map<string, OutboxFile[]>();
+  /** The session a reply came from, until `askWithFiles` takes it. */
+  private replySessions = new Map<string, string>();
+  /** Which lanes a computer was given turns of lately, and whose they are: its session's backup is theirs. */
+  private laneOwners = new Map<string, { owner: { kind: "user"; uid: string } | { kind: "team"; teamId: string }; until: number }>();
   private relays = new Map<string, { hostId: string; resolve: (r: RelayResponse) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
 
   constructor(
@@ -117,12 +132,13 @@ export class AmbientComputers {
   }
 
   /** The person's token for Ambient's tools on that computer, renewed a day at a time. */
-  private async token(hostId: string, uid: string, computer: string): Promise<string> {
-    const key = `${hostId}:${uid}`;
+  /** With `teamId`: a token for that team alone (a team's Amb in a channel: nothing personal reaches it). */
+  private async token(hostId: string, uid: string, computer: string, teamId?: string): Promise<string> {
+    const key = teamId ? `${hostId}:${uid}${TEAM_KEY}${teamId}` : `${hostId}:${uid}`;
     const t = this.tokens.get(key);
     if (t && t.expiresAt - this.now() > TOKEN_RENEW_MS) return t.token;
     const expiresAt = this.now() + TOKEN_TTL_MS;
-    const made = await this.d.pats.create({ uid, scopes: this.d.scopes, resource: { kind: "personal" }, label: `Ambient on ${computer}`, expiresAt });
+    const made = await this.d.pats.create({ uid, scopes: this.d.scopes, resource: teamId ? { kind: "team", teamId } : { kind: "personal" }, label: teamId ? `Ambient for a team on ${computer}` : `Ambient on ${computer}`, expiresAt });
     this.tokens.set(key, { token: made.token, expiresAt });
     return made.token;
   }
@@ -130,7 +146,8 @@ export class AmbientComputers {
   /** Whose token this is, when it's one handed to Amb's session on a computer and still good (the relay's check). */
   uidOfToken(token: string): string | null {
     for (const [key, t] of this.tokens) {
-      if (t.token === token && t.expiresAt > this.now()) return key.slice(key.indexOf(":") + 1);
+      // A team's token reaches no one's own MCP connections.
+      if (t.token === token && t.expiresAt > this.now() && !key.includes(TEAM_KEY)) return key.slice(key.indexOf(":") + 1);
     }
     return null;
   }
@@ -141,8 +158,9 @@ export class AmbientComputers {
   }
 
   /** As `ask`, with the files Ambient made for the person there (its outbox), if any. */
-  async askWithFiles(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token" | "uid">): Promise<{ text: string; files: OutboxFile[] }> {
-    const full: ComputerJob = { ...job, id: randomUUID(), uid: host.uid, token: await this.token(host.id, host.uid, host.name) };
+  async askWithFiles(host: { id: string; uid: string; name: string }, job: Omit<ComputerJob, "id" | "token" | "uid">, opts: { teamId?: string } = {}): Promise<{ text: string; files: OutboxFile[]; session?: string }> {
+    const full: ComputerJob = { ...job, id: randomUUID(), uid: host.uid, token: await this.token(host.id, host.uid, host.name, opts.teamId) };
+    if (job.mode !== "internal") this.laneOwners.set(`${host.id}:${job.lane || host.uid}`, { owner: opts.teamId ? { kind: "team", teamId: opts.teamId } : { kind: "user", uid: host.uid }, until: this.now() + LANE_GRANT_MS });
     const reply = new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(full.id);
@@ -155,7 +173,9 @@ export class AmbientComputers {
     const text = await reply;
     const files = this.replyFiles.get(full.id) ?? [];
     this.replyFiles.delete(full.id);
-    return { text, files };
+    const session = this.replySessions.get(full.id);
+    this.replySessions.delete(full.id);
+    return { text, files, ...(session ? { session } : {}) };
   }
 
   /** To the computer's waiting long poll, or first in its queue. */
@@ -316,11 +336,18 @@ export class AmbientComputers {
     });
   }
 
+  /** Whose lane this is, if the computer was given a turn of it lately (it may back up or fetch its session). */
+  laneOwner(hostId: string, lane: string): { kind: "user"; uid: string } | { kind: "team"; teamId: string } | null {
+    const g = this.laneOwners.get(`${hostId}:${lane}`);
+    return g && g.until > this.now() ? g.owner : null;
+  }
+
   /** The computer's reply to a message it took, with the files Ambient put in its outbox. */
-  reply(hostId: string, jobId: string, text: string, files: OutboxFile[] = []): boolean {
+  reply(hostId: string, jobId: string, text: string, files: OutboxFile[] = [], session?: string): boolean {
     const p = this.pending.get(jobId);
     if (!p || p.hostId !== hostId) return false;
     if (files.length) this.replyFiles.set(jobId, files);
+    if (session) this.replySessions.set(jobId, session);
     this.pending.delete(jobId);
     clearTimeout(p.timer);
     p.resolve(text);

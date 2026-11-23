@@ -3,7 +3,7 @@
 // runner's `ambient` service with a stand-in claude that keeps one session open.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -333,5 +333,46 @@ done
     expect(isolatedArgs).not.toContain("--resume");
     expect(isolatedArgs).not.toContain("--setting-sources");
     expect(out).toContain("kept in another settings folder");
+
+    // Sessions move with their lane (product/conversations.md): after an answer the session's file
+    // is backed up, sealed; a computer without it (wiped here) gets it back and resumes it.
+    const claudeRoot = join(dir, "state", "claude");
+    const user = readdirSync(claudeRoot)[0]!;
+    const projects = join(claudeRoot, user, "projects", "some-folder");
+    mkdirSync(projects, { recursive: true });
+    writeFileSync(join(projects, "amb-1.jsonl"), '{"type":"user","text":"earlier"}\n');
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Fifth" });
+    await settled();
+    await new Promise((r) => setTimeout(r, 300));
+    const rows = await s.t.run(async (ctx) => ctx.db.query("sessionBackups").collect());
+    expect(rows, out).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ownerKind: "user", ownerId: lena.user.uid, lane: lena.user.uid, session: "amb-1" });
+    // The computer is wiped: no session file, no state.
+    p.kill();
+    await new Promise((r) => setTimeout(r, 200));
+    rmSync(join(claudeRoot, user, "projects"), { recursive: true, force: true });
+    rmSync(join(dir, "state", "state.json"), { force: true });
+    p = spawn(process.execPath, [RUNNER, "ambient"], {
+      env: {
+        AMBIENT_CLAUDE_ENV: claudeEnv, AMBIENT_CONFIG_DIR: "/nonexistent/ambient-runner",
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        AMBIENT_SYSTEM_PATH: `${bin}:/usr/bin:/bin`,
+        HOME: dir,
+        AMBIENT_SERVER: s.origin,
+        AMBIENT_HOST_TOKEN: host,
+        AMBIENT_CLAUDE: join(bin, "claude"),
+        AMBIENT_STATE_DIR: join(dir, "state"),
+        AMBIENT_AMBIENT_HOME: dir,
+      },
+    });
+    p.stdout?.on("data", (d) => (out += d));
+    p.stderr?.on("data", (d) => (out += d));
+    await new Promise((r) => setTimeout(r, 300));
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "Sixth" });
+    await settled();
+    expect(out).toContain("Brought back the session");
+    const restored = join(claudeRoot, user, "projects", join(dir, "ambient", lena.user.uid).replace(/[^A-Za-z0-9]/g, "-"), "amb-1.jsonl");
+    expect(readFileSync(restored, "utf8")).toBe('{"type":"user","text":"earlier"}\n');
+    expect(readFileSync(join(dir, "ambient", lena.user.uid, "args.txt"), "utf8")).toContain("--resume amb-1");
   }, 30_000);
 });

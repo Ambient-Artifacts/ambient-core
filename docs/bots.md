@@ -1047,8 +1047,10 @@ the app; the person taps Allow once (`gateway/src/bots/slack-apps.ts`).
   `{ "workspace": bool, "app": { "appId", "installed", "botUserId", "teamName" } | null }`.
 - **Its face.** `PUT /v1/app/routines/:id/slack/icon` with a PNG (512 to 2000 px square;
   `apps.icon.set`). The app renders the bot's face and sends it.
-- **Scopes:** `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`,
-  `im:history`, `im:read`, `im:write`, `reactions:write`, `users:read`. **Events:**
+- **Scopes:** `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`,
+  `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`, `reactions:write`,
+  `users:read`, `files:read`, `files:write` (an app from before files gets them with one more Allow:
+  `POST /v1/app/routines/:id/slack/allow`; until then `news.files` is false). **Events:**
   `app_mention`, `message.im`.
 - **What Slack sends.** The hook in the event URL is signed by Ambient and names the bot and its
   owner, so an event finds its app without a table; each event is then checked with that app's
@@ -1083,6 +1085,145 @@ the app; the person taps Allow once (`gateway/src/bots/slack-apps.ts`).
 - **Not yet:** Slack's partners can install an app without the Allow tap (`managed_apps:install`),
   but that scope isn't open to developers. Team members other than the installer, and a shared
   "Ambient" app for bots without their own, come later.
+
+## Microsoft Teams
+
+Each bot can have its own Microsoft Teams app, so in Teams it's its own name with its own face: a
+direct message, or an @mention in a channel, reaches it, and it answers in that thread. The same
+shape as Slack, with one difference: Microsoft stopped new multi-tenant bots on 2025-07-31, so a
+bot can't be Ambient's. Each one is made in the company's own Microsoft tenant: a single-tenant app
+registration and a free Azure Bot (F0) in the company's Azure subscription
+(`gateway/src/bots/teams-apps.ts`, the package in `teams-package.ts`).
+
+- **The company, once.** An admin opens Ambient's Microsoft sign-in:
+  `POST /v1/app/teams/connect` → `{ "url" }` (`?team=<slug>` for a team's bots). Ambient's setup
+  app (`BRAIN_TEAMS_APPS_CLIENT_ID`, a multi-tenant Entra app of Ambient's own) asks for the
+  delegated `Application.ReadWrite.All`, `AppCatalog.ReadWrite.All`, `User.ReadBasic.All` and
+  Azure's `user_impersonation`, which the admin accepts for the organisation. Back at
+  `/v1/teams/connected`, Ambient keeps the tenant and the admin's refresh token (sealed), picks the
+  first Azure subscription that's on, turns on `Microsoft.BotService` there and makes the resource
+  group `ambient-bots` (West Europe). The admin needs: Global admin, or Application admin + Teams
+  admin, and Contributor on a subscription. `GET /v1/app/teams` →
+  `{ "connected", "tenantId", "admin", "subscription", "subscriptions" }`; `PUT` `{ "subscriptionId" }`
+  for new bots; `DELETE` forgets it. Every token call keeps the new refresh token Microsoft hands
+  back; one call per owner at a time.
+- **A bot's app, one call.** `POST /v1/app/routines/:id/teams` → `{ "url", "chatUrl", "installer",
+  "installed" }`, as that admin: the app registration (`<name> (Ambient bot)`, `AzureADMyOrg`), a
+  secret (two years), its service principal; the Azure Bot (`ambient-<name>-<hex>`, `SingleTenant`,
+  its endpoint `/v1/hooks/teams/<hook>`; asked again a few times while the new registration reaches
+  Azure) with the Teams channel on; the app package (manifest 1.17, the bot's 192 px face and a
+  32 px outline) into the company's Teams app catalog. Each step is kept as it's done, so asking
+  again after a failure goes on where it stopped; a refusal names the role the admin lacks. `url`
+  opens the app in Teams (one tap: Add); `chatUrl` opens a chat with it.
+- **Who it listens to.** The person who added it in Ambient, found in the company by their
+  sign-in email (`GET /users/<email>`); when they aren't there, the admin who connected Teams.
+  Anyone else is told once per chat that it takes instructions from that person.
+- **What Teams sends.** The hook in the endpoint is signed by Ambient and names the bot, so an
+  activity finds its app without a table; it is then checked as the Bot Framework's for that bot's
+  app id (`msteams/botframework.ts`), and refused from another tenant. An activity Teams sends
+  again is taken once. A direct message, an @mention in a channel or a group chat, or a reply in
+  the thread under a post of its own (resource-specific consent `ChannelMessage.Read.Group` in the
+  manifest) goes into the bot's thread from "Teams" and starts a run; "…is typing" shows meanwhile.
+  When its owner adds it, it says hello.
+- **The answer.** As in Slack: only the run that took a Teams message answers it, into that chat
+  or channel thread (`<channel>;messageid=<root>`), as Markdown, in parts of at most 3,500
+  characters.
+- **Its questions as cards.** When a run that took a Teams message asks its owner (`ask_owner`),
+  the question goes to that chat or thread as an Adaptive Card: the question, what it's about, a
+  button per choice and a box to write something else ("Send"). A click (`Action.Submit`, data
+  `{ ambient: "answer", q, o }`) or a reply typed in that chat or thread answers it as its owner
+  would in the bot's thread (the person who added it in Ambient), while it's still the open
+  question; the card is then replaced by the answer ("✓ Yes · Answered by Lena"), or by "Already
+  answered" when it was settled elsewhere. Anyone else who clicks is told who answers.
+- **News of its own.** One channel, chosen by its owner (`PUT /v1/app/routines/:id/teams/news`
+  `{ "channel": id | null }`; by default the first channel it was mentioned in), posted with its
+  tool `post_to_teams` as a new post; replies under that post reach it.
+- **Its face.** `PUT /v1/app/routines/:id/teams/icon` with a PNG of exactly 192 × 192 px: a new
+  version of its app in the catalog (`appDefinitions`), which Teams rolls out.
+- **From the person's AI (MCP).** `connect_teams` (the sign-in link; `status`, `subscription`,
+  `disconnect`) and `teams_for_bot` (the Teams link; `news_channel`; `remove`).
+- **Taking it out.** `DELETE /v1/app/routines/:id/teams` deletes its Teams app, its Azure Bot and
+  its app registration, and forgets it here.
+- **Where it's kept.** Sealed records (kinds `teams:tenant`, `teams:app`, `teams:reply`), nothing
+  new in Convex. The bot's secret never leaves the gateway.
+- **Not yet:** a new secret before the two years are up, and installing it for the owner without the
+  Add tap.
+
+## Files in Slack and Teams
+
+Every bot takes and sends files wherever it's reached, as in the app (`gateway/src/channels/channel-files.ts`).
+
+- **Coming in.** Files sent with a message to a bot (Slack: a message's `files`, also a
+  `file_share` with no text; Teams: a file in a chat with the bot, a pasted picture) are
+  downloaded, checked like the app's (4 files, 10 MB together; images, PDFs, text and Office
+  files; HEIC photos become JPEG) and kept in the bot's thread with the message
+  (`attachments.save`). Its run gets them on disk like a file sent from the app; a file that comes
+  while it works too (the inbox carries them, runner 0.17.0 fetches them). What can't be passed on
+  is named in the message with the reason ("not passed on to you: Budget.xlsx (…)"), so the bot
+  never works from a screenshot it didn't get. Slack needs `files:read`; a file shared in a Teams
+  channel or group chat stays in SharePoint, which the bot can't open: it's named, with "send it
+  to me in a direct chat".
+- **Going out.** Files a run sends (`send_file`) go where its words go: into the Slack thread as an
+  upload (`files.getUploadURLExternal`, then `files.completeUploadExternal`, needs `files:write`;
+  without it, a line that the file is in Ambient), and into the Teams chat or thread as a picture
+  inline (up to 1 MB) or a card with a Download link (`/v1/teams/files/<signed>/<name>`, signed by
+  Ambient, for 7 days; the file stays in the bot's thread).
+- **Amb** takes and sends files in the app and on iMessage already; in Slack and Teams it will by
+  the same code.
+
+## Amb in Slack and Teams
+
+Ambient itself gets its own app in a company's Slack or Teams, made like a bot's ("Ambient", or the
+name the company gives it, like "ACME Brain"): `POST /v1/app/slack/ambient` / `POST
+/v1/app/teams/ambient` `{ "name"? }` (`?team=<slug>` for a team's workspace), `GET` for its state,
+`DELETE` to take it out; from the person's AI, `connect_slack` / `connect_teams` with `ambient: "add" | "remove" | "status"`.
+Its records live with the owner under the key `amb` (`gateway/src/channels/amb-doors.ts`). Who it
+serves depends on where it's written to, decided in code, never by the model:
+
+- **A direct message** is matched to an Ambient account by the writer's email (Slack:
+  `users:read.email`, only Amb's app asks for it; Teams: the member's email), among the people the
+  owner covers (the person, or the team's members). It goes into that person's own Amb chat, as
+  another door like iMessage: the same conversation, the answer goes back there, files both ways.
+  That DM is kept as the person's door (`slack:amb-link` / `teams:amb-link`), so "Reach me on"
+  can be Slack or Teams (`reach: "slack" | "teams"`, once they wrote there). In Teams, Amb's
+  decisions come as cards (a button per answer and a box; a click files the answer as that person,
+  `via: "teams"`). Someone with no account is told once that their email isn't on one.
+- **A channel or group chat** (an @mention) gets the team's Amb (`gateway/src/bots/team-amb.ts`):
+  only where a team connected the workspace; it runs on the team's own computer (the one for its
+  bots) as a short session apart from anyone's chat, with the asker's token for that team alone
+  (`resource: team`), so no personal note, bot or chat can reach a channel; what it may change, it
+  may as the asker. Each thread is a **lane** (the team wiki's `product/conversations.md`): one
+  Claude Code session on the team's computer (`ComputerJob.lane`, a folder `lanes/<lane>` there),
+  resumed every turn with only what people said in the thread since it last answered. A new thread,
+  or a computer without the session, starts cold from the whole thread and the lane's turns (the
+  runner reads `history` only when it has nothing to resume). The lane's record (sealed with the
+  team, kind `team-amb:thread`, no end date) keeps its session id, how far it has read, and its
+  turns.
+- **Sessions move with their lane.** After each answer the runner (0.18.0) sends the lane's
+  session file, gzipped, to `POST /v1/host/ambient/lanes/:lane/session`; the gateway seals it with
+  the lane's owner's key and keeps it in Convex (`sessionBackups`, one per lane, up to 12 MB). A
+  computer that doesn't have the session (wiped, replaced, or another one) fetches it with `GET` on
+  the same path before it resumes. A computer may only send or fetch a lane it was given a turn of
+  in the last 2 hours. Forget chat removes the person's backups.
+- **"new chat"** typed alone in iMessage, Slack or Teams starts over, as New chat in the app.
+- **Turns in flight are written down** (`gateway/src/bots/turn-queue.ts`, Convex `turns`). A
+  message to Amb (the app, iMessage, a Slack or Teams DM) and a team Amb's channel turn are listed
+  before the answer starts and removed once it's out. A gateway that restarts in between picks
+  them up again 5 seconds after it starts (at most 3 tries each): the chat's answer goes back
+  through the door it was asked in, a channel's is posted in its thread. Files sent with a channel
+  message aren't kept for that. A bot's messages were already durable (its thread in Convex).
+- **A bot's threads are lanes too** (`gateway/src/bots/bot-lanes.ts`). A message from a Slack or
+  Teams channel thread (or a group chat) carries its lane; the run it starts resumes that lane's
+  session (none yet: fresh, with handoffs and the whole thread), and when the run ends its session
+  is kept for the lane, with how far it has read, so the next message there brings only what's new.
+  The app and DMs are the bot's main lane (the bot's last conversation, as before). Scheduled runs
+  and GitHub wake-ups are work: fresh with handoffs, no lane.
+- **A thread is read as a thread.** Tagged inside a Slack or Teams thread, a bot or Amb gets what
+  was said there before, also what people said to each other (Slack: `conversations.replies`;
+  Teams: Graph with the bot's own app and its resource-specific consent), by name, its own
+  messages as "you", and where it is ("in #anomalies", "in Engineering › anomalies").
+  Without a team computer, the server's key answers where the operator pays (read-only team tools),
+  else it says how to connect one.
 
 ## MCP connections
 

@@ -21,13 +21,14 @@
 // and `sync` replaces it when the gateway has a newer one.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { chmodSync, chownSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, release, tmpdir, type } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.16.0";
+const VERSION = "0.18.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -750,9 +751,15 @@ async function ambientService() {
     if (as) chownSync(path, as.uid, as.gid);
   };
 
-  /** One open Claude Code session per person: uid → { child, session, token, waiting }. */
+  /**
+   * One Claude Code session per lane (docs/bots.md, "Conversations and sessions"): a person's main
+   * lane is keyed by their uid (as before lanes), a shared thread's by its lane id. Lane → { child,
+   * session, token, waiting, used }. At most MAX_LIVE are open at once: the one used longest ago
+   * that isn't answering is closed, and resumed from its session when its lane is next written to.
+   */
   const people = new Map();
   const sessions = readState().ambientSessions ?? {};
+  const MAX_LIVE = 3;
 
   const safe = (uid) => uid.replace(/[^A-Za-z0-9_-]/g, "_");
   /** The person's folder here (their files, Claude Code's working directory). */
@@ -760,6 +767,19 @@ async function ambientService() {
     const dir = join(base, safe(uid));
     mkdirSync(dir, { recursive: true });
     own(base);
+    own(dir);
+    return dir;
+  };
+  /**
+   * A lane's folder: the person's own for their main lane, else lanes/<lane>. The same name on
+   * every computer, so a session restored from its backup is found where Claude Code looks.
+   */
+  const laneFolder = (job) => {
+    if (!job.lane || job.lane === job.uid) return folderOf(job.uid);
+    const dir = join(base, "lanes", safe(job.lane));
+    mkdirSync(dir, { recursive: true });
+    own(base);
+    own(join(base, "lanes"));
     own(dir);
     return dir;
   };
@@ -822,8 +842,7 @@ async function ambientService() {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-  const start = (uid, p, instructions) => {
-    const dir = folderOf(uid);
+  const start = (uid, p, instructions, dir) => {
     // A session kept in another settings folder (before the runner had its own) can't be resumed: start afresh.
     const configDir = runEnv(cfg).CLAUDE_CONFIG_DIR;
     if (p.session && configDir && !sessionKnown(configDir, p.session)) {
@@ -845,6 +864,7 @@ async function ambientService() {
             p.session = e.session;
             const st = readState();
             st.ambientSessions = { ...(st.ambientSessions ?? {}), [uid]: e.session };
+            sessions[uid] = e.session;
             writeState(st);
           }
           p.waiting?.resolve(e);
@@ -863,10 +883,69 @@ async function ambientService() {
     log(`Ambient's session for ${uid} ${p.session ? `resumed (${p.session.slice(0, 8)})` : "started"}`);
   };
 
+  /**
+   * Sessions move with their lane (product/conversations.md): after each answer the session's file
+   * goes to the gateway (gzipped; it seals and keeps it), and a lane whose session isn't on this
+   * computer gets it back before it resumes. Claude Code keeps a session under its settings
+   * folder, in projects/<the working folder, every other character a dash>/<id>.jsonl.
+   */
+  const claudeDir = () => runEnv(cfg).CLAUDE_CONFIG_DIR || join(as?.home ?? home(user), ".claude");
+  const sessionFile = (session) => {
+    const projects = join(claudeDir(), "projects");
+    try {
+      for (const d of readdirSync(projects)) if (existsSync(join(projects, d, `${session}.jsonl`))) return join(projects, d, `${session}.jsonl`);
+    } catch {}
+    return null;
+  };
+  const backup = async (lane, session) => {
+    const file = sessionFile(session);
+    if (!file) return;
+    const gz = gzipSync(readFileSync(file));
+    if (gz.length > 12 * 1024 * 1024) return log(`The session of ${lane.slice(0, 12)} is too big to back up (${Math.round(gz.length / 1048576)} MB gzipped)`);
+    const res = await fetch(`${cfg.server}/v1/host/ambient/lanes/${encodeURIComponent(lane)}/session`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${cfg.token}`, "user-agent": `ambient-runner/${VERSION}`, "content-type": "application/gzip", "x-ambient-session": session },
+      body: gz,
+      signal: AbortSignal.timeout(60_000),
+    }).catch((err) => ({ ok: false, status: err.message }));
+    if (!res.ok) log(`The session of ${lane.slice(0, 12)} wasn't backed up (${res.status})`);
+  };
+  const restore = async (lane, dir) => {
+    const res = await fetch(`${cfg.server}/v1/host/ambient/lanes/${encodeURIComponent(lane)}/session`, {
+      headers: { authorization: `Bearer ${cfg.token}`, "user-agent": `ambient-runner/${VERSION}` },
+      signal: AbortSignal.timeout(60_000),
+    }).catch(() => null);
+    const session = res?.headers.get("x-ambient-session");
+    if (!res?.ok || !session || !/^[A-Za-z0-9_-]{1,100}$/.test(session)) return null;
+    const into = join(claudeDir(), "projects", dir.replace(/[^A-Za-z0-9]/g, "-"));
+    mkdirSync(into, { recursive: true, mode: 0o700 });
+    writeFileSync(join(into, `${session}.jsonl`), gunzipSync(Buffer.from(await res.arrayBuffer())), { mode: 0o600 });
+    if (as) spawnSync(sys("chown"), ["-R", `${as.uid}:${as.gid}`, join(claudeDir(), "projects")]);
+    log(`Brought back the session of ${lane.slice(0, 12)} from its backup`);
+    return session;
+  };
+
+  /** Before another session opens: the one used longest ago that isn't answering is closed (its session stays). */
+  const makeRoom = (keep) => {
+    const live = [...people.entries()].filter(([k, x]) => x.child && k !== keep);
+    if (live.length < MAX_LIVE) return;
+    const idle = live.filter(([, x]) => !x.waiting).sort((a, b) => (a[1].used ?? 0) - (b[1].used ?? 0));
+    for (const [k, x] of idle.slice(0, live.length - MAX_LIVE + 1)) {
+      x.child.kill("SIGTERM");
+      x.child = null;
+      log(`Closed the session of ${k.slice(0, 12)} for now (it resumes when it's written to)`);
+    }
+  };
+
   const handle = async (job) => {
-    const uid = job.uid;
+    // The lane (a shared thread) or, before lanes and for the main lane, the person.
+    const uid = job.lane || job.uid;
+    const dir = laneFolder(job);
     const p = people.get(uid) ?? { child: null, session: sessions[uid] ?? null, token: null, waiting: null };
     people.set(uid, p);
+    p.used = Date.now();
+    // The gateway knows the lane's session (another computer may have had it): resumed if it's here.
+    if (!p.session && typeof job.session === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(job.session)) p.session = job.session;
     const stop = () => {
       p.child?.kill("SIGTERM");
       p.child = null;
@@ -885,15 +964,25 @@ async function ambientService() {
       p.mcp = granted;
       stop();
     }
+    // Cold: no session to resume (a new lane, a fresh start, or one that isn't on this computer).
+    let cold = Boolean(job.fresh);
     if (!p.child) {
-      placeSkills(folderOf(uid), job.skills);
-      start(uid, p, job.instructions);
+      // Not on this computer (wiped, replaced, or the lane was elsewhere): back from its backup.
+      if (!job.fresh && (!p.session || !sessionFile(p.session))) {
+        const back = await restore(uid, dir).catch((err) => (log(`The session of ${uid.slice(0, 12)} couldn't be brought back: ${err.message}`), null));
+        if (back) p.session = back;
+      }
+      makeRoom(uid);
+      placeSkills(dir, job.skills);
+      start(uid, p, job.instructions, dir);
+      if (!p.session) cold = true;
     }
-    const history = job.fresh && job.history?.length ? `Earlier in this chat:\n${job.history.map((t) => `${t.role === "user" ? job.name : "You"}: ${t.text}`).join("\n")}\n\n` : "";
+    // The turns so far come along every time, and are read only when the session starts cold.
+    const history = cold && job.history?.length ? `Earlier in this chat:\n${job.history.map((t) => `${t.role === "user" ? job.name : "You"}: ${t.text}`).join("\n")}\n\n` : "";
     // Files that came with the message go in the person's folder here; Claude Code reads them.
     const saved = [];
     if (job.attachments?.length) {
-      const into = join(base, uid.replace(/[^A-Za-z0-9_-]/g, "_"), "attachments");
+      const into = join(dir, "attachments");
       mkdirSync(into, { recursive: true });
       own(into);
       for (const f of job.attachments) {
@@ -910,9 +999,11 @@ async function ambientService() {
     try {
       const r = await result;
       // What Ambient put in its outbox for the person: with the reply, then moved to outbox/sent.
-      const sent = r.ok ? outbox(folderOf(uid)) : { files: [], moved: () => {} };
-      await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text, ...(sent.files.length ? { files: sent.files } : {}) } : { error: r.text || "Claude Code couldn't answer" });
+      const sent = r.ok ? outbox(dir) : { files: [], moved: () => {} };
+      // The session's id goes with the answer: the gateway keeps it for the lane.
+      await call(cfg, "POST", `/v1/host/ambient/${job.id}`, r.ok ? { text: r.text, ...(sent.files.length ? { files: sent.files } : {}), ...(p.session ? { session: p.session } : {}) } : { error: r.text || "Claude Code couldn't answer" });
       sent.moved();
+      if (r.ok && p.session) await backup(uid, p.session).catch((err) => log(`The session of ${uid.slice(0, 12)} wasn't backed up: ${err.message}`));
       log(`Answered ${uid} (${r.turns ?? "?"} turns${r.costUsd !== undefined ? `, $${r.costUsd.toFixed(2)}` : ""})`);
     } catch (err) {
       await call(cfg, "POST", `/v1/host/ambient/${job.id}`, { error: err.message.slice(0, 1900) }).catch(() => {});
@@ -1088,7 +1179,7 @@ async function ambientService() {
     else if (job?.uid && job.token) {
       // One person's messages one after another in their session; Ambient's own turns (a bot's
       // question, the heartbeat) one after another in short sessions of their own, beside it.
-      const key = job.mode === "internal" ? `${job.uid}:internal` : job.uid;
+      const key = job.mode === "internal" ? `${job.uid}:internal` : job.lane || job.uid;
       const prev = queues.get(key) ?? Promise.resolve();
       const next = prev.then(() => (job.mode === "internal" ? internal(job) : handle(job)));
       queues.set(key, next.catch(() => {}));
@@ -2095,16 +2186,20 @@ async function run(id) {
       carryOn = { ...carryOn, sessionId: null };
     }
   }
-  // Files that came with the message that started this run (docs/bots.md, "Files in the chat"):
-  // fetched with the run's token into its out folder, and named in the message, as on Amb's computer.
-  if (carryOn && Array.isArray(carryOn.files) && carryOn.files.length && runToken && outDir) {
+  // Files that came with a message (docs/bots.md, "Files in the chat"): fetched with the run's
+  // token into its out folder, and named in the message, as on Amb's computer. The message that
+  // started the run, and those that come in while it works (its inbox), the same way.
+  const fetchRunFiles = async (list) => {
+    if (!Array.isArray(list) || !list.length || !runToken || !outDir) return [];
     const dir = join(outDir, "files");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const fileOwner = contained ? { uid: 1000, gid: 1000 } : as;
     if (fileOwner && process.getuid?.() === 0) chownSync(dir, fileOwner.uid, fileOwner.gid);
     const saved = [];
-    for (const f of carryOn.files.slice(0, 4)) {
-      const name = String(f?.name ?? "file").replace(/[^A-Za-z0-9._ -]/g, "_").slice(-120) || "file";
+    for (const f of list.slice(0, 4)) {
+      let name = String(f?.name ?? "file").replace(/[^A-Za-z0-9._ -]/g, "_").slice(-120) || "file";
+      // Two files of the same name (two "image.png" from Slack): the later one gets a number.
+      for (let n = 2; existsSync(join(dir, name)) && n < 100; n++) name = name.replace(/(\.[^.]*)?$/, (ext) => `-${n}${ext ?? ""}`);
       try {
         const res = await fetch(`${cfg.server}/v1/bot/files/${encodeURIComponent(String(f.id))}`, { headers: { authorization: `Bearer ${runToken}` }, signal: AbortSignal.timeout(120_000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2115,7 +2210,12 @@ async function run(id) {
         log(`Couldn't fetch ${name} for the run: ${err.message}`);
       }
     }
-    if (saved.length) carryOn = { ...carryOn, message: `${carryOn.message}\n\nFiles that came with it (open them with your file tools):\n${saved.map((p) => `- ${p}`).join("\n")}` };
+    return saved;
+  };
+  const filesLine = (saved) => (saved.length ? `\n\nFiles that came with it (open them with your file tools):\n${saved.map((p) => `- ${p}`).join("\n")}` : "");
+  if (carryOn && Array.isArray(carryOn.files) && carryOn.files.length) {
+    const saved = await fetchRunFiles(carryOn.files);
+    if (saved.length) carryOn = { ...carryOn, message: `${carryOn.message}${filesLine(saved)}` };
   }
   const mcpArg = codex ? mcpServer : mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile);
   // A bot's Claude Code run stays open for messages that come in while it works (stream-json in).
@@ -2203,13 +2303,18 @@ async function run(id) {
       return [];
     }
   };
-  const deliver = (msgs) => {
+  // Who wrote, as the bot should hear it: Slack's, Teams' and GitHub's messages already say it.
+  const said = (m) => (["Slack", "Teams", "GitHub"].includes(String(m.who)) ? String(m.text ?? "") : `${String(m.who ?? "Your owner")} wrote to you in the Ambient app: ${String(m.text ?? "")}`);
+  const deliver = async (msgs) => {
     for (const m of msgs) {
       if (closing || tookIn >= INBOX_MAX) return;
       tookIn++;
       wroteSinceResult = true;
-      child.stdin.write(userLine(`${String(m.who ?? "Your owner")} wrote to you in the Ambient app: ${String(m.text ?? "")}`));
-      log(`Took in a message from ${m.who ?? "the owner"} while working`);
+      // Its files first, so the message names them where they are.
+      const saved = await fetchRunFiles(m.files);
+      if (closing) return;
+      child.stdin.write(userLine(`${said(m)}${filesLine(saved)}`));
+      log(`Took in a message from ${m.who ?? "the owner"} while working${saved.length ? ` (${saved.length} file${saved.length === 1 ? "" : "s"})` : ""}`);
     }
   };
   const reply = async (r) => {
@@ -2233,17 +2338,24 @@ async function run(id) {
     wroteSinceResult = false;
     await new Promise((res) => setTimeout(res, STAY_MS));
     if (closing) return;
-    if (!wroteSinceResult) deliver(await takeInbox());
+    if (!wroteSinceResult) await deliver(await takeInbox());
     if (wroteSinceResult) void reply(r);
     else close();
   };
   let inboxTimer;
+  let taking = false;
   // A session that ended on its own (or failed) must not take the run down when we write to it.
   child.stdin.on("error", () => {});
   if (streaming) {
     child.stdin.write(userLine(stdin));
     inboxTimer = setInterval(() => {
-      if (!closing) void takeInbox().then(deliver);
+      // One take at a time: a slow file download never lets a later message overtake an earlier one.
+      if (!closing && !taking) {
+        taking = true;
+        void takeInbox()
+          .then(deliver)
+          .finally(() => (taking = false));
+      }
     }, INBOX_EVERY_MS);
     inboxTimer.unref();
   } else child.stdin.end(stdin);

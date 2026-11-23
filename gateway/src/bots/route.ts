@@ -20,6 +20,8 @@ import { AutomationInput, TEMPLATES, type Automations } from "./automations.ts";
 import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
 import { page as githubPage, type GitHubApps } from "./github-apps.ts";
 import { SlackError, type SlackApps } from "./slack-apps.ts";
+import { TeamsError, type TeamsApps } from "./teams-apps.ts";
+import type { Activity } from "../msteams/botframework.ts";
 import { IMessageError, type IMessageChannel } from "../channels/imessage.ts";
 import type { AmbReach } from "../channels/reach.ts";
 import { McpConnectionError, type McpConnections } from "./mcp-connections.ts";
@@ -74,6 +76,7 @@ export function botAppRoutes(
     github?: () => GitHubEvents | undefined;
     githubApp?: () => GitHubApps | undefined;
     slack?: () => SlackApps | undefined;
+    teams?: () => TeamsApps | undefined;
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
     imessage?: () => IMessageChannel | undefined;
@@ -505,6 +508,38 @@ export function botAppRoutes(
       slackFail(res, err);
     }
   });
+  // Ambient itself in the workspace (channels/amb-doors.ts): its own app, one tap to Allow.
+  r.get("/v1/app/slack/ambient", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      res.json(await sl.ambStatus(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.post("/v1/app/slack/ambient", d.auth, d.json, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    const body = z.object({ name: z.string().trim().min(1).max(35).optional() }).safeParse(req.body ?? {});
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "A name has at most 35 characters." });
+    try {
+      const a = await actor(res);
+      res.json(await sl.addAmb(d.routines.botOwner(a, teamOf(req)), a.uid, body.data.name));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.delete("/v1/app/slack/ambient", d.auth, async (req, res) => {
+    const sl = d.slack?.();
+    if (!sl) return notEnabled(res);
+    try {
+      if (!(await sl.remove(d.routines.botOwner(await actor(res), teamOf(req)), "amb"))) return res.status(404).json({ error: "no_app", message: "Ambient isn't in Slack." });
+      res.status(204).end();
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
   r.get("/v1/app/routines/:id/slack", d.auth, async (req, res) => {
     const sl = d.slack?.();
     if (!sl) return notEnabled(res);
@@ -572,6 +607,144 @@ export function botAppRoutes(
       res.status(204).end();
     } catch (err) {
       slackFail(res, err);
+    }
+  });
+
+  // ---- Microsoft Teams: an admin connects the company once, then a bot's own Teams app in one tap (docs/bots.md, "Microsoft Teams") ----
+  const teamsFail = (res: Response, err: unknown) => {
+    if (err instanceof TeamsError) return res.status(err.status).json({ error: err.code, message: err.message });
+    fail(res, err);
+  };
+  r.get("/v1/app/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      res.json(await tm.connection(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  // The Microsoft sign-in an admin opens once (the app opens the link in a browser).
+  r.post("/v1/app/teams/connect", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      const a = await actor(res);
+      res.json(tm.connectUrl(d.routines.botOwner(a, teamOf(req)), a.uid));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  // Another of the admin's Azure subscriptions for new bots.
+  r.put("/v1/app/teams", d.auth, d.json, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    const body = z.object({ subscriptionId: z.string().trim().min(1).max(64) }).safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send subscriptionId: one of the Azure subscriptions listed." });
+    try {
+      const owner = d.routines.botOwner(await actor(res), teamOf(req));
+      await tm.setSubscription(owner, body.data.subscriptionId);
+      res.json(await tm.connection(owner));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.delete("/v1/app/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      await tm.disconnect(d.routines.botOwner(await actor(res), teamOf(req)));
+      res.status(204).end();
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  // Ambient itself in the company's Teams (channels/amb-doors.ts): its own app, made in the tenant.
+  r.get("/v1/app/teams/ambient", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      res.json(await tm.ambStatus(d.routines.botOwner(await actor(res), teamOf(req))));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.post("/v1/app/teams/ambient", d.auth, d.json, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    const body = z.object({ name: z.string().trim().min(1).max(30).optional() }).safeParse(req.body ?? {});
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "A name has at most 30 characters." });
+    try {
+      const a = await actor(res);
+      res.json(await tm.addAmb(d.routines.botOwner(a, teamOf(req)), a.uid, body.data.name));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.delete("/v1/app/teams/ambient", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      if (!(await tm.remove(d.routines.botOwner(await actor(res), teamOf(req)), "amb"))) return res.status(404).json({ error: "no_app", message: "Ambient isn't in Teams." });
+      res.status(204).end();
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.get("/v1/app/routines/:id/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), false);
+      res.json(await tm.status(f.owner, f.routineId));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.post("/v1/app/routines/:id/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      const a = await actor(res);
+      const f = await d.routines.folderOf(a, id(req), true);
+      res.json(await tm.add(f.owner, { id: f.routineId, name: f.name }, a.uid));
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.put("/v1/app/routines/:id/teams/news", d.auth, d.json, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    const body = z.object({ channel: z.string().max(200).nullable() }).safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: "Send channel: a channel's id, or null for only the Ambient app." });
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      res.json({ news: await tm.setNews(f.owner, f.routineId, body.data.channel) });
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.put("/v1/app/routines/:id/teams/icon", d.auth, express.raw({ type: ["image/png", "application/octet-stream"], limit: "1mb" }), async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "bad_request", message: "Send the icon as a 192 × 192 PNG (content-type image/png)." });
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      await tm.setIcon(f.owner, f.routineId, req.body);
+      res.status(204).end();
+    } catch (err) {
+      teamsFail(res, err);
+    }
+  });
+  r.delete("/v1/app/routines/:id/teams", d.auth, async (req, res) => {
+    const tm = d.teams?.();
+    if (!tm) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      if (!(await tm.remove(f.owner, f.routineId))) return res.status(404).json({ error: "no_app", message: "This bot isn't in Teams." });
+      res.status(204).end();
+    } catch (err) {
+      teamsFail(res, err);
     }
   });
 
@@ -1299,7 +1472,7 @@ export function botRunRouter(d: { bots: BotService; history?: HistorySearch; wak
  * A person's computer that runs Ambient (ambient-runner ambient), with its computer token: it waits
  * for the next chat message (a long poll of up to 25 seconds) and sends back the reply.
  */
-export function ambientHostRouter(d: { routines: RoutineService; directory: Directory; computers: AmbientComputers }): Router {
+export function ambientHostRouter(d: { routines: RoutineService; directory: Directory; computers: AmbientComputers; backups?: import("./session-backups.ts").SessionBackups }): Router {
   const r = express.Router();
   const json = express.json({ limit: "256kb" });
   const host = async (req: Request, res: Response): Promise<Host | undefined> => {
@@ -1315,6 +1488,34 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
     }
     return h;
   };
+
+  // A lane's session, backed up after each answer and fetched by a computer that doesn't have it
+  // (product/conversations.md): only for a lane this computer was given a turn of lately.
+  r.post("/v1/host/ambient/lanes/:lane/session", express.raw({ type: "*/*", limit: "13mb" }), async (req, res) => {
+    const h = await host(req, res);
+    if (!h) return;
+    const owner = d.computers.laneOwner(h.id, String(req.params.lane));
+    const session = req.get("x-ambient-session") ?? "";
+    if (!d.backups || !owner) return res.status(404).json({ error: "not_found" });
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(session) || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "bad_request" });
+    try {
+      await d.backups.put(owner, String(req.params.lane), session, req.body);
+      res.status(204).end();
+    } catch (err) {
+      res.status(413).json({ error: "not_kept", message: (err as Error).message });
+    }
+  });
+  r.get("/v1/host/ambient/lanes/:lane/session", async (req, res) => {
+    const h = await host(req, res);
+    if (!h) return;
+    const owner = d.computers.laneOwner(h.id, String(req.params.lane));
+    if (!d.backups || !owner) return res.status(404).json({ error: "not_found" });
+    const b = await d.backups.get(owner, String(req.params.lane)).catch(() => null);
+    if (!b) return res.status(404).json({ error: "not_found" });
+    res.setHeader("x-ambient-session", b.session);
+    res.setHeader("content-type", "application/gzip");
+    res.send(b.gz);
+  });
 
   r.get("/v1/host/ambient/next", async (req, res) => {
     const h = await host(req, res);
@@ -1357,7 +1558,7 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
   r.post("/v1/host/ambient/:jobId", express.json({ limit: "16mb" }), async (req, res) => {
     const h = await host(req, res);
     if (!h) return;
-    const body = z.object({ text: z.string().max(100_000).optional(), error: z.string().max(2_000).optional(), files: z.array(ChatAttachment).max(4).optional() }).safeParse(req.body);
+    const body = z.object({ text: z.string().max(100_000).optional(), error: z.string().max(2_000).optional(), files: z.array(ChatAttachment).max(4).optional(), session: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).optional() }).safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: "bad_request", message: "Send the reply's text, or what went wrong." });
       return;
@@ -1370,7 +1571,7 @@ export function ambientHostRouter(d: { routines: RoutineService; directory: Dire
       // Files that can't go with a message (a type or size the chat doesn't take): the text still does.
       console.warn(`[ambient] files from ${h.name} left out: ${(err as Error).message}`);
     }
-    const ok = body.data.error !== undefined ? d.computers.fail(h.id, id, body.data.error) : d.computers.reply(h.id, id, body.data.text ?? "", files);
+    const ok = body.data.error !== undefined ? d.computers.fail(h.id, id, body.data.error) : d.computers.reply(h.id, id, body.data.text ?? "", files, body.data.session);
     if (!ok) {
       res.status(404).json({ error: "no_such_message", message: "That message isn't waiting for a reply anymore." });
       return;
@@ -1492,6 +1693,58 @@ export function linqHookRouter(imessage: () => IMessageChannel | undefined): Rou
  * What Slack sends for bots' own apps: their events (an @mention, a DM), and the browser after
  * Allow (docs/bots.md, "Slack").
  */
+/** Teams' activities for bots' own Teams apps, and the admin's way back from Microsoft's sign-in. */
+export function teamsHookRouter(teams: () => TeamsApps | undefined): Router {
+  const r = express.Router();
+  const perHook = limiter(600);
+  r.post("/v1/hooks/teams/:hook", express.json({ limit: "256kb" }), async (req, res) => {
+    const tm = teams();
+    const hook = String(req.params.hook);
+    if (!tm) return res.status(404).json({ error: "not_found" });
+    if (!perHook(hook)) return res.status(429).json({ error: "slow_down" });
+    const out = await tm.receive(hook, req.get("authorization"), req.body as Activity).catch((err: Error) => {
+      console.warn(`[teams] an activity wasn't handled: ${err.message}`);
+      return { status: 200, body: {} };
+    });
+    res.status(out.status).json(out.body);
+  });
+  // A file a bot sent in Teams that isn't shown inline: its signed link, for a week.
+  r.get("/v1/teams/files/:token/:name", async (req, res) => {
+    const tm = teams();
+    if (!tm) return res.status(404).json({ error: "not_found" });
+    try {
+      const f = await tm.linkedFile(String(req.params.token));
+      res.setHeader("cache-control", "private, no-store");
+      res.setHeader("content-type", f.type);
+      res.setHeader("x-content-type-options", "nosniff");
+      res.setHeader("content-security-policy", "default-src 'none'; sandbox");
+      res.setHeader("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+      res.send(f.bytes);
+    } catch (err) {
+      res.status(err instanceof TeamsError ? err.status : 404).json({ error: "not_found", message: "This link doesn't work (any more)." });
+    }
+  });
+  r.get("/v1/teams/connected", async (req, res) => {
+    const tm = teams();
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    if (!tm) return res.status(404).send(githubPage("Not set up", "<p>Microsoft Teams isn't set up on this Ambient server.</p>"));
+    if (typeof req.query.error === "string") {
+      const why = typeof req.query.error_description === "string" ? req.query.error_description.split("\n")[0]!.slice(0, 300) : String(req.query.error);
+      return res.status(400).send(githubPage("Not connected", `<p>Microsoft didn't connect Teams: ${esc(why)}</p><p>An admin of your company (Global admin, or Application and Teams admin) taps Connect Microsoft Teams in Ambient again.</p>`));
+    }
+    try {
+      const out = await tm.connected(typeof req.query.code === "string" ? req.query.code : "", typeof req.query.state === "string" ? req.query.state : "");
+      res.send(githubPage("Microsoft Teams is connected", `<p>Bots now go to Teams with one tap, as ${esc(out.admin)}, into the Azure subscription ${esc(out.subscription)} (resource group ambient-bots).</p><p><a href="ambient://teams/connected">Back to Ambient</a></p>`));
+    } catch (err) {
+      const msg = err instanceof TeamsError ? err.message : "Something went wrong. Try again in a minute.";
+      res.status(err instanceof TeamsError ? err.status : 500).send(githubPage("Not connected", `<p>${esc(msg)}</p>`));
+    }
+  });
+  return r;
+}
+
 export function slackHookRouter(slack: () => SlackApps | undefined): Router {
   const r = express.Router();
   const perHook = limiter(600);
@@ -1505,6 +1758,19 @@ export function slackHookRouter(slack: () => SlackApps | undefined): Router {
     const out = await sl.receive(hook, { signature: header("x-slack-signature"), timestamp: header("x-slack-request-timestamp"), retry: header("x-slack-retry-num") }, body).catch((err: Error) => {
       console.warn(`[slack] an event wasn't handled: ${err.message}`);
       return { status: 200, body: { ok: false } };
+    });
+    res.status(out.status).json(out.body);
+  });
+  // A click on a button (a question's answer), signed like the events.
+  r.post("/v1/hooks/slack/:hook/interact", express.raw({ type: "*/*", limit: "1mb" }), async (req, res) => {
+    const sl = slack();
+    const hook = String(req.params.hook);
+    if (!sl) return res.status(404).json({ error: "not_found" });
+    if (!perHook(hook)) return res.status(429).json({ error: "slow_down" });
+    const header = (n: string) => (typeof req.headers[n] === "string" ? (req.headers[n] as string) : undefined);
+    const out = await sl.interact(hook, { signature: header("x-slack-signature"), timestamp: header("x-slack-request-timestamp") }, Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0)).catch((err: Error) => {
+      console.warn(`[slack] a click wasn't handled: ${err.message}`);
+      return { status: 200, body: {} };
     });
     res.status(out.status).json(out.body);
   });

@@ -44,7 +44,8 @@ describe("a bot's run", () => {
 
     const mcp = await mcpClient(`${s.origin}/mcp`, runToken);
     const tools = (await mcp.listTools()).tools.map((t) => t.name).sort();
-    expect(tools).toEqual([...BOT_TOOLS].sort());
+    // post_to_teams only where Teams is set up (this server has no setup app).
+    expect(tools).toEqual([...BOT_TOOLS].filter((t) => t !== "post_to_teams").sort());
     expect(tools).not.toContain("save_note");
     expect(tools).not.toContain("change_team_settings");
     expect(tools).not.toContain("write_bot_file");

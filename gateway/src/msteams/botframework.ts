@@ -23,6 +23,8 @@ export interface Activity {
   text?: string;
   value?: unknown;
   replyToId?: string;
+  /** Files and pictures sent with a message (and a copy of its text as HTML, and cards). */
+  attachments?: { contentType: string; contentUrl?: string; content?: unknown; name?: string }[];
   membersAdded?: { id: string; name?: string }[];
   membersRemoved?: { id: string; name?: string }[];
   entities?: { type: string; mentioned?: { id: string }; text?: string }[];
@@ -177,6 +179,20 @@ export class BotClient {
   /** One person in a conversation (a channel or a direct chat), with the email Teams knows. */
   async member(serviceUrl: string, conversationId: string, userId: string): Promise<Member> {
     return (await this.call("GET", `${trimSlash(serviceUrl)}/v3/conversations/${encodeURIComponent(conversationId.split(";")[0]!)}/members/${encodeURIComponent(userId)}`)) as Member;
+  }
+
+  /**
+   * A picture someone pasted into a message: Teams keeps it behind the bot's own token. The
+   * token goes only to Teams' own hosts, never to an address from somewhere else.
+   */
+  async fetchFile(url: string, max: number): Promise<Buffer> {
+    const host = new URL(url).hostname;
+    if (!/(^|\.)(trafficmanager\.net|botframework\.com|skype\.com|teams\.microsoft\.com)$/.test(host)) throw new Error("not a Teams address");
+    const res = await this.fetchImpl(url, { headers: { authorization: `Bearer ${await this.accessToken()}` }, signal: AbortSignal.timeout(60_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > max) throw new Error("too big");
+    return buf;
   }
 
   /** "…is typing" while an answer is being written. */

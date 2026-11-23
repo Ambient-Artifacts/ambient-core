@@ -58,6 +58,8 @@ export async function startStack(
     githubApp?: import("../src/bots/github-app.ts").GitHubAppConfig;
     /** Bots' Slack apps against a stand-in Slack Web API. */
     slackApi?: string;
+    /** Bots' Teams apps against a stand-in Microsoft (every call goes to `fetchImpl`). */
+    teamsApps?: { fetchImpl: typeof fetch; verifier: import("../src/bots/teams-apps.ts").ActivityVerifier };
     /** MCP connections may point at a stand-in server on 127.0.0.1. */
     mcpLocal?: boolean;
     /** Amb's iMessage line against a stand-in Linq API. */
@@ -131,6 +133,7 @@ export async function startStack(
     signups: opts.signups,
     requireSignInNonce: opts.requireSignInNonce,
     githubApp: opts.githubApp,
+    ...(opts.teamsApps ? { teamsApps: { clientId: "0e0e0e0e-1111-2222-3333-444444444444", secret: "setup-app-secret", website: "https://ambient.example" } } : {}),
     ...(opts.linq ? { linq: { apiKey: "linq-test-key", webhookSecret: opts.linq.webhookSecret, ...(opts.linq.number ? { number: opts.linq.number } : {}) } } : {}),
     ...(opts.linq?.transcribeUrl ? { transcribe: { apiKey: "stt-test-key", url: opts.linq.transcribeUrl, model: "gpt-4o-transcribe" } } : {}),
   };
@@ -186,6 +189,7 @@ export async function startStack(
     mirrorDelayMs: opts.mirrorDelayMs ?? 60_000,
     githubBatchMs: opts.githubBatchMs ?? 60_000,
     ...(opts.slackApi ? { slack: { apiBase: opts.slackApi } } : {}),
+    ...(opts.teamsApps ? { teamsApps: { ...opts.teamsApps, retryMs: 1 } } : {}),
     ...(opts.mcpLocal ? { mcpConnections: { allowLocal: true } } : {}),
     ...(opts.linq ? { linq: { apiBase: opts.linq.api } } : {}),
     learning: { reviewAfterMs: opts.learningAfterMs ?? 60_000 },
@@ -222,6 +226,7 @@ export async function startStack(
     decisions: stack.decisions,
     heartbeat: stack.heartbeat,
     folders: stack.folders,
+    turns: stack.turns,
     automations: stack.automations,
     graphTokens,
     deliverer,

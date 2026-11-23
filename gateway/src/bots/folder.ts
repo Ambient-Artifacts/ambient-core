@@ -409,6 +409,8 @@ export class BotFolder {
     scheduled?: boolean;
     /** It has a Slack app of its own: its handle, and where its news goes (docs/bots.md, "Slack"). */
     slack?: { handle: string; workspace: string | null; news: string | null } | null;
+    /** It has a Teams app of its own: its name, and where its news goes (docs/bots.md, "Microsoft Teams"). */
+    teams?: { handle: string; news: string | null } | null;
   }): Promise<{ prompt: string; resume: { sessionId: string | null; message: string } | null; workspace: { system: string; skills: { path: string; content: string }[]; memory: string } }> {
     const [memory, goal, soul, handoffs, skills] = await Promise.all([
       this.memory(o.owner, o.routineId),
@@ -456,6 +458,7 @@ export class BotFolder {
       news ? `New in your thread since your last run:\n${news}` : "",
       o.wakes ? wakesLines(o.wakes) : "",
       o.slack ? slackLines(o.slack) : "",
+      o.teams ? teamsLines(o.teams) : "",
       "Anything older (messages, earlier runs): the search_history tool.",
     ]
       .filter(Boolean)
@@ -592,6 +595,14 @@ export function slackLines(s: { handle: string; workspace: string | null; news: 
     ? `When you have news worth a channel (an alert, a result people wait for), post it there yourself with the post_to_slack tool: it goes to ${s.news}, the one channel your owner chose. Not for a routine "nothing new", a question to your owner (ask_owner) or a failure: those stay here.`
     : "No channel is chosen for news of your own, so what you report stays in the Ambient app.";
   return `You're in Slack as @${s.handle}${s.workspace ? ` (${s.workspace})` : ""}. When someone writes to you there, your answer goes back to that thread on its own. ${where}`;
+}
+
+/** What a bot with a Teams app is told each run: that it's there, and where its own news goes. */
+export function teamsLines(t: { handle: string; news: string | null }): string {
+  const where = t.news
+    ? `When you have news worth a channel (an alert, a result people wait for), post it there yourself with the post_to_teams tool: it goes to ${t.news}, the one channel your owner chose. Not for a routine "nothing new", a question to your owner (ask_owner) or a failure: those stay here.`
+    : "No Teams channel is chosen for news of your own, so what you report stays in the Ambient app.";
+  return `You're in Microsoft Teams as ${t.handle}. When someone writes to you there, your answer goes back to that chat or thread on its own (Teams shows Markdown). ${where}`;
 }
 
 function wakesLines(w: { timezone: string; now: string; wakes: { id: string; when: string; note: string }[] }): string {
