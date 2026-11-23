@@ -110,6 +110,14 @@ this is the answer and the bot carries on with it; otherwise it's a message, and
 run with it (continuing its last session when it has one). Answers
 `{ "message": ThreadMessage, "routine": Routine }`. A personal bot's owner writes to it.
 
+With `"question": "<message id>"` (a choice tapped under a question, and every decision's answer,
+`POST /v1/app/decisions/:id`) it answers that question, even when the bot has asked something newer
+since: a bot keeps one open question, so an older card's answer used to go to the newest question,
+or became a plain message while the card stayed. That older question is settled with its decision
+and the newer one stays open. The bot reads the answer with the question in front ("Answer to your
+question “…”:"); the thread gives the answer alone with `replyTo: { id, text }` (the question and a
+line of it), which the app shows as an inline reply. 404 `no_such_question`, 409 `already_answered`.
+
 #### A team bot's thread is a group chat
 
 Everyone in the team writes to a team bot's thread, and everyone sees what the others wrote, with

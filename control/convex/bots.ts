@@ -24,6 +24,7 @@ function messageShape(m: Doc<"botMessages">) {
     authorId: m.authorId ?? null,
     authorName: m.authorName ?? null,
     answeredAt: m.answeredAt ?? null,
+    replyTo: m.replyTo ?? null,
     createdAt: m.createdAt,
   };
 }
@@ -120,8 +121,21 @@ export const latest = query({
  * still going and waiting for this answer, which then picks it up itself (questionAnswer).
  */
 export const post = mutation({
-  args: { ...secretArg, ...access, id: v.string(), iv: v.string(), ct: v.string(), now: v.number(), asAmbient: v.optional(v.boolean()) },
-  handler: async (ctx, { secret, uid, teamIds, id, iv, ct, now, asAmbient }) => {
+  args: {
+    ...secretArg,
+    ...access,
+    id: v.string(),
+    iv: v.string(),
+    ct: v.string(),
+    now: v.number(),
+    asAmbient: v.optional(v.boolean()),
+    /** The question this answers (a card's, or a choice under it), when it isn't simply the open one. */
+    questionId: v.optional(v.string()),
+    /** The text as the thread keeps it when that question isn't the open one: it says which it answers. */
+    olderIv: v.optional(v.string()),
+    olderCt: v.optional(v.string()),
+  },
+  handler: async (ctx, { secret, uid, teamIds, id, iv, ct, now, asAmbient, questionId, olderIv, olderCt }) => {
     assertService(secret);
     const r = await routineFor(ctx, uid, teamIds, id);
     if (!r?.bot) return { ok: false as const, error: "no_such_bot" };
@@ -134,7 +148,19 @@ export const post = mutation({
     }
     const user = await ctx.db.get(uid);
     const open = r.openQuestionId ? await ctx.db.get(r.openQuestionId) : null;
-    const question = open && !open.answeredAt ? open : null;
+    let question = open && !open.answeredAt ? open : null;
+    // A named question: that one, even when a newer one is open (a card answered later). The bot
+    // keeps one open question, so an older card's answer went to the newest question, or became a
+    // plain message, and the card stayed (Nikolai, 2026-11-23).
+    let older = false;
+    if (questionId) {
+      const qid = ctx.db.normalizeId("botMessages", questionId);
+      const asked = qid ? await ctx.db.get(qid) : null;
+      if (!asked || String(asked.routineId) !== String(r._id) || asked.kind !== "question") return { ok: false as const, error: "no_such_question" };
+      if (asked.answeredAt) return { ok: false as const, error: "already_answered" };
+      older = !question || String(question._id) !== String(asked._id);
+      question = asked;
+    }
     const decision = question ? await ctx.db.query("decisions").withIndex("by_question", (q) => q.eq("questionId", question._id)).first() : null;
     // Its questions, its decisions and Ambient answering are its maker's (the decision's person):
     // in a team's group chat everyone sees the question, but another member's reply is a message
@@ -142,14 +168,17 @@ export const post = mutation({
     const decider = String(decision?.userId ?? r.userId);
     if (asAmbient && String(uid) !== decider) return { ok: false as const, error: "not_yours" };
     const kind = question && String(uid) === decider ? ("answer" as const) : ("message" as const);
+    // An older question's answer says which question it answers; the decision keeps the answer itself.
+    const kept = kind === "answer" && older && olderIv && olderCt ? { iv: olderIv, ct: olderCt } : { iv, ct };
     const messageId = await ctx.db.insert("botMessages", {
       routineId: r._id,
       teamId: r.teamId,
       // Ambient answering for the person: its own role in the thread, on their behalf.
       role: asAmbient ? "ambient" : "user",
       kind,
-      iv,
-      ct,
+      iv: kept.iv,
+      ct: kept.ct,
+      ...(kind === "answer" && older && question ? { replyTo: question._id } : {}),
       authorId: uid,
       authorName: asAmbient ? `Ambient, for ${user?.name ?? "you"}` : user?.name,
       createdAt: now,
@@ -158,7 +187,8 @@ export const post = mutation({
     // Writing to it means its thread was read (by the writer, in a team's group chat).
     if (r.teamId) await markRead(ctx, r._id, uid, now);
     await ctx.db.patch(r._id, {
-      ...(kind === "answer" ? { openQuestionId: undefined } : {}),
+      // The open question stays open when an older one was answered.
+      ...(kind === "answer" && !older ? { openQuestionId: undefined } : {}),
       ...(r.teamId ? {} : { seenAt: now }),
       pendingMessageId: messageId,
       runRequestedAt: now,
