@@ -103,6 +103,38 @@ describe("a bot's question goes to Ambient first", () => {
     expect(chat.at(-1)!.decision).toMatchObject({ status: "answered", answer: { text: "No", via: "thread" } });
   });
 
+  it("an older card answers its own question, though a newer one is open, and goes away", async () => {
+    const b = await botAsks("Nightly bot", "Keep going with the idea?", ["Keep going", "Drop it"], "never");
+    const first = await until(async () => (await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as Decision[], (d) => d.some((x) => x.question === "Keep going with the idea?"));
+    const older = first.find((x) => x.question === "Keep going with the idea?")!;
+    // The bot asks something newer: that's its open question now.
+    const later = await hostCall(b.token, "POST", "/v1/bot/ask", { question: "Merge the pull request?", choices: ["Merge", "Changes"] });
+    const newerId = String(later.json.id);
+    await until(async () => (await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as Decision[], (d) => d.some((x) => x.question === "Merge the pull request?"));
+
+    const answered = await appCall(s, lena.access_token, "POST", `/v1/app/decisions/${older.id}`, { option: "Keep going" });
+    expect(answered.status, JSON.stringify(answered.json)).toBe(200);
+    expect(answered.json.decision).toMatchObject({ status: "answered", answer: { text: "Keep going" } });
+    // The run that asked gets it for that question; the newer one is still open, and its card stays.
+    expect((await hostCall(b.token, "GET", `/v1/bot/questions/${b.questionId}`)).json).toMatchObject({ answer: expect.stringContaining("Keep going") });
+    expect((await hostCall(b.token, "GET", `/v1/bot/questions/${newerId}`)).json).toMatchObject({ answer: null });
+    const left = (await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as Decision[];
+    expect(left.map((x) => x.question)).toContain("Merge the pull request?");
+    expect(left.map((x) => x.question)).not.toContain("Keep going with the idea?");
+    // In the thread it says which question it answers.
+    const t = await thread(b.id);
+    // In the thread it's an inline reply to that question; the bot reads it with the question in front.
+    expect(t.at(-1)).toMatchObject({ kind: "answer", text: "Keep going", replyTo: { id: b.questionId, text: "Keep going with the idea?" } });
+    expect((await hostCall(b.token, "GET", `/v1/bot/questions/${b.questionId}`)).json).toMatchObject({ answer: "Answer to your question “Keep going with the idea?”:\nKeep going" });
+    expect((await appCall(s, lena.access_token, "POST", `/v1/app/routines/${b.id}/thread`, { text: "Again", question: b.questionId })).status).toBe(409);
+
+    // A choice tapped under the newer question in the thread answers that one, as the open one: no prefix.
+    const tapped = await appCall(s, lena.access_token, "POST", `/v1/app/routines/${b.id}/thread`, { text: "Merge", question: newerId });
+    expect(tapped.status, JSON.stringify(tapped.json)).toBe(200);
+    expect(tapped.json.message).toMatchObject({ kind: "answer", text: "Merge", replyTo: null });
+    expect((await appCall(s, lena.access_token, "GET", "/v1/app/decisions")).json.decisions as Decision[]).toEqual([]);
+  });
+
   it("can be answered in words through Ambient's tools", async () => {
     triageReply = '{"action":"ask","suggest":"","why":""}';
     await botAsks("Word bot", "Which day?", ["Monday", "Tuesday"]);

@@ -1392,8 +1392,9 @@ function registerLearningTools(
           const owner = ownerOf((args as { team?: string }).team);
           if ((args as { services?: boolean }).services) {
             const cat = await mcp.catalog(owner);
-            const lines = cat.categories.map((c) => `${c.name}: ${cat.services.filter((x) => x.category === c.id).map((x) => `${x.name} (${x.id}${x.connection ? ", connected" : ""})`).join(", ")}`);
-            return result(`${lines.join("\n")}\nConnect one with add: { service: "<id>" }. Anything else connects by its address.`, cat);
+            const lines = cat.categories.map((c) => `${c.name}: ${cat.services.filter((x) => x.category === c.id).map((x) => `${x.name} (${x.id}${x.connection ? ", connected" : x.signIn === "key" ? ", needs a token" : ""})`).join(", ")}`);
+            const keyed = cat.services.filter((x) => x.signIn === "key" && !x.connection).map((x) => `${x.name}: the user makes a token at ${x.key?.url}. ${x.key?.help ?? ""}`.trim());
+            return result(`${lines.join("\n")}\nConnect one with add: { service: "<id>" }; one that needs a token takes add: { service, key } with the token the user gave you.${keyed.length ? `\n${keyed.join("\n")}` : ""} Anything else connects by its address.`, cat);
           }
           if (add) {
             const a = add as { service?: string; name?: string; url?: string; key?: string; header?: string };

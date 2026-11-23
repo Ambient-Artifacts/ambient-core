@@ -461,6 +461,10 @@ export class McpConnections {
     if (!name) throw new McpConnectionError("bad_request", "Give it a name.");
     const url = (await this.checkUrl(input.url)).toString();
     const key = input.key?.trim() || undefined;
+    // A service that's reached with a token made there: no sign-in to try, say where to make one.
+    if (entry?.signIn === "key" && !key) {
+      throw new McpConnectionError("needs_key", `${entry.name} needs a token you make at ${entry.key?.url ?? new URL(entry.url).host}. ${entry.key?.help ?? ""}`.trim(), 400);
+    }
     const header = input.header?.trim() || undefined;
     if (header && !/^[A-Za-z0-9-]{1,64}$/.test(header)) throw new McpConnectionError("bad_request", "That isn't a header's name.");
     const existing = await this.all(owner);

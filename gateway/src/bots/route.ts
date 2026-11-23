@@ -40,7 +40,12 @@ function fail(res: Response, err: unknown) {
 
 const Text = z.object({ text: z.string().trim().min(1).max(8_000) });
 /** A message to a bot: text, files, or both (files: bots/attachments.ts). */
-const ThreadPost = z.object({ text: z.string().trim().max(8_000).default(""), attachments: z.array(ChatAttachment).max(4).default([]) });
+const ThreadPost = z.object({
+  text: z.string().trim().max(8_000).default(""),
+  attachments: z.array(ChatAttachment).max(4).default([]),
+  /** The question it answers (a choice tapped under it), when that isn't simply the open one. */
+  question: z.string().max(64).optional(),
+});
 
 /** A kept file, as its owner sent it: inline (images, PDFs show in place), cached for good (its id never changes). */
 function sendFile(res: Response, file: { name: string; type: string; bytes: Buffer }) {
@@ -295,8 +300,8 @@ export function botAppRoutes(
     }
     try {
       const a = await actor(res);
-      if (body.data.attachments.length) {
-        res.json(await d.bots.post(a, id(req), body.data.text, { files: checkAttachments(body.data.attachments) }));
+      if (body.data.attachments.length || body.data.question) {
+        res.json(await d.bots.post(a, id(req), body.data.text, { ...(body.data.attachments.length ? { files: checkAttachments(body.data.attachments) } : {}), ...(body.data.question ? { question: body.data.question } : {}) }));
         return;
       }
       res.json(await d.bots.receive(a, { channel: "app", uid: a.uid, target: { kind: "bot", botId: id(req) }, text: body.data.text }));

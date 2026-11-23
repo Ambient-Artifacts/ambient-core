@@ -316,7 +316,9 @@ export class GitHubApp {
       return { status: 202, result: "repos updated" };
     }
     if (!owner) return { status: 202, result: "not linked" };
-    return this.d.github.deliver(owner, { event, delivery: headers.delivery ? `app:${headers.delivery}` : undefined }, body, this.key);
+    // GitHub gives every App its copy of an event under the same delivery id: the id counts per
+    // App, or the first App's copy would make the others' look like a repeat.
+    return this.d.github.deliver(owner, { event, delivery: headers.delivery ? `app:${this.key}:${headers.delivery}` : undefined }, body, this.key);
   }
 
   private async refresh(owner: Owner, id: number): Promise<void> {

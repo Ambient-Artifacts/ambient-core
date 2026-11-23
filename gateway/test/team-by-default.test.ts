@@ -93,6 +93,28 @@ describe("a personal connection with one team", () => {
     expect(logged).toHaveLength(3);
   });
 
+  it("treats a Claude Code working folder like a project: team, unless the path says private", async () => {
+    const { client, logged } = await connect(principal());
+    const cc = { ...work, app: "Claude Code" };
+    const team = await client.callTool({ name: "log_work", arguments: { ...cc, project: "/Users/lena/Code/pricing-site" } });
+    expect(text(team)).toContain("to the Acme team wiki");
+    for (const project of ["/Users/lena/Privat/steuern", "/Users/lena/Code/PRIVATE-notes", "C:\\Users\\lena\\private\\cv"]) {
+      const r = await client.callTool({ name: "log_work", arguments: { ...cc, project } });
+      expect(r.isError).toBeFalsy();
+      expect(text(r)).toContain("to the user's Ambient wiki");
+    }
+    expect(logged.map((l) => l.team?.slug ?? null)).toEqual(["acme", null, null, null]);
+    const shared = await client.callTool({ name: "log_work", arguments: { ...cc, project: "/Users/lena/Privat/steuern", share_with_team: "acme" } });
+    expect(shared.isError).toBe(true);
+    expect(text(shared)).toContain("is a private project");
+  });
+
+  it("tells Claude Code to pass its working folder as the project", async () => {
+    const { client, tool } = await connect(principal());
+    expect(client.getInstructions() ?? "").toContain("In Claude Code the project\nis the folder it works in");
+    expect(JSON.stringify((await tool("log_work")).inputSchema)).toContain("its working directory");
+  });
+
   it("keeps it personal when the project isn't given, and says how to send it to the team", async () => {
     const { client, logged, toTeams, personal } = await connect(principal());
     const r = await client.callTool({ name: "log_work", arguments: work });

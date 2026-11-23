@@ -367,7 +367,8 @@ export class DecisionService {
     if (!answer) throw new RoutineError("bad_request", "Give an answer.", 400);
     if (row.routineId) {
       // Through the bot's thread: the bot gets it and the decision is settled there (Convex).
-      await this.d.bots.post(actor, String(row.routineId), answer);
+      // To this decision's own question, which may not be the bot's open one any more.
+      await this.d.bots.post(actor, String(row.routineId), answer, row.questionId ? { question: String(row.questionId) } : {});
       const after = (await this.d.control.q(api.bots.decision, { uid: actor.uid as never, id })) as unknown as DecisionRow;
       return this.view(actor.uid, after);
     }

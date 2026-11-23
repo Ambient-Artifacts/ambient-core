@@ -39,6 +39,12 @@ export interface ThreadMessage {
   /** A Slack or Teams thread it belongs to (its lane): the app shows it as that thread's card. */
   lane: string | null;
   place: { label: string; url: string | null } | null;
+  /**
+   * An answer to an older question than the open one: that question (its id and a line of it),
+   * for the app to show as an inline reply. `text` is then the answer alone; the bot reads it with
+   * the question in front ("Answer to your question “…”:").
+   */
+  replyTo: { id: string; text: string } | null;
 }
 
 interface MessageRow {
@@ -51,6 +57,7 @@ interface MessageRow {
   authorId: string | null;
   authorName: string | null;
   answeredAt: number | null;
+  replyTo?: string | null;
   createdAt: number;
 }
 
@@ -117,11 +124,12 @@ export class BotService {
 
   private async message(owner: Owner, m: MessageRow, uid: string, computer?: string | null): Promise<ThreadMessage> {
     const body: MessageBody = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => ({ text: "(couldn't be opened)" }));
+    const reply = m.replyTo ? splitReply(body.text) : null;
     return {
       id: String(m.id),
       role: m.role,
       kind: m.kind,
-      text: body.text,
+      text: reply ? reply.answer : body.text,
       choices: body.choices?.length ? body.choices : null,
       details: body.details ?? null,
       runId: m.runId ? String(m.runId) : null,
@@ -133,6 +141,7 @@ export class BotService {
       files: body.files ?? [],
       lane: body.lane ?? null,
       place: body.place ? { label: body.place.label, url: body.place.url ?? null } : null,
+      replyTo: m.replyTo && reply ? { id: String(m.replyTo), text: reply.question } : null,
     };
   }
 
@@ -162,7 +171,11 @@ export class BotService {
     return this.post(actor, id, text, { asAmbient: true });
   }
 
-  async post(actor: Actor, id: string, text: string, opts: { asAmbient?: boolean; files?: IncomingFile[] } = {}): Promise<{ message: ThreadMessage; routine: Routine }> {
+  /**
+   * `question`: the question message this answers (a card's, or a choice tapped under it), which
+   * may not be the open one; without it, a message answers the open question as before.
+   */
+  async post(actor: Actor, id: string, text: string, opts: { asAmbient?: boolean; files?: IncomingFile[]; question?: string } = {}): Promise<{ message: ThreadMessage; routine: Routine }> {
     const r = await this.bot(actor, id);
     if (r.teamId ? !actor.canWriteTeams : !actor.canWritePersonal) throw refused("read_only", "This connection can't write to bots. Reconnect Ambient in this app and allow saving.", 403);
     const body = text.trim().slice(0, MESSAGE_MAX);
@@ -173,13 +186,31 @@ export class BotService {
     const files = incoming.length ? await this.d.attachments!.save(owner, { routineId: id }, incoming) : [];
     // The run reads the thread's text: it learns of the files there, and fetches them with its token.
     const sealed = await sealMessage(this.d.routines.keys, owner, { text: body || "(See the attached files.)", files });
+    // For a named question that may not be the open one: the same answer, saying which question
+    // it answers, so the bot can tell (Convex keeps this one when a newer question is open).
+    let older: { iv: string; ct: string } | null = null;
+    if (opts.question) {
+      const asked = (await this.thread(actor, id, 100, { markSeen: false })).messages.find((m) => m.id === opts.question && m.kind === "question");
+      if (asked) older = await sealMessage(this.d.routines.keys, owner, { text: replyText(asked.text, body || "(See the attached files.)"), files });
+    }
     // A team bot's thread is a group chat: everyone in the team writes (not only its admins).
-    const out = await this.d.routines.control.m(api.bots.post, { ...(r.teamId ? this.access(actor) : this.writeAccess(actor)), id, iv: sealed.iv, ct: sealed.ct, now: this.now(), ...(opts.asAmbient ? { asAmbient: true } : {}) });
+    const out = await this.d.routines.control.m(api.bots.post, {
+      ...(r.teamId ? this.access(actor) : this.writeAccess(actor)),
+      id,
+      iv: sealed.iv,
+      ct: sealed.ct,
+      now: this.now(),
+      ...(opts.asAmbient ? { asAmbient: true } : {}),
+      ...(opts.question ? { questionId: opts.question } : {}),
+      ...(older ? { olderIv: older.iv, olderCt: older.ct } : {}),
+    });
     if (!out.ok) {
       const messages: Record<string, [string, number]> = {
         no_such_bot: ["There's no such bot.", 404],
         admins_only: ["Only whoever may change this bot can write to it.", 403],
         not_yours: ["Only the bot's maker, or their Ambient, answers its questions.", 403],
+        no_such_question: ["There's no such question.", 404],
+        already_answered: ["It's already answered.", 409],
         no_computer: ["This bot has no computer to run on. Pick one first.", 400],
         no_team_server: ["The team has no computer for its bots yet. An owner or admin connects one on the team's page in the Ambient app (Computers), with the same one-line command as a computer of your own.", 400],
       };
@@ -346,4 +377,26 @@ export class BotService {
     const sent = files.map((ref, i) => ({ ref, data: incoming[i]!.data, name: ref.name, type: ref.type }));
     if (text.trim() || sent.length) this.onSaid?.(owner, String(who.routineId), text.trim().slice(0, MESSAGE_MAX), runTokenHash, undefined, sent);
   }
+}
+
+/** A question as one short line, for an answer that says which question it answers. */
+function oneLine(text: string, max: number): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+const REPLY_HEAD = "Answer to your question “";
+const REPLY_TAIL = "”:\n";
+
+/** An older question's answer as the bot reads it: the question in front, then the answer. */
+export function replyText(question: string, answer: string): string {
+  return `${REPLY_HEAD}${oneLine(question, 160).replaceAll("”:", "”")}${REPLY_TAIL}${answer}`;
+}
+
+/** The other way, for the app's inline reply: the question's line and the answer alone. */
+export function splitReply(text: string): { question: string; answer: string } | null {
+  if (!text.startsWith(REPLY_HEAD)) return null;
+  const end = text.indexOf(REPLY_TAIL, REPLY_HEAD.length);
+  if (end < 0) return null;
+  return { question: text.slice(REPLY_HEAD.length, end), answer: text.slice(end + REPLY_TAIL.length) };
 }

@@ -122,6 +122,29 @@ function clip(text: string): string {
   return text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}\n\n[truncated]` : text;
 }
 
+/** How much of a long page or transcript one call returns, leaving room for the heading and backlinks. */
+export const PART_CHARS = 20_000;
+
+/**
+ * One part of a long text from `offset` (characters), cut at a line break where one is near, so a
+ * page of any length can be read in calls: before this the rest of a page past 25,000 characters was
+ * lost (ALEAS's TOP.Event page, 51 KB, ended with the talk a colleague asked about).
+ */
+export function part(text: string, offset = 0, size = PART_CHARS): { text: string; next: number | null; total: number } {
+  const total = text.length;
+  const start = Math.max(0, Math.min(offset, total));
+  let end = Math.min(total, start + size);
+  if (end < total) {
+    const nl = text.lastIndexOf("\n", end);
+    if (nl > start + size / 2) end = nl + 1;
+  }
+  return { text: text.slice(start, end), next: end < total ? end : null, total };
+}
+
+function continued(p: { next: number | null; total: number }, tool: string): string {
+  return p.next === null ? "" : `\n\n[Continues: call ${tool} again with offset: ${p.next} (${p.total - p.next} of ${p.total} characters left).]`;
+}
+
 function textResult(text: string, structured?: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text: clip(text) }],
@@ -150,14 +173,15 @@ function oneLine(text: string, n: number): string {
 /**
  * Anything that goes to a team carries the name of the Claude project it was written in. A
  * project with "privat"/"private" in its name (any case, anywhere: "HR - Privat", "private:
- * Verrechnung") is private: nothing from it goes to a team. The client says which project it is;
+ * Verrechnung") is private: nothing from it goes to a team. In Claude Code the project is the
+ * working folder's path, so a folder anywhere under "…/Privat/…" is private too. The client says which project it is;
  * MCP has no field for it, so this catches a model that overlooked the rule, it isn't proof.
  */
 export const ProjectArg = z
   .string()
   .max(120)
   .optional()
-  .describe('The name of the Claude project this conversation is in, exactly as shown; "none" outside a project. Needed whenever something goes to a team.');
+  .describe('The name of the Claude project this conversation is in, exactly as shown; "none" outside a project. In Claude Code, which has no Claude projects: the full path of the folder it works in (its working directory). Needed whenever something goes to a team.');
 
 export function privateProject(name: string | undefined): boolean {
   return !!name && /priva/i.test(name);
@@ -177,8 +201,9 @@ function projectRefusal(project: string | undefined): string | null {
 const TEAM_DEFAULT_INSTRUCTIONS = `
 Where writes go: save_note and log_work go to the user's team brain, unless this conversation is in a
 private project (its name contains "privat" or "private"): there they stay in the personal wiki. Always
-pass project: the Claude project's exact name, or "none" outside a project. For reading, choose
-personal, team or both, whatever answers the question.`;
+pass project: the Claude project's exact name, or "none" outside a project. In Claude Code the project
+is the folder it works in: pass its full path, and a folder with "privat" or "private" anywhere in the
+path is private. For reading, choose personal, team or both, whatever answers the question.`;
 
 /** "[00:01:05] Lena: text" lines of a stored transcript, as a team note's segments. */
 function transcriptSegments(text: string): { t0: number; t1: number; text: string; speaker?: string }[] {
@@ -493,33 +518,41 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     "fetch",
     {
       title: "Fetch a page",
-      description: "Return the full markdown of one note or wiki page by id (from search or other tools).",
-      inputSchema: { id: z.string().min(3).max(300) },
+      description:
+        "Return the markdown of one note or wiki page by id (from search or other tools). A long page comes in parts: when the result ends with \"[Continues: … offset: N …]\", call fetch again with that offset for the next part, until you have what you need.",
+      inputSchema: {
+        id: z.string().min(3).max(300),
+        offset: z.number().int().min(0).optional().describe("Where to continue a long page, in characters, as the previous part said. Omit for the start."),
+      },
       outputSchema: {
         id: z.string(),
         title: z.string(),
         text: z.string(),
         url: z.string(),
+        next_offset: z.number().nullable().optional(),
         metadata: z.record(z.string(), z.unknown()),
       },
       annotations: readOnly,
     },
-    async ({ id }) => {
+    async ({ id, offset }) => {
       const hit = await resolveId(id).catch(() => undefined);
       if (!hit) return errorResult(`No page with id "${id}" in a scope you can read.`);
       const { s, page } = hit;
+      const piece = part(page.body.trim(), offset ?? 0);
       const doc = {
         id: idOf(s, page.ref),
         title: page.title,
-        text: clip(page.body.trim()),
+        text: piece.text,
+        next_offset: piece.next,
         url: urlOf(s, page.ref),
         metadata: { scope: scopeLabel(s), type: page.type, summary: page.summary, updated: page.updated, frontmatter: page.frontmatter },
       };
       const linkedFrom = await s.store.backlinks(page.ref).catch(() => []);
       const backlinks = linkedFrom.slice(0, 20).map((b) => `- ${b.title} (${idOf(s, b.ref)})`);
       const transcript = page.type === "note" && (typeof page.frontmatter.raw === "string" || s.scope === "team") ? "\n\nThe full transcript is available with `transcript`." : "";
+      const from = offset ? ` · from character ${offset} of ${piece.total}` : "";
       return textResult(
-        `# ${page.title}\n(${doc.metadata.scope} · ${page.type} · ${doc.url})\n\n${doc.text}${backlinks.length ? `\n\n## Linked from\n${backlinks.join("\n")}` : ""}${transcript}`,
+        `# ${page.title}\n(${doc.metadata.scope} · ${page.type} · ${doc.url}${from})\n\n${doc.text}${continued(piece, "fetch")}${backlinks.length ? `\n\n## Linked from\n${backlinks.join("\n")}` : ""}${transcript}`,
         { ...doc, metadata: { ...doc.metadata, linkedFrom: linkedFrom.slice(0, 20).map((b) => idOf(s, b.ref)) } },
       );
     },
@@ -530,11 +563,14 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     {
       title: "Read a note's transcript",
       description:
-        "The full transcript of a recorded conversation (timestamps and speakers), for a note id from search, fetch or list_recent. Use it to check details or quotes the note summarizes.",
-      inputSchema: { id: z.string().min(3).max(300) },
+        "The full transcript of a recorded conversation (timestamps and speakers), for a note id from search, fetch or list_recent. Use it to check details or quotes the note summarizes. A long one comes in parts: call again with the offset the result names.",
+      inputSchema: {
+        id: z.string().min(3).max(300),
+        offset: z.number().int().min(0).optional().describe("Where to continue a long transcript, in characters, as the previous part said. Omit for the start."),
+      },
       annotations: readOnly,
     },
-    async ({ id }) => {
+    async ({ id, offset }) => {
       const hit = await resolveId(id).catch(() => undefined);
       if (!hit || hit.page.type !== "note") return errorResult(`No note with id "${id}" in a scope you can read.`);
       const { s, page } = hit;
@@ -546,7 +582,8 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
         text = s.store.transcript ? await s.store.transcript(page.ref).catch(() => null) : null;
       }
       if (!text) return errorResult(`The transcript of "${page.title}" isn't available (not backed up from the phone, or older than the team keeps transcripts).`);
-      return textResult(text.replace(/^---\n[\s\S]*?\n---\n/, ""));
+      const piece = part(text.replace(/^---\n[\s\S]*?\n---\n/, ""), offset ?? 0);
+      return textResult(`${piece.text}${continued(piece, "transcript")}`);
     },
   );
 

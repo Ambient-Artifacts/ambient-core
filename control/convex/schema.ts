@@ -514,6 +514,8 @@ export default defineSchema({
     /** Questions: when they were answered, and by which message. */
     answeredAt: v.optional(v.number()),
     answerId: v.optional(v.id("botMessages")),
+    /** An answer to an older question than the open one: that question (shown as an inline reply). */
+    replyTo: v.optional(v.id("botMessages")),
     createdAt: v.number(),
   }).index("by_routine", ["routineId", "createdAt"]),
 
