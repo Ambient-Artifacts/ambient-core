@@ -481,6 +481,9 @@ export function ruleMatches(rule: SessionRule, place: SessionPlace, budget: Matc
 
 /** The first rule that covers the session and names a team the user is in. */
 export function pickTeam<T extends { slug: string }>(rules: SessionRule[], place: SessionPlace, teams: T[], budget: MatchBudget = matchBudget()): T | null {
+  // A private folder or repo ("privat"/"private" anywhere in it, any case) never goes to a team,
+  // whatever the rules say: the same line as a private Claude project (mcp/tools.ts).
+  if (/priva/i.test(place.cwd ?? "") || /priva/i.test(place.repo ?? "")) return null;
   for (const rule of rules) {
     if (!ruleMatches(rule, place, budget)) continue;
     const team = teams.find((t) => t.slug === rule.team);
