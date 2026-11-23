@@ -65,7 +65,7 @@ export class BotService {
   onEvent?: (e: AutomationEvent) => void;
   /** The bot said something while it runs (a reply, a question): Slack answers the thread that asked. */
   /** With `question`: the run asks its owner (ask_owner); its id and choices (Teams shows a card). */
-  onSaid?: (owner: Owner, routineId: string, text: string, tokenHash: string, question?: { id: string; text: string; choices: string[]; details?: string }) => void;
+  onSaid?: (owner: Owner, routineId: string, text: string, tokenHash: string, question?: { id: string; text: string; choices: string[]; details?: string }, files?: { ref: FileRef; data: string; name: string; type: string }[]) => void;
   /** The run (its token's hash) took Slack messages mid-run: they're its to answer. */
   onTookSlack?: (owner: Owner, routineId: string, tokenHash: string) => Promise<void>;
 
@@ -302,7 +302,7 @@ export class BotService {
    * works"): the run takes them into its session instead of a second run starting afterwards.
    * `cursor`: pass it back as `after` next time.
    */
-  async inbox(authorization: string | undefined, after?: number): Promise<{ messages: { text: string; who: string; at: number }[]; cursor: number }> {
+  async inbox(authorization: string | undefined, after?: number): Promise<{ messages: { text: string; who: string; at: number; files?: FileRef[] }[]; cursor: number }> {
     const runTokenHash = this.tokenHash(authorization);
     const out = await this.d.routines.control.m(api.bots.claimInbox, { runTokenHash, ...(after !== undefined ? { after } : {}) });
     if (!out.ok) throw refused("run_over", "This run is over.", 409);
@@ -310,7 +310,8 @@ export class BotService {
     const messages = [];
     for (const m of out.messages) {
       const body = await openMessage(this.d.routines.keys, owner, m.iv, m.ct).catch(() => null);
-      if (body?.text) messages.push({ text: body.text, who: m.authorName ?? (m.role === "ambient" ? "Ambient" : "Your owner"), at: m.createdAt });
+      // Files with it go along by reference: the runner fetches them with the run's token.
+      if (body?.text || body?.files?.length) messages.push({ text: body.text ?? "", who: m.authorName ?? (m.role === "ambient" ? "Ambient" : "Your owner"), at: m.createdAt, ...(body.files?.length ? { files: body.files } : {}) });
     }
     // A Slack or Teams message among them: this run answers it there.
     if (this.onTookSlack && out.messages.some((m) => m.authorName === "Slack" || m.authorName === "Teams")) {
@@ -336,6 +337,8 @@ export class BotService {
     if (!out.ok) throw refused("run_over", "This run is over.", 409);
     // This turn's answer is in the thread: its live text goes (the run goes on with the next).
     this.d.live?.endTurn(String(who.routineId));
-    if (text.trim()) this.onSaid?.(owner, String(who.routineId), text.trim().slice(0, MESSAGE_MAX), runTokenHash);
+    // Its files go where its words go (Slack, Teams), with their bytes so nothing is fetched again.
+    const sent = files.map((ref, i) => ({ ref, data: incoming[i]!.data, name: ref.name, type: ref.type }));
+    if (text.trim() || sent.length) this.onSaid?.(owner, String(who.routineId), text.trim().slice(0, MESSAGE_MAX), runTokenHash, undefined, sent);
   }
 }

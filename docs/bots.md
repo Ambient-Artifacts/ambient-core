@@ -1038,8 +1038,10 @@ the app; the person taps Allow once (`gateway/src/bots/slack-apps.ts`).
   `{ "workspace": bool, "app": { "appId", "installed", "botUserId", "teamName" } | null }`.
 - **Its face.** `PUT /v1/app/routines/:id/slack/icon` with a PNG (512 to 2000 px square;
   `apps.icon.set`). The app renders the bot's face and sends it.
-- **Scopes:** `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`,
-  `im:history`, `im:read`, `im:write`, `reactions:write`, `users:read`. **Events:**
+- **Scopes:** `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`,
+  `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`, `reactions:write`,
+  `users:read`, `files:read`, `files:write` (an app from before files gets them with one more Allow:
+  `POST /v1/app/routines/:id/slack/allow`; until then `news.files` is false). **Events:**
   `app_mention`, `message.im`.
 - **What Slack sends.** The hook in the event URL is signed by Ambient and names the bot and its
   owner, so an event finds its app without a table; each event is then checked with that app's
@@ -1135,9 +1137,31 @@ registration and a free Azure Bot (F0) in the company's Azure subscription
   its app registration, and forgets it here.
 - **Where it's kept.** Sealed records (kinds `teams:tenant`, `teams:app`, `teams:reply`), nothing
   new in Convex. The bot's secret never leaves the gateway.
-- **Not yet:** decisions Amb brings to the person (they reach the app and iMessage), files, Amb in
+- **Not yet:** decisions Amb brings to the person (they reach the app and iMessage), Amb in
   Teams, a new secret before the two years are up, and installing it for the owner without the
   Add tap.
+
+## Files in Slack and Teams
+
+Every bot takes and sends files wherever it's reached, as in the app (`gateway/src/channels/channel-files.ts`).
+
+- **Coming in.** Files sent with a message to a bot (Slack: a message's `files`, also a
+  `file_share` with no text; Teams: a file in a chat with the bot, a pasted picture) are
+  downloaded, checked like the app's (4 files, 10 MB together; images, PDFs, text and Office
+  files; HEIC photos become JPEG) and kept in the bot's thread with the message
+  (`attachments.save`). Its run gets them on disk like a file sent from the app; a file that comes
+  while it works too (the inbox carries them, runner 0.17.0 fetches them). What can't be passed on
+  is named in the message with the reason ("not passed on to you: Budget.xlsx (…)"), so the bot
+  never works from a screenshot it didn't get. Slack needs `files:read`; a file shared in a Teams
+  channel or group chat stays in SharePoint, which the bot can't open: it's named, with "send it
+  to me in a direct chat".
+- **Going out.** Files a run sends (`send_file`) go where its words go: into the Slack thread as an
+  upload (`files.getUploadURLExternal`, then `files.completeUploadExternal`, needs `files:write`;
+  without it, a line that the file is in Ambient), and into the Teams chat or thread as a picture
+  inline (up to 1 MB) or a card with a Download link (`/v1/teams/files/<signed>/<name>`, signed by
+  Ambient, for 7 days; the file stays in the bot's thread).
+- **Amb** takes and sends files in the app and on iMessage already; in Slack and Teams it will by
+  the same code.
 
 ## MCP connections
 

@@ -25,6 +25,10 @@ let granted = "app_mentions:read,chat:write";
 /** Slack's refusal for the next posts (a channel it was removed from). */
 let postError = "";
 let posted = 0;
+let slackBase = "";
+/** What the bot uploaded into Slack (files.getUploadURLExternal's URL). */
+const uploads: { bytes: number; type: string }[] = [];
+const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a4b30000000049454e44ae426082", "hex");
 
 const call = (method: string, path: string, body?: unknown) => appCall(s, lena.access_token, method, path, body);
 const hostCall = async (token: string, method: string, path: string, body?: unknown) => {
@@ -57,6 +61,15 @@ beforeAll(async () => {
           : { multipart: raw.includes('name="app_id"') ? "yes" : "no" };
       calls.push({ method, auth: String(req.headers.authorization ?? ""), args });
       const json = (v: unknown) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(v));
+      // A file someone sent: only with the bot's token (Slack answers a sign-in page otherwise).
+      if (method === "files/screenshot.png") {
+        if (req.headers.authorization !== "Bearer xoxb-chatty") return res.writeHead(200, { "content-type": "text/html" }).end("<!DOCTYPE html><html>sign in</html>");
+        return res.writeHead(200, { "content-type": "image/png" }).end(PNG);
+      }
+      if (method === "upload/F1") {
+        uploads.push({ bytes: Buffer.concat(chunks).length, type: type });
+        return res.writeHead(200).end("OK");
+      }
       switch (method) {
         case "tooling.tokens.rotate":
           if (!args.refresh_token?.startsWith("xoxe-")) return json({ ok: false, error: "invalid_refresh_token" });
@@ -80,6 +93,10 @@ beforeAll(async () => {
           return json({ ok: true, ts: `1800000000.000${++posted}` });
         case "users.info":
           return json({ ok: true, user: { real_name: "Lena Vogel", profile: { display_name: "Lena" } } });
+        case "files.getUploadURLExternal":
+          return json({ ok: true, upload_url: `${slackBase}/upload/F1`, file_id: "F1" });
+        case "files.completeUploadExternal":
+          return json({ ok: true, files: [{ id: "F1" }] });
         case "reactions.add":
         case "apps.manifest.delete":
         case "apps.icon.set":
@@ -90,7 +107,8 @@ beforeAll(async () => {
     });
   });
   await new Promise<void>((r) => slack.listen(0, "127.0.0.1", r));
-  s = await startStack({ ambient: {}, slackApi: `http://127.0.0.1:${(slack.address() as AddressInfo).port}` });
+  slackBase = `http://127.0.0.1:${(slack.address() as AddressInfo).port}`;
+  s = await startStack({ ambient: {}, slackApi: slackBase });
   lena = await signIn(s, "apple-lena-slack", "Lena Vogel");
   const code = String((await call("POST", "/v1/app/computers", { name: "Build server" })).json.code);
   host = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
@@ -235,7 +253,7 @@ describe("a bot's own Slack app", () => {
     expect(posts().length).toBe(before + 1);
   });
 
-  type News = { channel: { id: string; name?: string } | null; channels: { id: string; name?: string }[]; names: boolean; broken: string | null };
+  type News = { channel: { id: string; name?: string } | null; channels: { id: string; name?: string }[]; names: boolean; files: boolean; broken: string | null };
   const news = async () => (await call("GET", `/v1/app/routines/${bot}/slack`)).json.news as News;
   /** A run of the bot's, with the gateway's MCP as the run sees it. */
   const asBot = async () => {
@@ -345,6 +363,46 @@ describe("a bot's own Slack app", () => {
     expect(text(await mcp.callTool({ name: "slack_for_bot", arguments: { bot, news_channel: "C7" } }))).toContain("posts its news in #anomalies");
     expect(text(await mcp.callTool({ name: "slack_for_bot", arguments: { bot } }))).toContain("Its own news goes to #anomalies");
     await mcp.close();
+  });
+
+  it("takes the files sent with a message once it may (a screenshot reaches its run), and sends its own into the thread", async () => {
+    const shot = { id: "F9", name: "screenshot.png", mimetype: "image/png", size: PNG.length, url_private_download: `${slackBase}/files/screenshot.png` };
+    // An app from before files: the bot hears there was a file, and why it didn't get it.
+    await sendEvent({ type: "event_callback", event_id: "EvF1", event: { type: "message", subtype: "file_share", channel_type: "im", user: "U_LENA", text: "look at this", channel: "D1", ts: "1800000010.0001", files: [shot] } });
+    await s.folders.slack!.idle();
+    let thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string; files: { id: string; name: string }[] }[];
+    expect(thread.at(-1)!.text).toContain("look at this");
+    expect(thread.at(-1)!.text).toContain("screenshot.png (this bot's Slack app may not open files yet");
+    expect(thread.at(-1)!.files).toEqual([]);
+    let drain = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await hostCall(host, "POST", `/v1/host/runs/${drain.run.id}`, { status: "succeeded", summary: "I can't see it." });
+    await s.folders.slack!.idle();
+    // One more Allow, with the files scopes: the next one arrives.
+    expect((await news()).files).toBe(false);
+    const allow = await call("POST", `/v1/app/routines/${bot}/slack/allow`);
+    expect((manifest.oauth_config as { scopes: { bot: string[] } }).scopes.bot).toEqual(expect.arrayContaining(["files:read", "files:write"]));
+    granted = "app_mentions:read,chat:write,channels:read,groups:read,files:read,files:write";
+    await fetch(`${s.origin}/v1/slack/installed?code=good-code&state=${encodeURIComponent(new URL(String(allow.json.url)).searchParams.get("state")!)}`, { redirect: "manual" });
+    expect((await news()).files).toBe(true);
+    // A screenshot with no text at all still reaches it.
+    await sendEvent({ type: "event_callback", event_id: "EvF2", event: { type: "message", subtype: "file_share", channel_type: "im", user: "U_LENA", text: "", channel: "D1", ts: "1800000011.0001", files: [shot] } });
+    await s.folders.slack!.idle();
+    thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as typeof thread;
+    const last = thread.at(-1)!;
+    expect(last.text).toContain("Lena wrote to you on Slack (in a direct message): sent a file");
+    expect(last.files).toMatchObject([{ name: "screenshot.png" }]);
+    const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string; resume: { files?: { id: string; name: string }[] } | null };
+    expect(start.resume?.files).toMatchObject([{ name: "screenshot.png" }]);
+    const bytes = await fetch(`${s.origin}/v1/bot/files/${start.resume!.files![0]!.id}`, { headers: { authorization: `Bearer ${start.runToken}` } });
+    expect(Buffer.from(await bytes.arrayBuffer()).equals(PNG)).toBe(true);
+    // A file it sends (send_file) goes into that Slack thread, as an upload.
+    const sent = await hostCall(start.runToken, "POST", "/v1/bot/reply", { text: "Here's the chart.", files: [{ name: "chart.png", type: "image/png", data: PNG.toString("base64") }] });
+    expect(sent.status, JSON.stringify(sent.json)).toBe(204);
+    await s.folders.slack!.idle();
+    expect(uploads).toEqual([{ bytes: PNG.length, type: "image/png" }]);
+    expect(calls.find((c) => c.method === "files.completeUploadExternal")!.args).toMatchObject({ channel_id: "D1", thread_ts: "1800000011.0001" });
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Done." });
+    await s.folders.slack!.idle();
   });
 
   it("takes its face as its icon, and leaves Slack when it's taken out", async () => {

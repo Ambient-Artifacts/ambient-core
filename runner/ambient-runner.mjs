@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.16.0";
+const VERSION = "0.17.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -2095,16 +2095,20 @@ async function run(id) {
       carryOn = { ...carryOn, sessionId: null };
     }
   }
-  // Files that came with the message that started this run (docs/bots.md, "Files in the chat"):
-  // fetched with the run's token into its out folder, and named in the message, as on Amb's computer.
-  if (carryOn && Array.isArray(carryOn.files) && carryOn.files.length && runToken && outDir) {
+  // Files that came with a message (docs/bots.md, "Files in the chat"): fetched with the run's
+  // token into its out folder, and named in the message, as on Amb's computer. The message that
+  // started the run, and those that come in while it works (its inbox), the same way.
+  const fetchRunFiles = async (list) => {
+    if (!Array.isArray(list) || !list.length || !runToken || !outDir) return [];
     const dir = join(outDir, "files");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const fileOwner = contained ? { uid: 1000, gid: 1000 } : as;
     if (fileOwner && process.getuid?.() === 0) chownSync(dir, fileOwner.uid, fileOwner.gid);
     const saved = [];
-    for (const f of carryOn.files.slice(0, 4)) {
-      const name = String(f?.name ?? "file").replace(/[^A-Za-z0-9._ -]/g, "_").slice(-120) || "file";
+    for (const f of list.slice(0, 4)) {
+      let name = String(f?.name ?? "file").replace(/[^A-Za-z0-9._ -]/g, "_").slice(-120) || "file";
+      // Two files of the same name (two "image.png" from Slack): the later one gets a number.
+      for (let n = 2; existsSync(join(dir, name)) && n < 100; n++) name = name.replace(/(\.[^.]*)?$/, (ext) => `-${n}${ext ?? ""}`);
       try {
         const res = await fetch(`${cfg.server}/v1/bot/files/${encodeURIComponent(String(f.id))}`, { headers: { authorization: `Bearer ${runToken}` }, signal: AbortSignal.timeout(120_000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2115,7 +2119,12 @@ async function run(id) {
         log(`Couldn't fetch ${name} for the run: ${err.message}`);
       }
     }
-    if (saved.length) carryOn = { ...carryOn, message: `${carryOn.message}\n\nFiles that came with it (open them with your file tools):\n${saved.map((p) => `- ${p}`).join("\n")}` };
+    return saved;
+  };
+  const filesLine = (saved) => (saved.length ? `\n\nFiles that came with it (open them with your file tools):\n${saved.map((p) => `- ${p}`).join("\n")}` : "");
+  if (carryOn && Array.isArray(carryOn.files) && carryOn.files.length) {
+    const saved = await fetchRunFiles(carryOn.files);
+    if (saved.length) carryOn = { ...carryOn, message: `${carryOn.message}${filesLine(saved)}` };
   }
   const mcpArg = codex ? mcpServer : mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile);
   // A bot's Claude Code run stays open for messages that come in while it works (stream-json in).
@@ -2203,13 +2212,18 @@ async function run(id) {
       return [];
     }
   };
-  const deliver = (msgs) => {
+  // Who wrote, as the bot should hear it: Slack's, Teams' and GitHub's messages already say it.
+  const said = (m) => (["Slack", "Teams", "GitHub"].includes(String(m.who)) ? String(m.text ?? "") : `${String(m.who ?? "Your owner")} wrote to you in the Ambient app: ${String(m.text ?? "")}`);
+  const deliver = async (msgs) => {
     for (const m of msgs) {
       if (closing || tookIn >= INBOX_MAX) return;
       tookIn++;
       wroteSinceResult = true;
-      child.stdin.write(userLine(`${String(m.who ?? "Your owner")} wrote to you in the Ambient app: ${String(m.text ?? "")}`));
-      log(`Took in a message from ${m.who ?? "the owner"} while working`);
+      // Its files first, so the message names them where they are.
+      const saved = await fetchRunFiles(m.files);
+      if (closing) return;
+      child.stdin.write(userLine(`${said(m)}${filesLine(saved)}`));
+      log(`Took in a message from ${m.who ?? "the owner"} while working${saved.length ? ` (${saved.length} file${saved.length === 1 ? "" : "s"})` : ""}`);
     }
   };
   const reply = async (r) => {
@@ -2233,17 +2247,24 @@ async function run(id) {
     wroteSinceResult = false;
     await new Promise((res) => setTimeout(res, STAY_MS));
     if (closing) return;
-    if (!wroteSinceResult) deliver(await takeInbox());
+    if (!wroteSinceResult) await deliver(await takeInbox());
     if (wroteSinceResult) void reply(r);
     else close();
   };
   let inboxTimer;
+  let taking = false;
   // A session that ended on its own (or failed) must not take the run down when we write to it.
   child.stdin.on("error", () => {});
   if (streaming) {
     child.stdin.write(userLine(stdin));
     inboxTimer = setInterval(() => {
-      if (!closing) void takeInbox().then(deliver);
+      // One take at a time: a slow file download never lets a later message overtake an earlier one.
+      if (!closing && !taking) {
+        taking = true;
+        void takeInbox()
+          .then(deliver)
+          .finally(() => (taking = false));
+      }
     }, INBOX_EVERY_MS);
     inboxTimer.unref();
   } else child.stdin.end(stdin);

@@ -24,6 +24,8 @@ import { api, type Control } from "../control.ts";
 import type { MasterKey } from "../crypto.ts";
 import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
+import type { Attachments, FileRef } from "./attachments.ts";
+import { download, leftLine, takeFiles, type OfferedFile } from "../channels/channel-files.ts";
 
 const WORKSPACE = "slack:workspace";
 const APP = "slack:app";
@@ -40,7 +42,8 @@ const NAME_MAX = 35;
 /** A Slack message's text is cut at 40,000; long answers go out in parts well below that. */
 const PART_MAX = 3_500;
 /** `channels:read` and `groups:read`: the names of the channels it's in (for "Posts news in #anomalies"). */
-export const SLACK_SCOPES = ["app_mentions:read", "chat:write", "channels:history", "channels:read", "groups:history", "groups:read", "im:history", "im:read", "im:write", "reactions:write", "users:read"];
+/** `files:read` and `files:write`: files sent with a message reach the bot, and files it makes reach the thread. */
+export const SLACK_SCOPES = ["app_mentions:read", "chat:write", "channels:history", "channels:read", "groups:history", "groups:read", "im:history", "im:read", "im:write", "reactions:write", "users:read", "files:read", "files:write"];
 /** `message.channels` and `message.groups`: replies in the thread under a post of its own reach it without an @mention. */
 export const SLACK_EVENTS = ["app_mention", "message.im", "message.channels", "message.groups"];
 /** Channels remembered per bot, and posts of its own whose threads it listens to. */
@@ -63,6 +66,8 @@ export interface SlackNews {
   channels: SlackChannel[];
   /** It may read channel names (apps from before that need one more Allow). */
   names: boolean;
+  /** It may read and send files (apps from before that need one more Allow). */
+  files: boolean;
   /** Why the last post didn't go out (it was removed, the channel is archived), until another is chosen or one works. */
   broken: string | null;
 }
@@ -155,6 +160,8 @@ export class SlackApps {
       origin: string;
       /** A bot's computer starts its run now (not at its next check-in). */
       startNow?: (hostId: string, routineId: string) => void;
+      /** Where files sent with a message are kept (the bot's thread). */
+      attachments?: Attachments;
       fetchImpl?: typeof fetch;
       /** Slack's Web API (tests: a stand-in). */
       apiBase?: string;
@@ -313,8 +320,12 @@ export class SlackApps {
     return id ? (app.channels?.find((c) => c.id === id) ?? { id }) : null;
   }
 
+  private static canFiles(app: AppRecord): boolean {
+    return (app.scopes?.includes("files:read") && app.scopes.includes("files:write")) ?? false;
+  }
+
   private newsOf(app: AppRecord): SlackNews {
-    return { channel: SlackApps.newsChannel(app), channels: app.channels ?? [], names: SlackApps.canName(app), broken: app.newsBroken ?? null };
+    return { channel: SlackApps.newsChannel(app), channels: app.channels ?? [], names: SlackApps.canName(app), files: SlackApps.canFiles(app), broken: app.newsBroken ?? null };
   }
 
   /** "#anomalies", or "the channel you were first mentioned in" while its name isn't known. */
@@ -546,7 +557,8 @@ export class SlackApps {
       e.type === "message" && !dm && !!e.thread_ts && (app.posts ?? []).some((p) => p.channel === e.channel && p.ts === e.thread_ts) && !(e.text ?? "").includes(`<@${app.botUserId}>`);
     if (e.type !== "app_mention" && !dm && !underOwnPost) return;
     // Its own messages, other bots', edits and joins: not for it.
-    if (e.bot_id || e.subtype || !e.user || !e.channel || !e.ts || !app.botToken) return;
+    // A message with files is subtype "file_share"; other subtypes (edits, joins) aren't for it.
+    if (e.bot_id || (e.subtype && e.subtype !== "file_share") || !e.user || !e.channel || !e.ts || !app.botToken) return;
     if (e.user === app.botUserId) return;
     // A channel it's mentioned in is one it can post its news in.
     if (e.type === "app_mention") {
@@ -565,10 +577,25 @@ export class SlackApps {
       return;
     }
     const text = (e.text ?? "").replace(new RegExp(`<@${app.botUserId}>`, "g"), "").trim();
-    if (!text) return;
+    const offered = (e.files ?? []).filter((f) => f.mode !== "tombstone" && f.mode !== "external");
+    if (!text && !offered.length) return;
     const who = await this.nameOf(app.botToken, e.user);
     const where = dm ? "in a direct message" : underOwnPost ? "in the thread under your post" : "in a channel";
-    const body = `${who} wrote to you on Slack (${where}): ${slackToPlain(text)}\n\n(Your answer goes back to that Slack thread on its own.)`;
+    // Its files, kept in its thread like a file sent from the app: its run gets them on disk.
+    const canRead = SlackApps.canFiles(app);
+    const token = app.botToken;
+    const { files: incoming, left } = await takeFiles(
+      offered.map((f): OfferedFile => ({
+        name: f.name ?? f.title ?? "file",
+        type: f.mimetype,
+        size: f.size,
+        fetch: canRead && (f.url_private_download ?? f.url_private) ? () => download(this.d.fetchImpl ?? fetch, (f.url_private_download ?? f.url_private)!, { authorization: `Bearer ${token}` }) : null,
+        why: canRead ? "Slack gave no link to it" : "this bot's Slack app may not open files yet; its owner taps Allow again on its Slack page in Ambient",
+      })),
+    );
+    const files: FileRef[] = incoming.length && this.d.attachments ? await this.d.attachments.save(owner, { routineId }, incoming) : [];
+    const said = text ? slackToPlain(text) : `sent ${files.length === 1 ? "a file" : "files"}`;
+    const body = `${who} wrote to you on Slack (${where}): ${said}${leftLine(left)}\n\n(Your answer goes back to that Slack thread on its own.)`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();
       // Old ones nobody answered go; the newest stay.
@@ -576,10 +603,30 @@ export class SlackApps {
       return { ...r, targets: [...kept, { channel: e.channel!, ts: thread, at: now }].slice(-TARGETS_MAX) };
     });
     void this.call("reactions.add", app.botToken, { channel: e.channel, timestamp: e.ts, name: "eyes" }).catch(() => undefined);
-    const sealed = await sealMessage(this.d.keys, owner, { text: body });
+    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}) });
     const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Slack", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
     if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
     if (out.ok && !out.enabled) await this.post(app.botToken, e.channel, thread, "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", true);
+  }
+
+  /**
+   * A file the bot made (send_file) into a Slack thread, as itself: Slack's upload URL, the bytes,
+   * then the file shared in the thread. An app that may not send files says where it is instead.
+   */
+  private async upload(app: AppRecord, channel: string, threadTs: string, f: { name: string; type: string; data: string }): Promise<void> {
+    if (!app.botToken) return;
+    const bytes = Buffer.from(f.data, "base64");
+    const fallback = () => this.post(app.botToken!, channel, threadTs, `📎 ${f.name}: in my thread in Ambient (I may not send files in Slack yet; my owner taps Allow again on my Slack page).`, true);
+    if (!SlackApps.canFiles(app)) return fallback();
+    const url = await this.call<{ upload_url?: string; file_id?: string }>("files.getUploadURLExternal", app.botToken, { filename: f.name, length: String(bytes.length) }, { form: true });
+    if (!url.ok || !url.upload_url || !url.file_id) {
+      if (url.error === "missing_scope") return fallback();
+      throw new SlackError("slack_failed", `Slack didn't take the file (${url.error ?? "no reason"}).`, 502);
+    }
+    const put = await (this.d.fetchImpl ?? fetch)(url.upload_url, { method: "POST", headers: { "content-type": f.type || "application/octet-stream" }, body: new Uint8Array(bytes), signal: AbortSignal.timeout(60_000) });
+    if (!put.ok) throw new SlackError("slack_failed", `Slack didn't take the file (HTTP ${put.status}).`, 502);
+    const done = await this.call("files.completeUploadExternal", app.botToken, { files: JSON.stringify([{ id: url.file_id, title: f.name }]), channel_id: channel, thread_ts: threadTs }, { form: true });
+    if (!done.ok) throw new SlackError("slack_failed", `Slack didn't share the file (${done.error ?? "no reason"}).`, 502);
   }
 
   private async nameOf(token: string, user: string): Promise<string> {
@@ -644,7 +691,7 @@ export class SlackApps {
    * run is named by its id (its result) or its token's hash (while it runs). Its end (`final`)
    * closes its threads.
    */
-  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }): void {
+  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }, files: { name: string; type: string; data: string }[] = []): void {
     this.track(
       (async () => {
         const r = await this.get<Replies>(owner, REPLY, routineId);
@@ -656,6 +703,7 @@ export class SlackApps {
         const app = await this.get<AppRecord>(owner, APP, routineId);
         if (!app?.botToken) return;
         if (text.trim()) for (const t of mine) await this.post(app.botToken, t.channel, t.ts, text);
+        for (const f of files) for (const t of mine) await this.upload(app, t.channel, t.ts, f);
         if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}) }));
       })(),
     );
@@ -664,6 +712,8 @@ export class SlackApps {
 
 interface SlackEvent {
   type?: string;
+  /** Files sent with the message. */
+  files?: { id?: string; name?: string; title?: string; mimetype?: string; size?: number; mode?: string; url_private?: string; url_private_download?: string }[];
   subtype?: string;
   channel_type?: string;
   user?: string;

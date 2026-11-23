@@ -27,6 +27,8 @@ import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
 import { splitText } from "./slack-apps.ts";
 import { pngSize, teamsPackage } from "./teams-package.ts";
+import type { Attachments, FileRef } from "./attachments.ts";
+import { download, FILES_BYTES_MAX, leftLine, takeFiles, type OfferedFile } from "../channels/channel-files.ts";
 
 const TENANT = "teams:tenant";
 const APP = "teams:app";
@@ -38,6 +40,11 @@ const TARGETS_MAX = 10;
 /** A question's card answers for this long (a run waits a few minutes, then is woken by the answer). */
 const ASK_FOR_MS = 24 * 3600_000;
 const ADAPTIVE_CARD = "application/vnd.microsoft.card.adaptive";
+const FILE_INFO = "application/vnd.microsoft.teams.file.download.info";
+/** A picture up to this size goes inline in the message; anything else as a card with a link. */
+const INLINE_MAX = 1024 * 1024;
+/** How long a file's download link works. */
+const FILE_LINK_MS = 7 * 24 * 3600_000;
 const CHANNELS_MAX = 20;
 const POSTS_MAX = 30;
 /** A bot's secret lasts two years (Microsoft's longest); a new one is made well before it runs out. */
@@ -209,6 +216,8 @@ export class TeamsApps {
       startNow?: (hostId: string, routineId: string) => void;
       /** A person's sign-in email: who a bot they add listens to in Teams is found by it. */
       emailOf?: (uid: string) => Promise<string | null>;
+      /** Where files sent with a message are kept (the bot's thread), and read back for a link. */
+      attachments?: Attachments;
       /** Answers a bot's open question as `uid` (a click on its card, or a reply); "gone" when it isn't open any more. */
       answer?: (uid: string, routineId: string, questionId: string, text: string) => Promise<"answered" | "gone" | { error: string }>;
       fetchImpl?: typeof fetch;
@@ -749,20 +758,81 @@ export class TeamsApps {
     }
     if (kind === "personal" && !app.installedAt) await this.put(owner, APP, routineId, (app = { ...app, installedAt: this.now() }));
     const text = teamsToPlain(a.text ?? "");
-    if (!text) return;
+    const offered = this.offered(client, a, kind);
+    if (!text && !offered.length) return;
     const who = a.from.name ?? "Someone";
     const where = kind === "personal" ? "in a direct message" : underOwnPost ? "in the thread under your post" : kind === "groupChat" ? "in a group chat" : "in a channel";
-    const body = `${who} wrote to you on Microsoft Teams (${where}): ${text}\n\n(Your answer goes back to that Teams thread on its own.)`;
+    // Its files, kept in its thread like a file sent from the app: its run gets them on disk.
+    const { files: incoming, left } = await takeFiles(offered);
+    const files: FileRef[] = incoming.length && this.d.attachments ? await this.d.attachments.save(owner, { routineId }, incoming) : [];
+    const said = text || `sent ${files.length === 1 ? "a file" : "files"}`;
+    const body = `${who} wrote to you on Microsoft Teams (${where}): ${said}${leftLine(left)}\n\n(Your answer goes back to that Teams thread on its own.)`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();
       const kept = r.targets.filter((t) => now - t.at <= REPLY_FOR_MS && !(t.conv === target && !t.runId));
       return { ...r, targets: [...kept, { conv: target, at: now }].slice(-TARGETS_MAX) };
     });
     void client.typing(a.serviceUrl, target).catch(() => undefined);
-    const sealed = await sealMessage(this.d.keys, owner, { text: body });
+    const sealed = await sealMessage(this.d.keys, owner, { text: body, ...(files.length ? { files } : {}) });
     const out = (await this.d.control.m(api.bots.wake, { id: routineId, iv: sealed.iv, ct: sealed.ct, authorName: "Teams", run: true, now: this.now() })) as { ok: boolean; hostId?: string | null; enabled?: boolean };
     if (out.ok && out.enabled && out.hostId) this.d.startNow?.(String(out.hostId), routineId);
     if (out.ok && !out.enabled) await client.send(a.serviceUrl, target, { text: "I'm paused in Ambient right now, so I won't get to this until I'm switched back on.", textFormat: "markdown" });
+  }
+
+  /**
+   * The files a message brings. In a chat with the bot a file comes with a download link of its
+   * own; a pasted picture is behind the bot's token. A file shared in a channel or group chat stays
+   * in SharePoint, which the bot can't open: it's named, with where to send it instead.
+   */
+  private offered(client: BotClient, a: Activity, kind: string): OfferedFile[] {
+    const out: OfferedFile[] = [];
+    for (const att of a.attachments ?? []) {
+      if (att.contentType === FILE_INFO) {
+        const c = (att.content ?? {}) as { downloadUrl?: string; fileType?: string };
+        const name = att.name ?? `file.${c.fileType ?? "bin"}`;
+        out.push({ name, fetch: c.downloadUrl ? () => download(this.fetch, c.downloadUrl!) : null, why: "Teams gave no link to it" });
+      } else if (att.contentType.startsWith("image/") && att.contentUrl) {
+        const url = att.contentUrl;
+        const ext = att.contentType.split("/")[1]?.replace("jpeg", "jpg") ?? "png";
+        out.push({ name: att.name ?? `picture.${ext}`, type: att.contentType, fetch: () => client.fetchFile(url, FILES_BYTES_MAX) });
+      } else if (att.contentType === "reference" || (att.name && att.contentUrl && att.contentType !== "text/html" && att.contentType !== ADAPTIVE_CARD)) {
+        out.push({ name: att.name ?? "file", fetch: null, why: kind === "personal" ? "Teams kept it in SharePoint" : "a file shared in a channel stays in SharePoint, where I can't open it: send it to me in a direct chat" });
+      }
+    }
+    return out;
+  }
+
+  /** A link to one of its files that works for a week (a file it sends that isn't shown inline). */
+  fileLink(owner: Owner, routineId: string, ref: FileRef): string {
+    return `${this.base()}/v1/teams/files/${this.sign("file", { ...refOf(owner, routineId), f: ref.id, e: this.now() + FILE_LINK_MS })}/${encodeURIComponent(ref.name)}`;
+  }
+
+  /** The file a link names, while it works. */
+  async linkedFile(token: string): Promise<{ name: string; type: string; bytes: Buffer }> {
+    const s = this.verify<Ref & { f: string; e: number }>("file", token);
+    if (!s || s.e < this.now() || !this.d.attachments) throw new TeamsError("not_found", "This link doesn't work (any more).", 404);
+    return this.d.attachments.read(ownerOf(s), { routineId: s.r }, s.f);
+  }
+
+  /** Files it made (send_file) into a Teams chat or thread: a small picture inline, anything else as a card with its link. */
+  private async sendFiles(owner: Owner, routineId: string, client: BotClient, serviceUrl: string, conv: string, files: { ref: FileRef; data: string }[]): Promise<void> {
+    for (const f of files) {
+      if (f.ref.type.startsWith("image/") && f.ref.size <= INLINE_MAX && f.ref.type !== "image/heic") {
+        await client.send(serviceUrl, conv, { attachments: [{ contentType: f.ref.type, contentUrl: `data:${f.ref.type};base64,${f.data}`, name: f.ref.name }] });
+        continue;
+      }
+      const card = {
+        type: "AdaptiveCard",
+        $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+        version: "1.5",
+        body: [
+          { type: "TextBlock", text: `📎 ${f.ref.name}`, wrap: true, weight: "Bolder" },
+          { type: "TextBlock", text: `${sizeLabel(f.ref.size)} · the link works for 7 days, and the file stays in my thread in Ambient`, wrap: true, isSubtle: true, size: "Small" },
+        ],
+        actions: [{ type: "Action.OpenUrl", title: "Download", url: this.fileLink(owner, routineId, f.ref) }],
+      };
+      await client.send(serviceUrl, conv, { attachments: [{ contentType: ADAPTIVE_CARD, content: card }], summary: f.ref.name });
+    }
   }
 
   /** The question waiting in this chat or thread, if any (24 hours at most). */
@@ -855,7 +925,7 @@ export class TeamsApps {
   }
 
   /** A run said something: it goes to the Teams threads that run took, and nowhere else. */
-  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }, question?: { id: string; text: string; choices: string[]; details?: string }): void {
+  said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }, question?: { id: string; text: string; choices: string[]; details?: string }, files: { ref: FileRef; data: string }[] = []): void {
     this.track(
       (async () => {
         const r = await this.get<Replies>(owner, REPLY, routineId);
@@ -877,6 +947,7 @@ export class TeamsApps {
           const now = this.now();
           await this.replies(owner, routineId, (cur) => ({ ...cur, asks: [...(cur.asks ?? []).filter((a) => now - a.at < ASK_FOR_MS && !mine.some((t) => t.conv === a.conv)), ...asks].slice(-TARGETS_MAX) }));
         } else if (text.trim()) for (const t of mine) for (const part of splitText(text)) await client.send(app.serviceUrl, t.conv, { text: part, textFormat: "markdown" });
+        if (files.length) for (const t of mine) await this.sendFiles(owner, routineId, client, app.serviceUrl, t.conv, files);
         if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}), ...(cur.asks ? { asks: cur.asks } : {}) }));
       })(),
     );
@@ -956,4 +1027,10 @@ export function answeredCard(question: string, answer: string | null, by: string
       ...(answer && by ? [{ type: "TextBlock", text: `Answered by ${by}`, wrap: true, isSubtle: true, size: "Small" }] : []),
     ],
   };
+}
+
+function sizeLabel(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

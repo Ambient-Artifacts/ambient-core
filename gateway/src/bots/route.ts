@@ -1611,6 +1611,22 @@ export function teamsHookRouter(teams: () => TeamsApps | undefined): Router {
     });
     res.status(out.status).json(out.body);
   });
+  // A file a bot sent in Teams that isn't shown inline: its signed link, for a week.
+  r.get("/v1/teams/files/:token/:name", async (req, res) => {
+    const tm = teams();
+    if (!tm) return res.status(404).json({ error: "not_found" });
+    try {
+      const f = await tm.linkedFile(String(req.params.token));
+      res.setHeader("cache-control", "private, no-store");
+      res.setHeader("content-type", f.type);
+      res.setHeader("x-content-type-options", "nosniff");
+      res.setHeader("content-security-policy", "default-src 'none'; sandbox");
+      res.setHeader("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+      res.send(f.bytes);
+    } catch (err) {
+      res.status(err instanceof TeamsError ? err.status : 404).json({ error: "not_found", message: "This link doesn't work (any more)." });
+    }
+  });
   r.get("/v1/teams/connected", async (req, res) => {
     const tm = teams();
     res.setHeader("cache-control", "no-store");

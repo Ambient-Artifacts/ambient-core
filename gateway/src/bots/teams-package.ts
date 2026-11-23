@@ -36,7 +36,7 @@ export function teamsManifest(m: TeamsManifestInput): Record<string, unknown> {
     },
     icons: { outline: "outline.png", color: "color.png" },
     accentColor: "#2F2F31",
-    bots: [{ botId: m.botAppId, scopes: ["personal", "team", "groupChat"], isNotificationOnly: false, supportsFiles: false, supportsCalling: false, supportsVideo: false }],
+    bots: [{ botId: m.botAppId, scopes: ["personal", "team", "groupChat"], isNotificationOnly: false, supportsFiles: true, supportsCalling: false, supportsVideo: false }],
     permissions: ["identity", "messageTeamMembers"],
     validDomains: [],
     // Resource-specific consent: replies in the thread under a post of its own reach it without an @mention.

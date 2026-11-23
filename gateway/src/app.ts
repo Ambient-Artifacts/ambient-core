@@ -426,7 +426,7 @@ export function createApp(deps: AppDeps) {
   routines.mcpFor = async (owner, id) => (await mcpConnections.forBot(owner, id)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id) }));
   ambientMcp = async (uid) => (await mcpConnections.forAmb(uid)).map((c) => ({ name: c.name, path: mcpRelayPath(c.id), title: c.title }));
   // Bots' own Slack apps (docs/bots.md, "Slack"): one app per bot, made by Ambient, one tap to install.
-  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
+  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
   folders.slack = slack;
   routines.slackToken = (owner, id) => slack.botToken(owner, id);
   routines.slackFor = (owner, id) => slack.forRun(owner, id);
@@ -441,6 +441,7 @@ export function createApp(deps: AppDeps) {
         verifier: deps.teamsApps?.verifier ?? new InboundVerifier(deps.teamsApps?.fetchImpl ?? deps.fetchImpl),
         startNow: (hostId, routineId) => computers.start(hostId, routineId),
         emailOf: async (uid) => (await directory.user(uid))?.email ?? null,
+        attachments,
         // A click on a question's card (or a reply to it) answers it as its owner would in the
         // bot's thread, while that question is still the open one.
         answer: async (uid, routineId, questionId, text) => {
@@ -471,9 +472,9 @@ export function createApp(deps: AppDeps) {
   routines.onBotRunStarted = async (owner, id, runId, hash) => {
     await Promise.all([slack.runStarted(owner, id, runId, hash), teamsApps?.runStarted(owner, id, runId, hash)]);
   };
-  bots.onSaid = (owner, id, text, hash, question) => {
-    slack.said(owner, id, text, false, { hash });
-    teamsApps?.said(owner, id, text, false, { hash }, question);
+  bots.onSaid = (owner, id, text, hash, question, files) => {
+    slack.said(owner, id, text, false, { hash }, files?.map((f) => ({ name: f.name, type: f.type, data: f.data })));
+    teamsApps?.said(owner, id, text, false, { hash }, question, files?.map((f) => ({ ref: f.ref, data: f.data })));
   };
   bots.onTookSlack = async (owner, id, hash) => {
     await Promise.all([slack.runTook(owner, id, hash), teamsApps?.runTook(owner, id, hash)]);

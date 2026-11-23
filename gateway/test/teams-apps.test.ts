@@ -15,6 +15,8 @@ const LENA = "cccccccc-0000-0000-0000-000000000001";
 const STRANGER = "dddddddd-0000-0000-0000-000000000001";
 const SERVICE = "https://smba.trafficmanager.net/emea/";
 const BOT_APP = "eeeeeeee-0000-0000-0000-000000000001";
+const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a4b30000000049454e44ae426082", "hex");
+const PDF = Buffer.from("%PDF-1.4\n% a made-up report\n%%EOF\n");
 
 interface Seen {
   method: string;
@@ -88,6 +90,11 @@ const microsoft: typeof fetch = async (input, init) => {
     }
     if (method === "DELETE") return new Response(null, { status: 204 });
     return json(404, { error: { code: "NotFound" } });
+  }
+  if (url.hostname === "files.example.com") return new Response(new Uint8Array(PDF), { status: 200, headers: { "content-type": "application/pdf" } });
+  if (url.origin === new URL(SERVICE).origin && url.pathname.startsWith("/emea/v3/attachments/")) {
+    if (auth !== "Bearer bot-token") return json(401, {});
+    return new Response(new Uint8Array(PNG), { status: 200, headers: { "content-type": "image/png" } });
   }
   if (url.origin + "/" === new URL(SERVICE).origin + "/" && url.pathname.startsWith("/emea/v3/conversations/")) {
     if (auth !== "Bearer bot-token") return json(401, {});
@@ -319,6 +326,45 @@ describe("a bot's own Teams app", () => {
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Shipped." });
     await s.folders.teams!.idle();
     expect(sent.at(-1)).toMatchObject({ conv: "a:dm-lena", body: { text: "Shipped." } });
+  });
+
+  it("takes files sent in a chat, names the ones it can't open, and sends its own back", async () => {
+    sent = [];
+    await send(
+      activity({
+        text: "<p>here's the report and the error</p>",
+        attachments: [
+          { contentType: "application/vnd.microsoft.teams.file.download.info", name: "Q3 report.pdf", content: { downloadUrl: "https://files.example.com/dl/q3", fileType: "pdf" } },
+          { contentType: "image/png", contentUrl: `${SERVICE}v3/attachments/abc/views/original` },
+          { contentType: "reference", name: "Budget.xlsx", contentUrl: "https://aleas.sharepoint.example/Budget.xlsx" },
+          { contentType: "text/html", content: "<p>here's the report and the error</p>" },
+        ],
+      }),
+    );
+    const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string; files: { name: string }[] }[];
+    const last = thread.filter((m) => m.author === "Teams").at(-1)!;
+    expect(last.text).toContain("here's the report and the error");
+    expect(last.files.map((f) => f.name)).toEqual(["Q3 report.pdf", "picture.png"]);
+    expect(last.text).toContain("Budget.xlsx (Teams kept it in SharePoint)");
+    const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string; resume: { files?: { id: string }[] } | null };
+    expect(start.resume?.files).toHaveLength(2);
+    // Its own files: a small picture inline, a PDF as a card with a link that works without signing in.
+    const reply = await hostCall(start.runToken, "POST", "/v1/bot/reply", { text: "Annotated:", files: [{ name: "marked.png", type: "image/png", data: PNG.toString("base64") }, { name: "summary.pdf", type: "application/pdf", data: PDF.toString("base64") }] });
+    expect(reply.status, JSON.stringify(reply.json)).toBe(204);
+    await s.folders.teams!.idle();
+    const out = sent.slice(-3);
+    expect(out[0]!.body).toMatchObject({ text: "Annotated:" });
+    expect((out[1]!.body.attachments as { contentType: string; contentUrl: string }[])[0]).toMatchObject({ contentType: "image/png", contentUrl: `data:image/png;base64,${PNG.toString("base64")}` });
+    const card = (out[2]!.body.attachments as { content: { actions: { url: string }[] } }[])[0]!.content;
+    const link = card.actions[0]!.url;
+    expect(link).toMatch(/\/v1\/teams\/files\/[\w-]+\.[\w-]+\/summary\.pdf$/);
+    const got = await fetch(link);
+    expect(got.status).toBe(200);
+    expect(got.headers.get("content-disposition")).toContain("summary.pdf");
+    expect(Buffer.from(await got.arrayBuffer()).equals(PDF)).toBe(true);
+    expect((await fetch(link.replace(/files\/[^.]+/, "files/forged"))).status).toBe(404);
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "" });
+    await s.folders.teams!.idle();
   });
 
   it("posts news in the channel it was mentioned in, and hears replies under that post", async () => {
