@@ -147,7 +147,7 @@ docker compose exec gateway admin team add acme anna@example.com              # 
 
 - Everyone in the team reads it through their own connection: `search` and `index` cover personal and team notes, and `log_work` can write to the team.
 - **A team-only connection**, for example for Microsoft 365 Copilot or a shared agent: `admin token anna@example.com --team acme`, used at `https://ambient.example.com/t/acme/mcp`. It never sees personal notes.
-- **Work sessions to the team:** `admin share anna@example.com "~/git/acme-*" acme` sends Anna's Claude Code sessions from those folders to the team wiki 30 minutes after they end. A pattern can also be a repo, e.g. `github.com/acme/*`.
+- **Work sessions to the team:** `admin share anna@example.com "~/git/acme-*" acme` sends Anna's Claude Code sessions from those folders to the team wiki 30 minutes after they end. A pattern can also be a repo, e.g. `github.com/acme/*`. Sessions from a folder or repo with "privat" or "private" in it stay personal whatever the rules say.
 - **Removing someone:** `admin team remove acme anna@example.com`. Access ends within a minute.
 
 To run more than one team, see [More teams](#more-teams).
