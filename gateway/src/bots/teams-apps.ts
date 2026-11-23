@@ -29,7 +29,7 @@ import { splitText } from "./slack-apps.ts";
 import { pngSize, teamsPackage } from "./teams-package.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
 import { download, FILES_BYTES_MAX, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile, type ThreadMessage } from "../channels/channel-files.ts";
-import { AMB, forAmb, type AmbDoorDeps } from "../channels/amb-doors.ts";
+import { AMB, forAmb, type AmbDoorDeps, type TeamTurnPayload } from "../channels/amb-doors.ts";
 import type { AmbChannel, OutFile, Question } from "../channels/reach.ts";
 
 const TENANT = "teams:tenant";
@@ -883,13 +883,24 @@ export class TeamsApps {
         return;
       }
       const before = kind === "channel" && root ? await this.threadMessages(app, a, root) : [];
-      const answer = await amb.teamTurn(owner.teamId, account, `teams:${target}`, `${text}${leftLine(all)}`, files, before).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
+      // Written down until its answer is posted: a restart in between answers it after all.
+      const payload: TeamTurnPayload = { teamId: owner.teamId, asker: account, conversation: `teams:${target}`, text: `${text}${leftLine(all)}`, thread: before, to: { teams: { serviceUrl: a.serviceUrl, conv: target } } };
+      const turn = (await amb.turns?.enqueue(owner, "team-amb", payload as unknown as Record<string, unknown>)) ?? null;
+      const answer = await amb.teamTurn(owner.teamId, account, payload.conversation, payload.text, files, before).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
       if (answer?.text) for (const part of splitText(answer.text)) await client.send(a.serviceUrl, target, { text: part, textFormat: "markdown" });
+      await amb.turns?.done(turn);
       return;
     }
     // A direct chat: their own Amb, and this chat is their Teams door to it.
     await this.put({ kind: "user", uid: account.uid }, AMB_LINK, "link", { ...refOf(owner, AMB), conv: a.conversation.id, serviceUrl: a.serviceUrl, at: this.now() } satisfies AmbLink);
     await amb.inbox.sendQueued(account.uid, await amb.inbox.nameOf(account.uid).catch(() => account.name), `${text || `sent ${files.length === 1 ? "a file" : "files"}`}${leftLine(all)}`, "teams", files);
+  }
+
+  /** A team Amb's answer, picked up after a restart, into the Teams thread it was asked in. */
+  async ambPost(owner: Owner, to: { serviceUrl: string; conv: string }, text: string): Promise<void> {
+    const app = await this.get<AppRecord>(owner, APP, AMB);
+    if (!app?.secret) throw new TeamsError("no_app", "Ambient isn't in Teams anymore.", 404);
+    for (const part of splitText(text)) await this.client(app).send(to.serviceUrl, to.conv, { text: part, textFormat: "markdown" });
   }
 
   /** Amb's Teams door for one person: their chat with Amb's app, for answers, what Amb says first, and decisions as cards. */

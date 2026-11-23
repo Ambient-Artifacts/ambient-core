@@ -26,7 +26,7 @@ import type { Owner, RoutineKeys } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
 import type { Attachments, FileRef } from "./attachments.ts";
 import { download, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile, type ThreadMessage } from "../channels/channel-files.ts";
-import { AMB, forAmb, type AmbDoorDeps } from "../channels/amb-doors.ts";
+import { AMB, forAmb, type AmbDoorDeps, type TeamTurnPayload } from "../channels/amb-doors.ts";
 import type { AmbChannel, OutFile } from "../channels/reach.ts";
 
 const WORKSPACE = "slack:workspace";
@@ -812,8 +812,12 @@ export class SlackApps {
         return;
       }
       const before = e.thread_ts && e.thread_ts !== e.ts ? await this.threadMessages(app, e.channel, e.thread_ts, e.ts) : [];
-      const answer = await amb.teamTurn(owner.teamId, account, `slack:${e.channel}:${thread}`, `${text}${leftLine(all)}`, files, before).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
+      // Written down until its answer is posted: a restart in between answers it after all.
+      const payload: TeamTurnPayload = { teamId: owner.teamId, asker: account, conversation: `slack:${e.channel}:${thread}`, text: `${text}${leftLine(all)}`, thread: before, to: { slack: { channel: e.channel, thread } } };
+      const turn = (await amb.turns?.enqueue(owner, "team-amb", payload as unknown as Record<string, unknown>)) ?? null;
+      const answer = await amb.teamTurn(owner.teamId, account, payload.conversation, payload.text, files, before).catch((err: Error) => ({ text: `That didn't work just now (${err.message}).` }));
       if (answer?.text) await this.post(token, e.channel, thread, answer.text);
+      await amb.turns?.done(turn);
       return;
     }
     // A direct message: their own Amb, and this chat is their Slack door to it.
@@ -838,6 +842,13 @@ export class SlackApps {
 
   private async threadLines(app: AppRecord, channel: string, threadTs: string, beforeTs: string): Promise<string> {
     return threadSoFar(await this.threadMessages(app, channel, threadTs, beforeTs));
+  }
+
+  /** A team Amb's answer, picked up after a restart, into the Slack thread it was asked in. */
+  async ambPost(owner: Owner, to: { channel: string; thread: string }, text: string): Promise<void> {
+    const app = await this.get<AppRecord>(owner, APP, AMB);
+    if (!app?.botToken) throw new SlackError("no_app", "Ambient isn't in Slack anymore.", 404);
+    await this.post(app.botToken, to.channel, to.thread, text);
   }
 
   /** The Slack user's email (Amb's app may read it: users:read.email). */

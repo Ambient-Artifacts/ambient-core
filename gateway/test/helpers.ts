@@ -226,6 +226,7 @@ export async function startStack(
     decisions: stack.decisions,
     heartbeat: stack.heartbeat,
     folders: stack.folders,
+    turns: stack.turns,
     automations: stack.automations,
     graphTokens,
     deliverer,

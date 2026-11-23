@@ -40,6 +40,8 @@ import { TeamsApps } from "./bots/teams-apps.ts";
 import { TeamAmb } from "./bots/team-amb.ts";
 import { SessionBackups } from "./bots/session-backups.ts";
 import { BotLanes } from "./bots/bot-lanes.ts";
+import { TurnQueue } from "./bots/turn-queue.ts";
+import type { TeamTurnPayload } from "./channels/amb-doors.ts";
 import { sha256Hex } from "./crypto.ts";
 import type { AmbDoorDeps } from "./channels/amb-doors.ts";
 import { BotFolder } from "./bots/folder.ts";
@@ -288,6 +290,8 @@ export function createApp(deps: AppDeps) {
   // Ambient, the master bot: Claude with the person's own MCP server, every scope, as /mcp gives it.
   // Ambient on a person's own computer (their Claude plan) when one is connected; the server's key otherwise.
   const computers = new AmbientComputers({ pats, scopes: MCP_SCOPES });
+  // Amb's turns in flight (bots/turn-queue.ts): a restart picks an unanswered message up again.
+  const turnQueue = new TurnQueue({ control, keys: routines.keys });
   // A bot's conversation lanes (bots/bot-lanes.ts): each Slack or Teams thread resumes its own session.
   const botLanes = new BotLanes({ control, keys: routines.keys });
   routines.botLanes = botLanes;
@@ -305,6 +309,7 @@ export function createApp(deps: AppDeps) {
   // The MCP servers a person gave Amb (set once the connections are up, below).
   let ambientMcp: (uid: string) => Promise<{ name: string; path: string; title: string }[]> = async () => [];
   const ambient: AmbientChat = new AmbientChat({
+    turns: turnQueue,
     onChanged: (uid) => live.chatChanged(uid, "ambient"),
     attachments,
     mcpFor: (uid) => ambientMcp(uid),
@@ -476,6 +481,7 @@ export function createApp(deps: AppDeps) {
       return null;
     },
     answer: (uid, id, answer, via) => answerDecision(uid, id, answer, via),
+    turns: turnQueue,
     teamTurn: (teamId, asker, conversation, text, files, thread) => teamAmb.turn(teamId, asker, conversation, text, files, thread),
   };
   // A click on a question's button or card (or a reply to it in its thread) answers it as its
@@ -537,7 +543,19 @@ export function createApp(deps: AppDeps) {
   bots.onTookSlack = async (owner, id, hash) => {
     await Promise.all([slack.runTook(owner, id, hash), teamsApps?.runTook(owner, id, hash)]);
   };
+  // Turns a previous start left unanswered: Amb's chat answers through the door it was asked in; a
+  // team's channel turn is answered again and posted in its thread.
+  turnQueue.on("amb-chat", async (owner, p) => {
+    if (owner.kind === "user") await ambient.resume(owner.uid, { name: String(p.name ?? ""), text: String(p.text ?? ""), via: String(p.via ?? "app"), files: Array.isArray(p.files) ? p.files.map(String) : [] });
+  });
+  turnQueue.on("team-amb", async (owner, raw) => {
+    const p = raw as unknown as TeamTurnPayload;
+    const answer = await teamAmb.turn(p.teamId, p.asker, p.conversation, p.text, [], p.thread);
+    if ("slack" in p.to) await slack.ambPost(owner, p.to.slack, answer.text);
+    else if (teamsApps) await teamsApps.ambPost(owner, p.to.teams, answer.text);
+  });
   if (!deps.ambient?.noHeartbeat) {
+    void new Promise((r) => setTimeout(r, 5_000).unref()).then(() => turnQueue.recover().catch((err: Error) => console.warn(`[turns] ${err.message}`)));
     heartbeat.start();
     automations.start();
     wakes.start();
@@ -623,5 +641,5 @@ export function createApp(deps: AppDeps) {
     if (!res.headersSent) res.status(500).json({ error: "server_error" });
   });
 
-  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, folders, automations, revisions, events, live, notifier, teams, microsoftConnect, msteamsBots };
+  return { app, provider, control, directory, pairing, personal, pats, repos, sessions, routines, bots, ambient, decisions, heartbeat, folders, automations, revisions, events, live, notifier, teams, microsoftConnect, msteamsBots, turns: turnQueue };
 }

@@ -1197,6 +1197,12 @@ serves depends on where it's written to, decided in code, never by the model:
   the same path before it resumes. A computer may only send or fetch a lane it was given a turn of
   in the last 2 hours. Forget chat removes the person's backups.
 - **"new chat"** typed alone in iMessage, Slack or Teams starts over, as New chat in the app.
+- **Turns in flight are written down** (`gateway/src/bots/turn-queue.ts`, Convex `turns`). A
+  message to Amb (the app, iMessage, a Slack or Teams DM) and a team Amb's channel turn are listed
+  before the answer starts and removed once it's out. A gateway that restarts in between picks
+  them up again 5 seconds after it starts (at most 3 tries each): the chat's answer goes back
+  through the door it was asked in, a channel's is posted in its thread. Files sent with a channel
+  message aren't kept for that. A bot's messages were already durable (its thread in Convex).
 - **A bot's threads are lanes too** (`gateway/src/bots/bot-lanes.ts`). A message from a Slack or
   Teams channel thread (or a group chat) carries its lane; the run it starts resumes that lane's
   session (none yet: fresh, with handoffs and the whole thread), and when the run ends its session

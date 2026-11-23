@@ -24,6 +24,7 @@ import type * as revisions from "../revisions.js";
 import type * as routines from "../routines.js";
 import type * as sessionBackups from "../sessionBackups.js";
 import type * as sessions from "../sessions.js";
+import type * as turns from "../turns.js";
 import type * as teams from "../teams.js";
 import type * as users from "../users.js";
 import type * as voices from "../voices.js";
@@ -53,6 +54,7 @@ declare const fullApi: ApiFromModules<{
   routines: typeof routines;
   sessionBackups: typeof sessionBackups;
   sessions: typeof sessions;
+  turns: typeof turns;
   teams: typeof teams;
   users: typeof users;
   voices: typeof voices;

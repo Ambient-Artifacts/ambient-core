@@ -605,6 +605,17 @@ export default defineSchema({
    * `routineId` says it's a bot's thread's, none: Ambient's chat. Goes with the chat's history
    * (forgetChat), the bot (routines.remove) and the account.
    */
+  // Amb's turns in flight (turns.ts): picked up again after a gateway restart.
+  turns: defineTable({
+    kind: v.string(),
+    ownerKind: v.union(v.literal("user"), v.literal("team")),
+    ownerId: v.string(),
+    iv: v.string(),
+    ct: v.string(),
+    attempts: v.number(),
+    createdAt: v.number(),
+  }).index("by_created", ["createdAt"]),
+
   // A lane's Claude Code session, backed up sealed (sessionBackups.ts): one per lane.
   sessionBackups: defineTable({
     ownerKind: v.union(v.literal("user"), v.literal("team")),

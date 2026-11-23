@@ -231,6 +231,8 @@ export class AmbientChat {
       mcpFor?: (uid: string) => Promise<{ name: string; path: string; title: string }[]>;
       /** Files sent with messages, kept so the chat shows them again (attachments.ts). */
       attachments?: Attachments;
+      /** Turns in flight, so a restart picks an unanswered message up again (bots/turn-queue.ts). */
+      turns?: import("./turn-queue.ts").TurnQueue;
       /** The person's chat changed (a message landed, or it was cleared): their open apps are told. */
       onChanged?: (uid: string) => void;
       fetchImpl?: typeof fetch;
@@ -423,12 +425,38 @@ export class AmbientChat {
     const stored = kept.length ? body : [body, files.map((f) => `📎 ${f.name}`).join("\n")].filter(Boolean).join("\n\n");
     const message = await this.add(uid, "user", stored, undefined, kept, via);
     this.pending.set(uid, this.now());
-    const done = this.reply(uid, name, history, body, files, via).finally(() => {
+    // Written down until it's answered: a restart in between picks it up again (resume, below).
+    const turn = await (this.d.turns?.enqueue({ kind: "user", uid }, "amb-chat", { name, text: body, via, files: kept.map((f) => f.id) }) ?? Promise.resolve(null));
+    const done = this.reply(uid, name, history, body, files, via).finally(async () => {
       this.pending.delete(uid);
       this.answering.delete(uid);
+      await this.d.turns?.done(turn);
     });
     this.answering.set(uid, done);
     return { message, pending: true, done };
+  }
+
+  /**
+   * A message the gateway took but didn't answer before it restarted (bots/turn-queue.ts): it's in
+   * the chat already, so only the answer is made, through the door it came in by.
+   */
+  async resume(uid: string, p: { name: string; text: string; via: string; files: string[] }): Promise<void> {
+    if (this.isPending(uid)) return;
+    const turns = (await this.list(uid, HISTORY)).messages;
+    // Answered meanwhile (another start got to it): nothing to do.
+    if (turns.at(-1)?.role !== "user") return;
+    const history = turns.slice(0, -1).map((m): Turn => ({ role: m.role === "user" ? "user" : "assistant", text: [m.text, filesLine(m.files)].filter(Boolean).join("\n\n") }));
+    const files: ChatAttachment[] = [];
+    for (const id of p.files) {
+      const f = await this.file(uid, id).catch(() => null);
+      if (f) files.push({ name: f.name, type: f.type, data: f.bytes.toString("base64") });
+    }
+    this.pending.set(uid, this.now());
+    try {
+      await this.reply(uid, p.name, history, p.text, files, p.via);
+    } finally {
+      this.pending.delete(uid);
+    }
   }
 
   /** The person's computer that runs Ambient right now, if one is connected. */

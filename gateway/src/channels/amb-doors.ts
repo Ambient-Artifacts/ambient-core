@@ -28,6 +28,19 @@ export interface AmbDoorDeps {
   answer?(uid: string, decisionId: string, answer: string, via: string): Promise<void>;
   /** A team's Amb in a channel (null: not available there yet; the reason is said). */
   teamTurn?(teamId: string, asker: { uid: string; name: string }, conversation: string, text: string, files: IncomingFile[], thread?: ThreadMessage[]): Promise<{ text: string } | null>;
+  /** Turns in flight: a channel turn is written down until its answer is posted (bots/turn-queue.ts). */
+  turns?: import("../bots/turn-queue.ts").TurnQueue;
+}
+
+/** A team's channel turn as written down: enough to answer it again after a restart and post it where it was asked. */
+export interface TeamTurnPayload {
+  teamId: string;
+  asker: { uid: string; name: string };
+  conversation: string;
+  text: string;
+  thread: ThreadMessage[];
+  /** Where the answer goes: Slack (channel and thread), or Teams (its service and conversation). */
+  to: { slack: { channel: string; thread: string } } | { teams: { serviceUrl: string; conv: string } };
 }
 
 /** Amb's chat takes images, PDFs and text: the rest is named in the message. */
