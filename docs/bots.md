@@ -48,14 +48,15 @@ drawing (shapes, expressions, motion, the glaze) is specified in the app (`BotFa
 
 ## The app's API
 
-Everything below except `GET /v1/app/features` answers `403 {"error":"bots_not_enabled"}` for
-accounts and teams the gate doesn't include (features answers `{"bots": false}`). Errors are `{ "error": code, "message": sentence }` as elsewhere.
+Errors are `{ "error": code, "message": sentence }` as elsewhere.
 
 ### `GET /v1/app/features`
 
 ```json
-{ "bots": true }
+{ "bots": true, "loopsAreBots": true }
 ```
+
+Always the same now that every routine is a bot; kept for apps that ask.
 
 ### Routines carry `bot`
 
