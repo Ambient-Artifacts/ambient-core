@@ -186,6 +186,21 @@ describe("a bot", () => {
     await hostCall(host, "POST", `/v1/host/runs/${(again.json.run as { id: string }).id}`, { status: "succeeded", summary: "Done this time.", sessionId: "sess-2" });
   });
 
+  it("shows its computer as signed out after a run Claude's sign-in refused, until a run works again", async () => {
+    const signedIn = async () => ((await appCall(s, lena.access_token, "GET", "/v1/app/routines")).json.computers as { id: string; claudeSignedIn: boolean | null }[]).find((c) => c.id === computerId)?.claudeSignedIn;
+    const before = await signedIn();
+    expect(before).not.toBe(false);
+    await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "Once more." });
+    const start = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    await hostCall(host, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "failed", summary: "Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator." });
+    expect((await thread(id)).messages.at(-1)).toMatchObject({ kind: "failure", fix: { kind: "claude", computer: computerId, reason: "signin" } });
+    expect(await signedIn()).toBe(false);
+    await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "And again." });
+    const again = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    await hostCall(host, "POST", `/v1/host/runs/${(again.json.run as { id: string }).id}`, { status: "succeeded", summary: "Back and done.", sessionId: "sess-2" });
+    expect(await signedIn()).toBe(before);
+  });
+
   it("can't be written to by someone who can't change it", async () => {
     expect((await appCall(s, ben.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "hi" })).status).toBe(404);
     expect((await appCall(s, ben.access_token, "GET", `/v1/app/routines/${id}/thread`)).status).toBe(404);

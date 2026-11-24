@@ -413,6 +413,14 @@ export class RoutineService {
   onBotEvent?: (e: AutomationEvent) => void;
   /** What each computer said at its last sync: whether Claude Code can run there (not stored in Convex). */
   private signedIn = new Map<string, boolean>();
+  /**
+   * Computers whose Claude sign-in just failed a run or one of Ambient's answers (revoked, run
+   * out): shown as not signed in, whatever is stored, until something works there again or a new
+   * sign-in is chosen. Kept here like `signedIn`: after a restart the next failure says it again.
+   */
+  private claudeBroken = new Set<string>();
+  /** Runs going on in Codex: their success says nothing about Claude's sign-in. */
+  private codexRuns = new Set<string>();
   /** A bot that watches GitHub repos: its branch prefix and repos, for the PR gate in its instructions (app.ts sets it). */
   /** A bot's booked wake-ups and the time now in its zone, for its run (bots/wakes.ts). */
   wakesFor?: (r: { id: string; teamId: string | null; createdBy: string; timezone: string }) => Promise<{ timezone: string; now: string; wakes: { id: string; when: string; note: string }[] }>;
@@ -548,7 +556,7 @@ export class RoutineService {
       model: h.model ? { model: h.model.model, effort: h.model.effort ?? null, fallback: h.model.fallback ?? null } : null,
       access: h.access ?? "standard",
       allowed: h.allowed ?? [],
-      claudeSignedIn: (h.claude?.use === "plan" && h.claude.plan) || (h.claude?.use === "key" && h.claude.key) ? true : (this.signedIn.get(h.id) ?? null),
+      claudeSignedIn: this.claudeBroken.has(h.id) ? false : (h.claude?.use === "plan" && h.claude.plan) || (h.claude?.use === "key" && h.claude.key) ? true : (this.signedIn.get(h.id) ?? null),
     };
   }
 
@@ -935,24 +943,39 @@ export class RoutineService {
     return this.computer(out.host as HostRow, actor);
   }
 
+  /**
+   * Claude just answered on the computer (`ok`), or its sign-in was refused there: what the app
+   * and get_settings show as signed in follows what happened last, not only what is stored.
+   */
+  claudeResult(hostId: string, ok: boolean): void {
+    if (ok) this.claudeBroken.delete(hostId);
+    else this.claudeBroken.add(hostId);
+  }
+
   /** Store a plan token or an API key for the computer, sealed, and use it. Only from the app. */
   async setClaude(actor: Actor, ref: string, kind: "plan" | "key", token: string): Promise<Computer> {
     const t = token.trim().replace(/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=/, "");
     if (!/^[A-Za-z0-9_-]+$/.test(t) || (kind === "plan" ? !t.startsWith("sk-ant-oat") : !t.startsWith("sk-ant-api"))) throw refused("bad_token");
     const h = await this.claudeComputer(actor, ref);
     const sealed = await this.d.keys.seal(this.computerOwner(h, actor), `host:claude:${kind}`, t);
-    return this.afterClaude(actor, await this.d.control.m(api.routines.setClaude, { uid: actor.uid as never, id: h.id, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() }));
+    const out = this.afterClaude(actor, await this.d.control.m(api.routines.setClaude, { uid: actor.uid as never, id: h.id, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() }));
+    this.claudeBroken.delete(h.id);
+    return out;
   }
 
   /** Switch the computer between its stored plan, its stored key and its own sign-in. */
   async useClaude(actor: Actor, ref: string, use: "plan" | "key" | "computer"): Promise<Computer> {
     const h = await this.claudeComputer(actor, ref);
-    return this.afterClaude(actor, await this.d.control.m(api.routines.useClaude, { uid: actor.uid as never, id: h.id, use }));
+    const out = this.afterClaude(actor, await this.d.control.m(api.routines.useClaude, { uid: actor.uid as never, id: h.id, use }));
+    this.claudeBroken.delete(h.id);
+    return out;
   }
 
   async removeClaude(actor: Actor, ref: string, kind: "plan" | "key"): Promise<Computer> {
     const h = await this.claudeComputer(actor, ref);
-    return this.afterClaude(actor, await this.d.control.m(api.routines.removeClaude, { uid: actor.uid as never, id: h.id, kind }));
+    const out = this.afterClaude(actor, await this.d.control.m(api.routines.removeClaude, { uid: actor.uid as never, id: h.id, kind }));
+    this.claudeBroken.delete(h.id);
+    return out;
   }
 
   private async claudeVersion(host: Host): Promise<string | null> {
@@ -1039,6 +1062,7 @@ export class RoutineService {
       : await this.d.control.m(api.routines.setClaude, { uid: host.uid as never, id: host.id, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() });
     if (!out.ok) throw refused(out.error ?? "bad_request");
     this.signedIn.set(host.id, true);
+    this.claudeBroken.delete(host.id);
   }
 
   /** The computer's chosen sign-in as environment (only the computer asks, with its token). */
@@ -1149,6 +1173,7 @@ export class RoutineService {
     if (!out.ok) throw refused(out.error);
     const r = out.routine as unknown as RoutineRow;
     const owner = this.ownerOf(r);
+    if (r.bot?.runtime === "codex") this.codexRuns.add(String(out.runId));
     const env: Record<string, string> = {};
     // Secrets stored before a name was reserved don't go out either.
     for (const s of out.secrets) if (!RESERVED_ENV.test(s.name)) env[s.name] = await this.d.keys.open(owner, `routine:secret:${s.name}`, s.iv, s.ct);
@@ -1268,6 +1293,12 @@ export class RoutineService {
       now: this.now(),
     });
     if (!out.ok) throw refused(out.error);
+    // A run Claude's sign-in refused marks the computer; one that worked clears it. (A Codex
+    // run says nothing about Claude either way.)
+    const fix = result.status === "failed" ? claudeFix("failure", text ?? "", host.id) : null;
+    if (fix?.kind === "claude" && fix.reason === "signin") this.claudeResult(host.id, false);
+    else if (result.status === "succeeded" && !this.codexRuns.has(runId)) this.claudeResult(host.id, true);
+    this.codexRuns.delete(runId);
     // The session it answered a thread in is that thread's from now on.
     if (lane) {
       this.runLanes.delete(runId);

@@ -126,5 +126,8 @@ describe("a Codex failure that's the sign-in", () => {
     expect(claudeFix("failure", failed, "c1")).toEqual({ kind: "openai", computer: "c1", reason: "signin" });
     expect(claudeFix("failure", "Codex ended with exit code 1.\n\nYou've hit your usage limit.", "c1")).toEqual({ kind: "openai", computer: "c1", reason: "credit" });
     expect(claudeFix("failure", "Claude Code ended with exit code 1.\n\nCredit balance is too low", "c1")).toEqual({ kind: "claude", computer: "c1", reason: "credit" });
+    // A revoked token (a change of plan) and a session that ran out: both are Claude's sign-in.
+    expect(claudeFix("failure", "Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator.", "c1")).toEqual({ kind: "claude", computer: "c1", reason: "signin" });
+    expect(claudeFix("failure", "Failed to authenticate: OAuth session expired and could not be refreshed", "c1")).toEqual({ kind: "claude", computer: "c1", reason: "signin" });
   });
 });

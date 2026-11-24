@@ -11,7 +11,7 @@ import { api, type Control } from "../control.ts";
 import { toolLoop, type Turn } from "../ai/loop.ts";
 import type { RoutineKeys } from "../routines/keys.ts";
 import { RoutineError } from "../routines/service.ts";
-import { CHAT_PURPOSE, openMessage, sealMessage } from "./messages.ts";
+import { CHAT_PURPOSE, claudeProblem, openMessage, sealMessage } from "./messages.ts";
 import type { AmbientComputers } from "./computer.ts";
 import type { Decision, DecisionRow } from "./decisions.ts";
 import { AGENTS, MEMORY, SOUL, type BotFolder } from "./folder.ts";
@@ -40,6 +40,19 @@ export interface ChatMessage {
 }
 
 /** How Amb is told a message came through a channel, and how to answer there (docs/bots.md, "Channels"). */
+/**
+ * What Ambient says when Claude's account on its computer is why it can't answer: plain words and
+ * the way to fix it, in place of Claude Code's error. In the app the link opens that computer's
+ * Claude sheet; in a channel (iMessage, Slack, …) a link into the app can't be tapped, so the place is named.
+ */
+export function claudeProblemText(problem: "credit" | "signin", where: string, computerId: string, via = "app"): string {
+  const what = problem === "signin" ? `Claude's sign-in on ${where} no longer works` : `the Claude account on ${where} is out of credit or over its limit`;
+  const then = problem === "signin" ? "I'm back within a minute after that, and so are the bots there." : "Or wait until the limit resets.";
+  return via === "app"
+    ? `I can't answer right now: ${what}. [${problem === "signin" ? "Sign in to Claude again" : "Change Claude's sign-in"}](ambient://computer/${computerId}/claude). ${then}`
+    : `I can't answer right now: ${what}. ${problem === "signin" ? "Sign in again" : "Change it"} in the Ambient app: Settings, Bots and computers, then the computer. ${then}`;
+}
+
 const VIA_NOTES: Record<string, (name: string) => string> = {
   slack: (name) =>
     `[${name} wrote this to you in a direct message on Slack, and your answer goes there: short, Markdown is fine. It's the same conversation as in the app. When it answers a decision that's waiting (a number, or a few words), find it with open_decisions and file it with answer_decision. You can start your answer with [react: 👍] to react to their message, when you'd do so yourself.]`,
@@ -223,6 +236,8 @@ export class AmbientChat {
       computers?: AmbientComputers;
       /** The person's own computers that run Ambient (ready, not a team's server). */
       computersOf?: (uid: string) => Promise<AmbientComputer[]>;
+      /** Told whether Claude answered on the computer or its sign-in was refused there (RoutineService.claudeResult). */
+      claudeResult?: (computerId: string, ok: boolean) => void;
       /** The person's name (for Ambient's instructions). */
       nameOf?: (uid: string) => Promise<string | undefined>;
       /** Amb's memory of each person (docs/bots.md, "Amb's memory"). */
@@ -511,11 +526,17 @@ export class AmbientChat {
           });
         text = answer.text || (answer.files.length ? "" : "I don't have an answer to that.");
         made = answer.files;
+        this.d.claudeResult?.(computer.id, true);
       } catch (err) {
         // Not delivered: the note goes with the next message.
         if (said.length) this.unseen.set(uid, [...said, ...(this.unseen.get(uid) ?? [])].slice(-10));
         console.warn(`[ambient] ${computer.name} couldn't answer: ${(err as Error).message}`);
-        text = `I couldn't answer on ${computer.team ? `${computer.team}'s server` : computer.name}: ${(err as Error).message}. Please try again in a minute.`;
+        const where = computer.team ? `${computer.team}'s server` : computer.name;
+        const problem = claudeProblem((err as Error).message);
+        if (problem === "signin") this.d.claudeResult?.(computer.id, false);
+        // Claude's account, not a hiccup: trying again won't help, signing in does. The app opens
+        // the computer's Claude sheet from the link; elsewhere the way there is spelled out.
+        text = problem ? claudeProblemText(problem, where, computer.id, via) : `I couldn't answer on ${where}: ${(err as Error).message}. Please try again in a minute.`;
       }
     } else if (!this.d.apiKey) {
       text =

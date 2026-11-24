@@ -50,7 +50,9 @@ export function resultHash(text: string): string {
 /** Why a run failed, when it's the computer's Claude account and not the bot: out of credit, or signed out. */
 export function claudeProblem(text: string): "credit" | "signin" | null {
   if (/credit balance is too low|insufficient (credit|balance)|exceeded your current quota|billing/i.test(text)) return "credit";
-  if (/invalid (x-)?api[ -]key|authentication_error|not logged in|please run \/login|oauth token (has )?expired|invalid bearer token|401 unauthorized/i.test(text)) return "signin";
+  // "Failed to authenticate: OAuth token revoked" is what Claude Code says after a change of plan
+  // or a sign-out elsewhere; "OAuth session expired and could not be refreshed" after a month.
+  if (/invalid (x-)?api[ -]key|authentication_error|failed to authenticate|not logged in|please run \/login|(please )?log in again|oauth (token|session) (has |was |is )?(expired|revoked)|could not be refreshed|invalid bearer token|401 unauthorized/i.test(text)) return "signin";
   return null;
 }
 
