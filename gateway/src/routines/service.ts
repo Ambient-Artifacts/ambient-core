@@ -137,6 +137,15 @@ export const HostInfo = z.object({
 });
 export type HostInfo = z.infer<typeof HostInfo>;
 
+/**
+ * A Claude token as people paste it: `claude setup-token` prints it wider than most terminal
+ * windows, so a copy carries the line break (and sometimes spaces) from where it wrapped, and some
+ * copy the whole `export CLAUDE_CODE_OAUTH_TOKEN=…` line. A token has no whitespace, so all of it goes.
+ */
+export function pastedToken(raw: string): string {
+  return raw.replace(/\s+/g, "").replace(/^(export)?(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=/, "").replace(/^["']|["']$/g, "");
+}
+
 /** What Convex keeps of a computer's info: claudeSignedIn stays with the gateway (RoutineService.signedIn). */
 function storedInfo(info: HostInfo | undefined) {
   if (!info) return undefined;
@@ -937,7 +946,7 @@ export class RoutineService {
 
   /** Store a plan token or an API key for the computer, sealed, and use it. Only from the app. */
   async setClaude(actor: Actor, ref: string, kind: "plan" | "key", token: string): Promise<Computer> {
-    const t = token.trim().replace(/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=/, "");
+    const t = pastedToken(token);
     if (!/^[A-Za-z0-9_-]+$/.test(t) || (kind === "plan" ? !t.startsWith("sk-ant-oat") : !t.startsWith("sk-ant-api"))) throw refused("bad_token");
     const h = await this.claudeComputer(actor, ref);
     const sealed = await this.d.keys.seal(this.computerOwner(h, actor), `host:claude:${kind}`, t);
@@ -1030,7 +1039,7 @@ export class RoutineService {
    * app's path as its owner; a team's server through setClaudeByHost.
    */
   async hostSetClaude(host: Host, kind: "plan" | "key", token: string): Promise<void> {
-    const t = token.trim().replace(/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=/, "");
+    const t = pastedToken(token);
     if (!/^[A-Za-z0-9_-]+$/.test(t) || (kind === "plan" ? !t.startsWith("sk-ant-oat") : !t.startsWith("sk-ant-api"))) throw refused("bad_token");
     const owner: Owner = host.teamId ? { kind: "team", teamId: host.teamId } : { kind: "user", uid: host.uid! };
     const sealed = await this.d.keys.seal(owner, `host:claude:${kind}`, t);

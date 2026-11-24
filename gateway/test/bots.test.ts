@@ -518,7 +518,9 @@ describe("whose Claude a computer uses", () => {
     const put = (body: unknown) => appCall(s, lena.access_token, "PUT", `/v1/app/computers/${computerId}/claude`, body);
     expect((await put({ kind: "plan", token: "not-a-token-at-all-really" })).json.error).toBe("bad_token");
     expect((await put({ kind: "key", token: "sk-ant-oat01-aaaaaaaaaaaaaaaaaaaa" })).json.error).toBe("bad_token");
-    const stored = await put({ kind: "plan", token: "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-lenasplan0000000000" });
+    // Copied from a terminal that wrapped it: the line break and the indent come along.
+    expect((await put({ kind: "plan", token: "sk-ant-oat01-wrapped\n  inaterminal000000000\n" })).status).toBe(200);
+    const stored = await put({ kind: "plan", token: "export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-lenas\nplan0000000000" });
     expect(stored.status, JSON.stringify(stored.json)).toBe(200);
     expect((stored.json.computer as { claudeAccount: unknown }).claudeAccount).toMatchObject({ use: "plan", plan: { by: "Lena Vogel" }, key: null });
     // Never in Convex in readable form, never back to the app.
