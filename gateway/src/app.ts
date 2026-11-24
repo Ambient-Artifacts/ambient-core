@@ -326,6 +326,7 @@ export function createApp(deps: AppDeps) {
     fetchImpl: deps.ambient?.fetchImpl ?? deps.fetchImpl,
     computers,
     computersOf: (uid) => routines.computersOf(uid),
+    claudeResult: (id, ok) => routines.claudeResult(id, ok),
     nameOf: async (uid) => (await directory.user(uid))?.name,
     folder,
   });

@@ -92,6 +92,29 @@ describe("Ambient on the person's computer", () => {
     await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { error: "Claude Code stopped (exit 1)" });
     expect((await settled()).messages.at(-1)?.text).toContain("I couldn't answer on VPS: Claude Code stopped");
   });
+
+  it("says in plain words that Claude's sign-in stopped working, with the way to fix it, and shows the computer as signed out until it works again", async () => {
+    const signedIn = async () => ((await appCall(s, lena.access_token, "GET", "/v1/app/routines")).json as { computers: { name: string; claudeSignedIn: boolean | null }[] }).computers.find((c) => c.name === "VPS")?.claudeSignedIn;
+    const before = await signedIn();
+    expect(before).not.toBe(false);
+
+    // What Claude Code says after a change of plan revoked the token.
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "hi" });
+    const job = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string };
+    await hostCall(host, "POST", `/v1/host/ambient/${job.id}`, { error: "Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator." });
+    const said = (await settled()).messages.at(-1)?.text ?? "";
+    expect(said).toMatch(/^I can't answer right now: Claude's sign-in on VPS no longer works\. \[Sign in to Claude again\]\(ambient:\/\/computer\/[^/]+\/claude\)\./);
+    expect(said).not.toContain("try again in a minute");
+    expect(said).not.toContain("OAuth");
+    expect(await signedIn()).toBe(false);
+
+    // An answer that works again clears it.
+    await appCall(s, lena.access_token, "POST", "/v1/app/ambient/chat", { text: "hi again" });
+    const next = (await hostCall(host, "GET", "/v1/host/ambient/next")).json as { id: string };
+    await hostCall(host, "POST", `/v1/host/ambient/${next.id}`, { text: "Hello." });
+    await settled();
+    expect(await signedIn()).toBe(before);
+  });
 });
 
 describe("Ambient's own turns", () => {

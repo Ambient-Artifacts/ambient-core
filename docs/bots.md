@@ -320,7 +320,17 @@ version):
 A thread message (and `bot.lastMessage`) has `fix`: `{ "kind": "claude", "computer": "<id>",
 "reason": "credit" | "signin" }` when a run failed because the computer's Claude account is out of
 credit or not signed in, else null. The app shows a button that opens the Claude sheet for that
-computer ("Use my Claude plan").
+computer ("Use my Claude plan"). "Not signed in" includes a sign-in that stopped working: a token
+revoked by a change of Claude plan ("OAuth token revoked"), or a session that ran out.
+
+The computer follows what happened last, not only what is stored: after a run or an answer of
+Ambient's failed on Claude's sign-in, its `claudeSignedIn` is `false` (and `get_settings` says not
+signed in), even with a plan or key stored, until something works there again or a sign-in is
+stored or chosen. The gateway keeps this in memory; after a restart the next failure says it again.
+
+Ambient's chat says the same in plain words instead of Claude Code's error: "I can't answer right
+now: Claude's sign-in on … no longer works", with the link below in the app, and the way there in
+words on iMessage, Slack and Teams.
 
 ### Links
 
