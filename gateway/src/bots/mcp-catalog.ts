@@ -69,6 +69,7 @@ export const CATALOG: CatalogEntry[] = [
   e("paypal", "PayPal", "https://mcp.paypal.com/mcp", "Payments, invoices and disputes", "money"),
   e("square", "Square", "https://mcp.squareup.com/mcp", "Orders, payments and catalog", "money"),
   e("ramp", "Ramp", "https://ramp-mcp-remote.ramp.com/mcp", "Spend, cards and bills", "money"),
+  e("revenuecat", "RevenueCat", "https://mcp.revenuecat.ai/mcp", "Subscriptions, revenue and offerings", "money"),
 
   // GitHub's own MCP server: its OAuth takes no clients registered on the fly, a personal token works.
   k("github", "GitHub", "https://api.githubcopilot.com/mcp/", "Repos, issues and pull requests", "build", {
