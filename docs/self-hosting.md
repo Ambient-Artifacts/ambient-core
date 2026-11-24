@@ -207,12 +207,14 @@ curl -fsSL https://<your server>/install.sh | sudo bash -s ABCD-1234
 `install.sh` (served by the gateway from `runner/install.sh`, with its address in it) does, in order:
 
 1. **Checks.** Root, Linux, systemd; a note (not a stop) under 1.5 GB of memory or 3 GB of free disk.
-2. **Installs only what's missing.** git; Node for the whole system (Node 22 from NodeSource with apt or dnf, only when there's no Node 18 or newer that root owns); Claude Code for the bots' user (Anthropic's native installer, only when that user has none).
+2. **Installs only what's missing.** git; Node for the whole system (Node 22 from NodeSource with apt or dnf, only when root owns no Node at all); with a system Node older than 22.13 (what a team's brain needs), Ambient's own Node 22 in `/opt/ambient-runner/node` (from nodejs.org, checksum checked), and the system's stays as it is; Podman (apt or dnf), since bots run in their own container by default; Claude Code for the bots' user (Anthropic's native installer, only when that user has none).
 3. **The bots' user.** A system user `ambient` (home `/var/lib/ambient`, no password) that Ambient's sessions and bots run as. `--user NAME` picks an existing user instead; a computer set up before keeps the user it has.
 4. **Connects.** Downloads the runner from the same server and runs `ambient-runner.mjs setup <code>`.
 5. **Signs Claude in.** Unless the computer already has a sign-in, it runs `claude setup-token` in the terminal (open the link, sign in, paste the code back), checks the token with one tiny request, and stores it in Ambient as the computer's Claude plan (`POST /v1/host/claude`, sealed with the owner's key, fetched back by the computer). With no terminal, or when skipped, the app's Claude sheet does the same.
 
 Running it again does only what's still missing.
+
+The runner's folders (`/var/lib/ambient-runner`, `/opt/ambient-runner`) are readable by the bots' user whatever umask the setup's shell had: the runner sets their mode itself, and opens them again on a computer set up with a umask of 077 (where every session stopped with "permission denied" on its MCP config).
 
 ### What the setup leaves alone
 
@@ -223,7 +225,7 @@ The computer may already run things, Claude Code among them (Remote Control, oth
 - **Ambient's sessions never use the user's own Claude Code settings.** With a sign-in from Ambient (or a token or key in `extra.env`), every run gets `CLAUDE_CONFIG_DIR=/var/lib/ambient-runner/claude/<user>`: the user's `~/.claude` (hooks, plugins, MCP servers, settings, CLAUDE.md, history) never reaches Ambient's sessions, and Ambient's sessions never show up in the user's `claude --resume`. Every run gets only Ambient's MCP servers (`--strict-mcp-config`). A computer that signs in with Claude Code's own login (nothing stored) needs that user's folder, so its runs read only project and local settings (`--setting-sources project,local`). `AMBIENT_CLAUDE_CONFIG=own` in `/etc/ambient-runner/runner.env` keeps the user's settings for everything, for a computer whose bots should use the user's own MCP servers.
 - A computer set up before runner 0.10.0 moves to the runner's settings folder with the update: sessions kept in the user's folder can't be resumed from it, so the next chat message and the next run of each bot start a new session once (a bot continues from its handoff).
 
-By hand, without the script: install Node 18+ and Claude Code, download `https://<your server>/runner/ambient-runner.mjs` and run `sudo node ambient-runner.mjs setup <code> [--user NAME]`.
+By hand, without the script: install Node 22.13+ (18+ without a team's brain), Podman and Claude Code, download `https://<your server>/runner/ambient-runner.mjs` and run `sudo node ambient-runner.mjs setup <code> [--user NAME]`.
 
 Status: `sudo node /opt/ambient-runner/ambient-runner.mjs status`. Logs: `journalctl -u ambient-runner -u ambient-runner-ambient -u 'ambient-routine-*'`. Remove it: `sudo node /opt/ambient-runner/ambient-runner.mjs uninstall` (then remove the computer in the app; the `ambient` user stays: `sudo userdel -r ambient`).
 

@@ -5,7 +5,8 @@
 #
 # The code comes from the Ambient app (Bots → Connect a Computer). In order, it:
 #   1. checks that it runs as root on Linux with systemd; warns when memory or disk is short
-#   2. installs only what's missing: git, Node (for the whole system), Claude Code for the bots' user
+#   2. installs only what's missing: git, Node (for the whole system, or Ambient's own next to an
+#      older one), Podman (bots run in their own containers), Claude Code for the bots' user
 #   3. creates the user "ambient" that Ambient's sessions and bots run as (or uses --user NAME)
 #   4. downloads the runner from the same server and connects the computer with the code
 #   5. signs Claude in with your Claude plan (`claude setup-token`), unless the computer has a sign-in
@@ -14,12 +15,14 @@
 # of their own (docs/self-hosting.md, "What the setup leaves alone"). Run it again any time: it
 # does only what's still missing. Remove everything: sudo node /opt/ambient-runner/ambient-runner.mjs uninstall
 set -euo pipefail
+# Folders made here are passed through by the bots' user, whatever umask this shell came with.
+umask 022
 
 # The gateway that serves this script writes its own address here.
 DEFAULT_SERVER="https://mcp.ambientartifacts.si"
 SERVER="${AMBIENT_SERVER:-$DEFAULT_SERVER}"
-NODE_MAJOR=22   # what it installs when there's no Node
-MIN_NODE=18     # what the runner needs
+NODE_MAJOR=22   # what it installs when there's no Node, or only an older one
+OWN_NODE=/opt/ambient-runner/node/bin/node   # Ambient's own Node, next to a system Node that's too old
 RUNNER=/opt/ambient-runner/ambient-runner.mjs
 CONFIG=/etc/ambient-runner/runner.env
 
@@ -100,13 +103,48 @@ for candidate in /usr/bin/node /usr/local/bin/node "$(command -v node 2>/dev/nul
   NODE="$real"
   break
 done
-if [ -n "$NODE" ]; then
-  major=$(node_major "$NODE")
-  [ "$major" -ge "$MIN_NODE" ] || die "$NODE is Node $major, and the runner needs $MIN_NODE or newer. Upgrade that Node (the setup doesn't replace an installed one), then run this again."
+# Node 22.13 or newer: a team's brain uses Node's own SQLite (docs/architecture.md, "A team on its own computer").
+node_new_enough() { "$1" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=13)?0:1)' 2>/dev/null; }
+# Ambient's own Node, from nodejs.org with its checksum, in /opt/ambient-runner: the system's Node stays as it is.
+install_own_node() {
+  local arch sums file tmp
+  case "$(uname -m)" in
+    x86_64) arch=x64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  command -v sha256sum >/dev/null && command -v tar >/dev/null || return 1
+  tmp=$(mktemp -d /tmp/ambient-node.XXXXXX)
+  sums=$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt") || { rm -rf "$tmp"; return 1; }
+  file=$(printf '%s\n' "$sums" | awk -v a="linux-$arch.tar.gz" 'index($2, a) && $2 ~ /^node-v[0-9.]+-linux-/ { print $2; exit }')
+  [ -n "$file" ] || { rm -rf "$tmp"; return 1; }
+  if curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/$file" -o "$tmp/$file" &&
+    (cd "$tmp" && printf '%s\n' "$sums" | grep " $file\$" | sha256sum -c --status -) &&
+    mkdir -p "$(dirname "$(dirname "$OWN_NODE")")" &&
+    tar -xzf "$tmp/$file" -C "$(dirname "$(dirname "$OWN_NODE")")" --strip-components=1 --no-same-owner "${file%.tar.gz}/bin/node" &&
+    node_new_enough "$OWN_NODE"; then
+    rm -rf "$tmp"; return 0
+  fi
+  rm -rf "$tmp"; return 1
+}
+if [ -n "$NODE" ] && node_new_enough "$NODE"; then
   say "Node: $("$NODE" --version), already here ($NODE)"
-  # A team's brain on its own computer uses Node's own SQLite (docs/architecture.md, "A team on its own computer").
-  if ! "$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=13)?0:1)'; then
-    warn "for a team's computer, the team's brain needs Node 22.13 or newer (this is $("$NODE" --version)). Bots and your own chat work as it is."
+elif [ -n "$NODE" ]; then
+  # An older Node that something here may depend on: it stays, and Ambient gets its own next to it.
+  system_node="$NODE"
+  if [ -x "$OWN_NODE" ] && node_new_enough "$OWN_NODE"; then
+    NODE="$OWN_NODE"
+    say "Node: $("$NODE" --version), Ambient's own ($NODE); the system's $("$system_node" --version) stays as it is"
+  else
+    say "Node: the system's is $("$system_node" --version), so installing Node $NODE_MAJOR for Ambient alone (the system's stays as it is)"
+    if install_own_node; then
+      NODE="$OWN_NODE"
+      say "Node: $("$NODE" --version) ($NODE)"
+    elif [ "$(node_major "$system_node")" -ge 18 ]; then
+      warn "couldn't install Node $NODE_MAJOR from nodejs.org, so Ambient uses $("$system_node" --version). Bots and your own chat work with it; a team's brain needs Node 22.13 or newer."
+    else
+      die "$system_node is Node $(node_major "$system_node"), and the runner needs 18 or newer. Node $NODE_MAJOR from nodejs.org didn't install either: upgrade Node, then run this again."
+    fi
   fi
 else
   say "Node: installing Node $NODE_MAJOR for the whole system"
@@ -119,6 +157,18 @@ else
   say "Node: $("$NODE" --version) ($NODE)"
 fi
 
+# Podman: a bot runs in its own container unless it is switched to the computer itself, and can't answer without it.
+if command -v podman >/dev/null; then
+  say "Podman: $(podman --version 2>/dev/null | awk '{ print $NF }'), already here"
+else
+  say "Podman: installing (bots run in their own containers)"
+  if (install_pkg podman) >/dev/null 2>&1 && command -v podman >/dev/null; then
+    say "Podman: $(podman --version 2>/dev/null | awk '{ print $NF }')"
+  else
+    warn "Podman didn't install. Bots that run in their own container need it: install it yourself (apt-get install -y podman), or switch a bot to run on the computer itself."
+  fi
+fi
+
 # ---- 3. the user Ambient runs as ----
 
 # Already connected: keep the user it runs as, unless --user says otherwise.
@@ -126,7 +176,7 @@ if [ -z "$RUN_USER" ] && [ -f "$CONFIG" ]; then RUN_USER=$(sed -n 's/^AMBIENT_US
 if [ -z "$RUN_USER" ]; then
   RUN_USER=ambient
   if ! id ambient >/dev/null 2>&1; then
-    useradd --system --create-home --home-dir /var/lib/ambient --shell /bin/bash --comment "Ambient: chat, bots and upkeep" ambient
+    useradd --system --create-home --home-dir /var/lib/ambient --shell /bin/bash --comment "Ambient chat and bots" ambient
     say "User: created \"ambient\" (home /var/lib/ambient, no password, no login)"
   else
     say "User: \"ambient\", already here"
