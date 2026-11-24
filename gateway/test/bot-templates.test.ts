@@ -153,7 +153,7 @@ describe("a bot from a template", () => {
 });
 
 describe("GitHub's modes", () => {
-  it("wakes a reviewer for every pull request but drafts, and keeps the bots apart", async () => {
+  it("wakes a reviewer for every pull request but people's drafts, and keeps the bots apart", async () => {
     expect(await deliver("pull_request", { action: "opened", repository, pull_request: pr(20, "feature/search", { user: { login: "nik" } }) })).toBe("queued");
     expect(await deliver("pull_request", { action: "opened", repository, pull_request: pr(21, "feature/wip", { draft: true }) })).toBe("a draft");
     await s.folders.github!.idle();
@@ -163,6 +163,10 @@ describe("GitHub's modes", () => {
     expect(t.at(-1)!.text).toContain("To review: pull request #20 “PR 20” by nik (head f00ba12)");
     // The builder's own pull requests aren't the keeper's or the reviewer's own.
     expect((await thread(builder)).some((m) => m.text.includes("#20"))).toBe(false);
+    // A bot's own draft waits for this review before it's marked ready: it's reviewed.
+    expect(await deliver("pull_request", { action: "opened", repository, pull_request: pr(22, "ambient/builder/search", { draft: true }) })).toBe("queued");
+    await s.folders.github!.idle();
+    expect((await thread(reviewer)).at(-1)!.text).toContain("To review: pull request #22");
   });
 
   it("wakes a wiki keeper for what's merged, not for docs-only pushes or its own merges", async () => {
