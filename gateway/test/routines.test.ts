@@ -3,7 +3,7 @@
 // systemctl) and running a routine (a stand-in claude that speaks stream-json).
 import { spawn } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -87,6 +87,11 @@ describe("computers", () => {
     writeFileSync(join(dir, "install.sh"), script);
     const check = spawn("bash", ["-n", join(dir, "install.sh")]);
     expect(await new Promise((r) => check.on("close", r))).toBe(0);
+    // useradd refuses a comment with a colon in it (/etc/passwd is colon-separated).
+    expect(script).not.toMatch(/--comment "[^"]*:[^"]*"/);
+    // An older system Node stays, with Ambient's own next to it; Podman comes with the setup.
+    expect(script).toContain("install_own_node");
+    expect(script).toContain("install_pkg podman");
   });
 
   it("say whether Claude can run there, from what the runner reports", async () => {
@@ -545,6 +550,20 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Drafted th
     expect(readFileSync(join(dir, "systemctl.log"), "utf8")).toContain(`disable --now ambient-routine-${routineId}.timer`);
     expect(existsSync(join(dir, "units", `ambient-routine-${routineId}.service`))).toBe(false);
   });
+});
+
+describe("the runner's folders", () => {
+  it("are open to the bots' user again, whatever umask setup ran with", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ambient-folders-"));
+    for (const d of ["state", "install", "config"]) mkdirSync(join(dir, d), { mode: 0o700 });
+    for (const d of ["state", "install"]) chmodSync(join(dir, d), 0o700);
+    // A gateway nobody listens on: the sync stops there, after the folders are opened.
+    const env = { ...process.env, AMBIENT_STATE_DIR: join(dir, "state"), AMBIENT_INSTALL_DIR: join(dir, "install"), AMBIENT_CONFIG_DIR: join(dir, "config"), AMBIENT_HOST_TOKEN: "t", AMBIENT_SERVER: "http://127.0.0.1:9" };
+    const child = spawn("bash", ["-c", `umask 077; exec "${process.execPath}" "${RUNNER}" sync`], { env, stdio: "ignore" });
+    await new Promise((r) => child.on("close", r));
+    expect(statSync(join(dir, "state")).mode & 0o777).toBe(0o755);
+    expect(statSync(join(dir, "install")).mode & 0o777).toBe(0o755);
+  }, 30_000);
 });
 
 describe("the runner's releases", () => {

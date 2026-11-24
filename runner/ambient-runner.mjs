@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.18.0";
+const VERSION = "0.18.1";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -85,6 +85,22 @@ const die = (msg, code = 1) => {
   console.error(msg);
   process.exit(code);
 };
+
+// The routine user's sessions pass through the runner's folders: their MCP config and settings
+// folder are below STATE_DIR, and bot-mcp is the runner itself in INSTALL_DIR. So those folders
+// never take their mode from the shell that ran setup: with a umask of 077 (some hardened servers)
+// they were root's alone, and every session stopped with "permission denied" on its MCP config.
+process.umask(0o022);
+/** Open those folders again on a computer set up before (what's private in them has its own mode). */
+function openFolders() {
+  for (const dir of [STATE_DIR, join(STATE_DIR, "claude"), INSTALL_DIR]) {
+    try {
+      if ((statSync(dir).mode & 0o055) !== 0o055) chmodSync(dir, 0o755);
+    } catch {
+      // Not there yet, or not ours to change.
+    }
+  }
+}
 
 // ---- config ----
 
@@ -2730,6 +2746,7 @@ function uninstall() {
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
+if (["setup", "sync", "run", "ambient"].includes(cmd)) openFolders();
 switch (cmd) {
   case "setup":
     await setup(rest);
