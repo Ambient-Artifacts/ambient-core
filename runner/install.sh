@@ -260,11 +260,17 @@ else
   step "Signing in to Claude"
   say "Ambient's chat and your bots use your own Claude plan here. Below, Claude Code shows a link:"
   say "open it in a browser, sign in, and paste the code it gives you back here."
+  # sudo-rs (Ubuntu's sudo since 25.10) starts a piped-in script like this one in the background of
+  # its own terminal. The first program here to set the terminal's mode is stopped for it, and sudo-rs
+  # wakes only this shell, so `script` stayed stopped: no link, a blank screen, Ctrl+C dead. This shell
+  # sets the mode first (a read that waits 10 ms), so sudo-rs hands it the terminal and passes keys through.
+  IFS= read -rs -t 0.01 _ </dev/tty || true
   tmp=$(mktemp -d /tmp/ambient-claude.XXXXXX)
   chown "$RUN_USER" "$tmp"
   chmod 700 "$tmp"
   # Its own settings folder, deleted after: your own Claude Code login, if you have one, stays as it is.
-  as_user env CLAUDE_CONFIG_DIR="$tmp/config" script -q -e -c "'$CLAUDE' setup-token" "$tmp/out.log" </dev/tty >/dev/tty 2>&1 || true
+  # In a session of its own (setsid), `script` can't be stopped over the terminal, whatever sudo did with it.
+  as_user env CLAUDE_CONFIG_DIR="$tmp/config" setsid -w script -q -e -c "'$CLAUDE' setup-token" "$tmp/out.log" </dev/tty >/dev/tty 2>&1 || true
   token=""
   [ -f "$tmp/out.log" ] && token=$(extract_token "$tmp/out.log")
   rm -rf "$tmp"
