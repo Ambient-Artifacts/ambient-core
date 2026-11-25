@@ -21,7 +21,7 @@ import { historyLines } from "../bots/history.ts";
 import { FromTemplate, createFromTemplate, templateViews } from "../bots/bot-templates.ts";
 import { AutomationInput, EVENT_KINDS, ProposedSettings, TEMPLATES, type AutomationView } from "../bots/automations.ts";
 import type { Principal } from "../auth/bearer.ts";
-import { RoutineError, RoutineInput, RoutinePatch, SecretName, SecretValue, type Actor, type Computer, type Routine, type RoutineService, type Run } from "../routines/service.ts";
+import { RoutineError, RoutineInput, RoutinePatch, SecretName, SecretValue, secretNameProblem, type Actor, type Computer, type Routine, type RoutineService, type Run } from "../routines/service.ts";
 
 const Schedule = z
   .object({
@@ -351,7 +351,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         const team = onlyTeam?.slug ?? a.team ?? null;
         const whose = team ? `team ${team}'s routines` : "the user's own routines";
         const name = SecretName.safeParse(a.name);
-        if (!name.success) return error(`Check the name: ${invalid(name.error)}.`);
+        if (!name.success) return error(secretNameProblem(name.error));
         if (a.remove) {
           await routines.removeSecret(actor, team, name.data);
           return result(`Removed ${name.data} from ${whose}.`);

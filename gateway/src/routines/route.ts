@@ -3,7 +3,7 @@
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { z } from "zod";
 import type { Directory } from "../directory.ts";
-import { ClaudeToken, HostInfo, RoutineError, RoutineInput, RoutinePatch, RunProgress, RunResult, SecretName, SecretValue, type Actor, type Host, type RoutineService } from "./service.ts";
+import { ClaudeToken, HostInfo, RoutineError, RoutineInput, RoutinePatch, RunProgress, RunResult, SecretName, SecretValue, secretNameProblem, type Actor, type Host, type RoutineService } from "./service.ts";
 import { addressKey, limiter } from "../limiter.ts";
 import type { TeamBundle } from "../team-bundle.ts";
 import type { LiveText } from "../bots/live.ts";
@@ -43,7 +43,10 @@ export function routineAppRoutes(r: Router, d: { routines: RoutineService; direc
 
   r.put("/v1/app/routines/secrets/:name", d.auth, d.json, async (req, res) => {
     const name = SecretName.safeParse(req.params.name);
-    if (!name.success) return badRequest(res, name.error);
+    if (!name.success) {
+      res.status(400).json({ error: "bad_request", message: secretNameProblem(name.error) });
+      return;
+    }
     const value = SecretValue.safeParse(req.body?.value);
     if (!value.success) {
       res.status(400).json({ error: "bad_request", message: "Give the secret a value (up to 10,000 characters)." });

@@ -116,10 +116,34 @@ export type RoutinePatch = z.infer<typeof RoutinePatch>;
  */
 export const RESERVED_ENV =
   /^(PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|TMPDIR|TMP|TEMP|TERM|LANG|LANGUAGE|LC_.*|IFS|ENV|BASH_ENV|BASH_FUNC_.*|PS4|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|EDITOR|VISUAL|PAGER|MANPAGER|GIT_.*|SSH_.*|GNUPGHOME|ANTHROPIC_.*|CLAUDE.*|AMBIENT_.*|LD_.*|DYLD_.*|NODE_.*|NPM_CONFIG_.*|YARN_.*|PYTHON.*|PIP_.*|PERL.*|RUBY.*|GEM_.*|BUNDLE_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_PROXY|SSL_.*|CURL_.*|OPENSSL_.*|REQUESTS_CA_BUNDLE|XDG_.*|DOCKER_HOST)$/;
+/** Why a reserved name is reserved, in the words a person picking a name needs (first match wins). */
+const RESERVED_WHY: [RegExp, string][] = [
+  [/^(ANTHROPIC_|CLAUDE)/, "Claude Code reads names that start with CLAUDE or ANTHROPIC_, and they can change whose account pays or which model runs"],
+  [/^AMBIENT_/, "Ambient's runner uses names that start with AMBIENT_"],
+  [/^(GIT_|SSH_|GNUPGHOME$)/, "git and ssh read it"],
+  [/(_PROXY$|^SSL_|^CURL_|^OPENSSL_|^REQUESTS_CA_BUNDLE$|^DOCKER_HOST$)/, "it changes where network traffic goes or which certificates are trusted"],
+  [/^(LD_|DYLD_|NODE_|NPM_CONFIG_|YARN_|PYTHON|PIP_|PERL|RUBY|GEM_|BUNDLE_|JAVA_TOOL_OPTIONS$|_JAVA_OPTIONS$|JDK_JAVA_OPTIONS$)/, "a language runtime or package manager reads it"],
+];
+
+/** Why `name` can't be a secret's name, with one that can (no closing full stop): null when it can. */
+export function reservedSecretName(name: string): string | null {
+  if (!RESERVED_ENV.test(name)) return null;
+  const why = RESERVED_WHY.find(([re]) => re.test(name))?.[1] ?? "the computer sets it for every run, or the shell reads it";
+  const other = `MY_${name}`;
+  const next = other.length <= 64 && !RESERVED_ENV.test(other) ? `Name it something like ${other}` : "Pick another name";
+  return `${name} is reserved, because ${why}, so a run would never get it. ${next}`;
+}
+
 export const SecretName = z
   .string()
-  .regex(/^[A-Z_][A-Z0-9_]{0,63}$/, "capital letters, digits and _, like GITHUB_TOKEN")
-  .refine((n) => !RESERVED_ENV.test(n), "that name is used by the computer itself, or changes how its tools behave");
+  .regex(/^[A-Z_][A-Z0-9_]{0,63}$/, "Use capital letters, digits and _ in the name, like GITHUB_TOKEN")
+  .superRefine((n, ctx) => {
+    const why = reservedSecretName(n);
+    if (why) ctx.addIssue({ code: "custom", message: why });
+  });
+
+/** What's wrong with a secret's name, as one sentence for the app and AI apps. */
+export const secretNameProblem = (err: z.ZodError): string => `${err.issues[0]?.message ?? "Check the secret's name"}.`;
 export const SecretValue = z.string().min(1).max(10_000);
 
 export const HostInfo = z.object({

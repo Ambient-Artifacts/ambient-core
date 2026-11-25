@@ -312,6 +312,18 @@ describe("team routines", () => {
       expect((await appCall(s, lena, "PUT", `/v1/app/routines/secrets/${name}`, { value: "x", team: slug })).status, name).toBe(400);
     }
     expect((await appCall(s, lena, "PUT", "/v1/app/routines/secrets/lower_case", { value: "x" })).status).toBe(400);
+    // A refused name says why, and offers one that works.
+    const claude = await appCall(s, lena, "PUT", "/v1/app/routines/secrets/CLAUDE_ADMIN_API_KEY", { value: "x", team: slug });
+    expect(claude.status).toBe(400);
+    expect(claude.json.message).toBe(
+      "CLAUDE_ADMIN_API_KEY is reserved, because Claude Code reads names that start with CLAUDE or ANTHROPIC_, and they can change whose account pays or which model runs, so a run would never get it. Name it something like MY_CLAUDE_ADMIN_API_KEY.",
+    );
+    expect((await appCall(s, lena, "PUT", "/v1/app/routines/secrets/HTTPS_PROXY", { value: "x", team: slug })).json.message).toBe(
+      "HTTPS_PROXY is reserved, because it changes where network traffic goes or which certificates are trusted, so a run would never get it. Pick another name.",
+    );
+    expect((await appCall(s, lena, "PUT", "/v1/app/routines/secrets/lower_case", { value: "x" })).json.message).toBe("Use capital letters, digits and _ in the name, like GITHUB_TOKEN.");
+    expect((await appCall(s, lena, "PUT", "/v1/app/routines/secrets/MY_CLAUDE_ADMIN_API_KEY", { value: "x", team: slug })).status).toBe(204);
+    expect((await appCall(s, lena, "DELETE", `/v1/app/routines/secrets/MY_CLAUDE_ADMIN_API_KEY?team=${slug}`)).status).toBe(204);
     const names = (await appCall(s, ben, "GET", `/v1/app/routines/secrets?team=${slug}`)).json.secrets as { name: string }[];
     expect(names.map((n) => n.name)).toEqual(["GH_TOKEN"]);
     expect(JSON.stringify(names)).not.toContain("ghp_team_secret_1");
@@ -351,7 +363,10 @@ describe("team routines", () => {
     const after = (await appCall(s, lena, "GET", "/v1/app/routines")).json.routines as R[];
     expect(after.find((r) => r.name === "Weekly digest")?.enabled).toBe(false);
     expect(after.find((r) => r.name === "Lena's own")?.enabled).toBe(true);
-    expect((await client.callTool({ name: "set_routine_secret", arguments: { name: "ANTHROPIC_BASE_URL", value: "https://example.com" } })).isError).toBe(true);
+    const refused = await client.callTool({ name: "set_routine_secret", arguments: { name: "ANTHROPIC_BASE_URL", value: "https://example.com" } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("ANTHROPIC_BASE_URL is reserved, because Claude Code reads names that start with CLAUDE or ANTHROPIC_");
+    expect(text(refused)).toContain("Name it something like MY_ANTHROPIC_BASE_URL.");
     await client.close();
 
     const benPat = String((await appCall(s, ben, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
