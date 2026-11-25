@@ -43,6 +43,8 @@ export class TeamWiki {
   }
   private lastCheck = 0;
   private lastPull = 0;
+  /** A background pull is running: it reads the repo again itself once git is done. */
+  private pulling = false;
   /** Folders and files of the repo that aren't knowledge (templates, a README) and stay out of the brain. */
   private ignore: string[];
   /** The team's own repo, when an admin connected one. */
@@ -103,19 +105,35 @@ export class TeamWiki {
   async refresh(everyMs = 30_000): Promise<void> {
     if (Date.now() - this.lastCheck < everyMs) return;
     this.lastCheck = Date.now();
-    // With a connected repo, also bring in edits made there (at most every 5 minutes).
+    // Writes already queued finish first, so a query sees them; a pull started below doesn't hold
+    // it up.
+    const pending = this.chain;
+    // With a connected repo, also bring in edits made there (at most every 5 minutes), in the
+    // background: a pull and the reload after it took longer than the gateway waits for a query
+    // (8 s), and the app then showed the graph without links (2026-11-24). This query answers
+    // from the wiki as it is; the next one sees what the pull brought.
     if (this.remote?.connected && Date.now() - this.lastPull > 5 * 60_000) {
       this.lastPull = Date.now();
-      await this.exclusive(async () => {
-        if (await this.remote!.pull()) this.reload();
-      });
+      this.pulling = true;
+      void this.exclusive(async () => {
+        try {
+          if (await this.remote!.pull()) await this.catchUp();
+        } finally {
+          this.pulling = false;
+        }
+      }).catch(() => undefined);
     }
-    await this.chain;
+    await pending;
+    // Mid-pull, git may be rewriting the files: leave the reading to the pull.
+    if (!this.pulling) await this.catchUp();
+  }
+
+  /** Reads the repo again if its head moved since it was last read (once, not once per caller). */
+  private async catchUp(): Promise<void> {
     const head = await this.repo.head();
-    if (head !== this.knownHead) {
-      this.reload();
-      this.knownHead = head;
-    }
+    if (head === this.knownHead) return;
+    this.reload();
+    this.knownHead = head;
   }
 
   /**
@@ -159,7 +177,7 @@ export class TeamWiki {
     if (this.remote?.readOnly) return Promise.reject(new ReadOnlyWiki());
     const next = this.chain.then(async () => {
       // Start from the repo's latest state, so edits made there aren't overwritten.
-      if (this.remote?.connected && (await this.remote.pull())) this.reload();
+      if (this.remote?.connected && (await this.remote.pull())) await this.catchUp();
       const touched: string[] = [];
       // Another tool keeps this wiki and Ambient writes one folder of it: anything else is refused
       // before a byte is written, whoever asks.

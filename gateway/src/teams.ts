@@ -133,6 +133,14 @@ export class TeamLink {
 
   private async post(team: Team, path: string, purpose: "query" | "inbox", body: unknown, subject?: string, extra?: Record<string, string>): Promise<unknown> {
     if (!team.serverUrl) throw new TeamServerError(503, `team ${team.slug} has no server yet`);
+    const started = Date.now();
+    // Which call failed, how and after how long; never what was asked or answered. A failed query
+    // left no trace, so the app's graph without links couldn't be told apart from a slow team
+    // server (2026-11-24).
+    const failed = (why: string) => {
+      const op = purpose === "query" && body && typeof body === "object" && "op" in body ? ` ${String((body as { op: unknown }).op)}` : "";
+      console.warn(`[teams] ${team.slug} ${path}${op}: ${why} after ${Date.now() - started} ms`);
+    };
     let res: Response;
     try {
       res = await this.fetchImpl(`${team.serverUrl}${path}`, {
@@ -142,10 +150,19 @@ export class TeamLink {
         signal: AbortSignal.timeout(purpose === "inbox" ? 20_000 : 8_000),
       });
     } catch (err) {
+      failed((err as Error).message);
       throw new TeamServerError(503, `team server unreachable: ${(err as Error).message}`);
     }
-    if (!res.ok) throw new TeamServerError(res.status >= 500 ? 503 : res.status, `team server answered ${res.status}`);
-    return readJson(res);
+    if (!res.ok) {
+      failed(`answered ${res.status}`);
+      throw new TeamServerError(res.status >= 500 ? 503 : res.status, `team server answered ${res.status}`);
+    }
+    try {
+      return await readJson(res);
+    } catch (err) {
+      failed((err as Error).message);
+      throw err;
+    }
   }
 
   /** The team repo endpoints, passed through with their status (400s carry a message for the user). */
