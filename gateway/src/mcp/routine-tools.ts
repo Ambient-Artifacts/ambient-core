@@ -584,6 +584,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
   if (hasBots && folders?.github) registerGitHubTools(server, principal, actor, routines, folders.github, guard, folders.githubApp);
   if (hasBots && folders?.slack) registerSlackTools(server, principal, actor, routines, folders.slack, guard);
   if (hasBots && folders?.teams) registerTeamsTools(server, principal, actor, routines, folders.teams, guard);
+  if (hasBots && folders?.askers) registerAskerTools(server, actor, routines, folders, guard);
   if (hasBots && folders) registerLearningTools(server, principal, actor, routines, folders, source, guard);
 
   if (!hasBots || !bots) return;
@@ -1146,7 +1147,7 @@ function registerSlackTools(
     {
       title: "Put a bot in Slack",
       description:
-        "Give a bot its own Slack app, so in Slack it's its own @handle: mentioned in a channel or messaged directly, it answers in the thread, and it posts news of its own (an alert, a result) in one channel its owner chooses (news_channel; by default the first channel it was mentioned in). Ambient creates the app; give the user the returned link as a Markdown link, [Add <bot> to Slack](<url>): they tap Allow once (it works for an hour). Then they invite it to a channel (/invite @<bot>). It takes instructions only from whoever tapped Allow. Needs Slack connected first (connect_slack). remove: true deletes its Slack app. Only when the user asked.",
+        "Give a bot its own Slack app, so in Slack it's its own @handle: mentioned in a channel or messaged directly, it answers in the thread, and it posts news of its own (an alert, a result) in one channel its owner chooses (news_channel; by default the first channel it was mentioned in). Ambient creates the app; give the user the returned link as a Markdown link, [Add <bot> to Slack](<url>): they tap Allow once (it works for an hour). Then they invite it to a channel (/invite @<bot>). Who can give it instructions: who_can_ask_bot (everyone in the company by default; whoever tapped Allow always can). Needs Slack connected first (connect_slack). remove: true deletes its Slack app. Only when the user asked.",
       inputSchema: {
         bot: z.string().max(64).describe("The bot (its id)."),
         remove: z.boolean().optional(),
@@ -1177,6 +1178,42 @@ function registerSlackTools(
           return result(`${f.name} is in Slack already. Mention @${f.name} in a channel it's invited to, or message it directly.${where}`, { ...out, news: st.news });
         }
         return result(`[Add ${f.name} to Slack](${out.url}): tap Allow. Then invite it to a channel with /invite @${f.name}.`, out);
+      }),
+  );
+}
+
+// ---- Who can ask a bot in Slack and Teams (docs/bots.md, "Who can ask it") ----
+
+function registerAskerTools(
+  server: McpServer,
+  actor: Actor,
+  routines: RoutineService,
+  folders: import("../bots/files.ts").Folders,
+  guard: <T>(fn: () => Promise<T>) => Promise<T | ReturnType<typeof error>>,
+) {
+  server.registerTool(
+    "who_can_ask_bot",
+    {
+      title: "Who can ask a bot in Slack and Teams",
+      description:
+        'Who a bot takes instructions from in Slack and Teams. "everyone" (the default): everyone in the company (Slack guests, people from other workspaces in shared channels and Teams guests are left out). "selected": only the people picked. Whoever added it to Slack or Teams can always ask it. Its runs hold its owner\'s secrets, so the people who can ask it can use them: change it only when the user asked. Without mode: the current choice and who can be picked (`candidates`). people replaces the whole list; pick from candidates (via + id).',
+      inputSchema: {
+        bot: z.string().max(64).describe("The bot (its id)."),
+        mode: z.enum(["everyone", "selected"]).optional(),
+        people: z.array(z.object({ via: z.enum(["slack", "teams"]), id: z.string().max(64), name: z.string().max(100) })).max(200).optional().describe("The people picked (for selected), from candidates."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ bot, mode, people }) =>
+      guard(async () => {
+        const { askersPage } = await import("../bots/askers.ts");
+        const f = await routines.folderOf(actor, bot, mode !== undefined || people !== undefined);
+        const ak = folders.askers!;
+        if (mode !== undefined || people !== undefined) await ak.set(f.owner, f.routineId, mode ?? (await ak.get(f.owner, f.routineId)).mode, people);
+        const page = await askersPage(ak, folders.slack, folders.teams, f.owner, f.routineId);
+        const names = page.people.map((p) => p.name).join(", ");
+        const text = page.mode === "everyone" ? `Everyone in the company can ask ${f.name} in Slack and Teams.` : page.people.length ? `Only ${names} (and whoever added it) can ask ${f.name}.` : `Only whoever added ${f.name} to Slack or Teams can ask it.`;
+        return result(text, { ...page });
       }),
   );
 }

@@ -42,6 +42,9 @@ export interface Member {
   aadObjectId?: string;
   email?: string;
   userPrincipalName?: string;
+  /** "user", "guest" (another company's account in this tenant) or "anonymous". */
+  userRole?: string;
+  tenantId?: string;
 }
 
 type KeySet = { at: number; keys: (JWK & { kid?: string; endorsements?: string[] })[] };

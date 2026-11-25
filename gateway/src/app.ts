@@ -36,6 +36,7 @@ import { ambientHostRouter, botRunRouter, githubHookRouter, linqHookRouter, slac
 import { GitHubEvents } from "./bots/github.ts";
 import { GitHubApps } from "./bots/github-apps.ts";
 import { SlackApps } from "./bots/slack-apps.ts";
+import { BotAskers } from "./bots/askers.ts";
 import { TeamsApps } from "./bots/teams-apps.ts";
 import { TeamAmb } from "./bots/team-amb.ts";
 import { SessionBackups } from "./bots/session-backups.ts";
@@ -499,7 +500,10 @@ export function createApp(deps: AppDeps) {
     }
   };
   // Bots' own Slack apps (docs/bots.md, "Slack"): one app per bot, made by Ambient, one tap to install.
-  const slack = new SlackApps({ control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, amb: ambDoors, answer: answerBotQuestion, lanes: botLanes, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
+  // Who can ask each bot in Slack and Teams (docs/bots.md, "Who can ask it").
+  const askers = new BotAskers({ control, keys: routineKeys });
+  folders.askers = askers;
+  const slack = new SlackApps({ askers, control, keys: routineKeys, master: config.masterKey, origin: config.origin, attachments, amb: ambDoors, answer: answerBotQuestion, lanes: botLanes, startNow: (hostId, routineId) => computers.start(hostId, routineId), fetchImpl: deps.slack?.fetchImpl ?? deps.fetchImpl, apiBase: deps.slack?.apiBase });
   folders.slack = slack;
   reach.add(slack.ambChannel());
   routines.slackToken = (owner, id) => slack.botToken(owner, id);
@@ -516,6 +520,7 @@ export function createApp(deps: AppDeps) {
         startNow: (hostId, routineId) => computers.start(hostId, routineId),
         emailOf: async (uid) => (await directory.user(uid))?.email ?? null,
         attachments,
+        askers,
         amb: ambDoors,
         lanes: botLanes,
         answer: answerBotQuestion,

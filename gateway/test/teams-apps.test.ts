@@ -113,7 +113,8 @@ const microsoft: typeof fetch = async (input, init) => {
     // A member of the conversation, with the email Teams knows.
     if (method === "GET" && url.pathname.includes("/members/")) {
       const who = decodeURIComponent(url.pathname.split("/").pop()!);
-      return json(200, who === "29:lena" ? { id: who, name: "Lena Vogel", email: "apple-lena-teams@example.com", aadObjectId: LENA } : { id: who, name: "Max", email: "max@other.example" });
+      if (who === "29:guest") return json(200, { id: who, name: "Gus", userRole: "guest", userPrincipalName: "gus_other.example#EXT#@acme.onmicrosoft.com" });
+      return json(200, who === "29:lena" ? { id: who, name: "Lena Vogel", email: "apple-lena-teams@example.com", aadObjectId: LENA } : { id: who, name: "Max", email: "max@other.example", userRole: "user" });
     }
     const b = JSON.parse(String(body)) as Record<string, unknown>;
     if (method === "PUT") {
@@ -263,13 +264,17 @@ describe("a bot's own Teams app", () => {
     expect((await call("GET", `/v1/app/routines/${bot}/teams`)).json).toMatchObject({ tenant: true, app: { ready: true, installed: true, installer: "Lena Vogel" } });
   });
 
-  it("tells anyone else it only listens to its owner, once per chat", async () => {
+  it("with only picked people, tells anyone else who it listens to, once per chat", async () => {
+    expect((await call("PUT", `/v1/app/routines/${bot}/askers`, { mode: "selected", people: [] })).json).toMatchObject({ mode: "selected", people: [], owners: [{ via: "teams", name: "Lena Vogel" }] });
     sent = [];
     const other = { from: { id: "29:x", name: "Max", aadObjectId: STRANGER }, conversation: { id: "a:dm-max", conversationType: "personal", tenantId: TENANT } };
     await send(activity({ ...other, text: "do my taxes" }));
     await send(activity({ ...other, text: "please" }));
     expect(sent).toHaveLength(1);
-    expect(String(sent[0]!.body.text)).toBe("I only take instructions from Lena Vogel for now.");
+    expect(String(sent[0]!.body.text)).toBe("I only take instructions from Lena Vogel for now. My owner can change who can ask me in Ambient.");
+    // Max wrote: he's offered in the picker.
+    const page = (await call("GET", `/v1/app/routines/${bot}/askers`)).json as { candidates: { via: string; id: string; name: string }[] };
+    expect(page.candidates).toContainEqual({ via: "teams", id: STRANGER, name: "Max" });
   });
 
   it("takes an @mention in a channel from its owner: a run starts, the answer goes back to that thread", async () => {
@@ -287,7 +292,7 @@ describe("a bot's own Teams app", () => {
     const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[];
     const fromTeams = thread.filter((m) => m.author === "Teams");
     expect(fromTeams).toHaveLength(1);
-    expect(fromTeams[0]!.text).toContain("Lena Vogel wrote to you on Microsoft Teams (in Engineering › anomalies): what broke last night?");
+    expect(fromTeams[0]!.text).toContain("Lena Vogel (your owner) wrote to you on Microsoft Teams (in Engineering › anomalies): what broke last night?");
     const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; prompt?: string; resume: { message: string } | null };
     expect(JSON.stringify(start)).toContain("You're in Microsoft Teams as Chatty");
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "**Two things** broke." });
@@ -432,6 +437,22 @@ describe("a bot's own Teams app", () => {
     expect(await put(small)).toBe(400);
     expect(await put(defaultColorIcon())).toBe(204);
     expect(JSON.parse(published!.get("manifest.json")!.toString())).toMatchObject({ version: "1.0.2" });
+  });
+
+  it("everyone in the company can ask it by default; a guest only once picked", async () => {
+    await call("PUT", `/v1/app/routines/${bot}/askers`, { mode: "everyone" });
+    const fromTeams = async () => ((await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[]).filter((m) => m.author === "Teams").length;
+    const before = await fromTeams();
+    sent = [];
+    await send(activity({ from: { id: "29:max", name: "Max", aadObjectId: STRANGER }, conversation: { id: "a:dm-max2", conversationType: "personal", tenantId: TENANT }, text: "what broke?" }));
+    expect(await fromTeams()).toBe(before + 1);
+    const guest = { from: { id: "29:guest", name: "Gus", aadObjectId: "guest-oid" }, conversation: { id: "a:dm-gus", conversationType: "personal", tenantId: TENANT } };
+    await send(activity({ ...guest, text: "hi" }));
+    expect(await fromTeams()).toBe(before + 1);
+    expect(String(sent.at(-1)!.body.text)).toContain("I only take instructions from Lena Vogel");
+    await call("PUT", `/v1/app/routines/${bot}/askers`, { mode: "everyone", people: [{ via: "teams", id: "guest-oid", name: "Gus" }] });
+    await send(activity({ ...guest, text: "now?" }));
+    expect(await fromTeams()).toBe(before + 2);
   });
 
   it("is offered to Ambient's chat and bots as tools", async () => {
