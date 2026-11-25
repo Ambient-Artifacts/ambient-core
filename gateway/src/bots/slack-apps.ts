@@ -28,6 +28,8 @@ import type { Attachments, FileRef } from "./attachments.ts";
 import { download, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile, type ThreadMessage } from "../channels/channel-files.ts";
 import { AMB, forAmb, type AmbDoorDeps, type TeamTurnPayload } from "../channels/amb-doors.ts";
 import type { AmbChannel, OutFile } from "../channels/reach.ts";
+import { onlyLine, type BotAskers } from "./askers.ts";
+import { alreadyPosted, CHAT_STYLE, remember } from "./chat-style.ts";
 
 const WORKSPACE = "slack:workspace";
 const APP = "slack:app";
@@ -175,6 +177,9 @@ export class SlackApps {
   /** Event ids seen lately: Slack sends an event again when we're slow. */
   private seen = new Map<string, number>();
   private names = new Map<string, string>();
+  private people = new Map<string, { name: string; guest: boolean; bot: boolean; team: string | null; at: number }>();
+  /** What each run already posted, so its result isn't posted a second time (runId → texts). */
+  private posted = new Map<string, { texts: string[]; at: number }>();
   private warned = new Set<string>();
   private pending = new Set<Promise<unknown>>();
   private locks = new Map<string, Promise<void>>();
@@ -195,6 +200,8 @@ export class SlackApps {
       /** Slack's Web API (tests: a stand-in). */
       apiBase?: string;
       now?: () => number;
+      /** Who can ask each bot (bots/askers.ts); without it, only whoever installed it. */
+      askers?: BotAskers;
       /** Amb in Slack: its chat, and whose account a direct message is (channels/amb-doors.ts). */
       amb?: AmbDoorDeps;
       /** Answers a bot's open question as `uid` (a click on its button, or a reply); "gone" when it isn't open any more. */
@@ -605,12 +612,18 @@ export class SlackApps {
     }
     if (!app.botToken) return;
     const thread = e.thread_ts ?? e.ts;
-    // It takes instructions from whoever installed it (its runs hold its owner's secrets).
-    if (!app.installer || e.user !== app.installer) {
+    // Who can ask it: whoever installed it, and everyone in the workspace or only the people its
+    // owner picked (bots/askers.ts; its runs hold its owner's secrets).
+    const person = await this.personOf(app.botToken, e.user);
+    const isOwner = !!app.installer && e.user === app.installer;
+    const askers = this.d.askers ? await this.d.askers.get(owner, routineId) : null;
+    if (this.d.askers) void this.d.askers.saw(owner, routineId, { via: "slack", id: e.user, name: person.name }).catch(() => undefined);
+    const company = !person.guest && !person.bot && (!person.team || !app.teamId || person.team === app.teamId);
+    if (!app.installer || !(askers ? this.d.askers!.allows(askers, "slack", e.user, { installer: isOwner, company }) : isOwner)) {
       const warnKey = `${routineId}:${e.channel}:${thread}`;
       if (!this.warned.has(warnKey)) {
         this.warned.add(warnKey);
-        await this.post(app.botToken, e.channel, thread, app.installer ? `I only take instructions from <@${app.installer}> for now.` : "I don't know who installed me, so I'm not taking instructions. Add me to Slack again from Ambient.", true);
+        await this.post(app.botToken, e.channel, thread, !app.installer ? "I don't know who installed me, so I'm not taking instructions. Add me to Slack again from Ambient." : askers ? onlyLine(askers, "slack", `<@${app.installer}>`) : `I only take instructions from <@${app.installer}> for now.`, true);
       }
       return;
     }
@@ -624,7 +637,7 @@ export class SlackApps {
     }
     const offered = (e.files ?? []).filter((f) => f.mode !== "tombstone" && f.mode !== "external");
     if (!text && !offered.length) return;
-    const who = await this.nameOf(app.botToken, e.user);
+    const who = isOwner ? `${person.name} (your owner)` : person.name;
     const channelName = dm ? undefined : app.channels?.find((c) => c.id === e.channel)?.name;
     const where = dm ? "in a direct message" : underOwnPost ? `in the thread under your post${channelName ? ` in #${channelName}` : ""}` : channelName ? `in #${channelName}` : "in a channel";
     // Its files, kept in its thread like a file sent from the app: its run gets them on disk.
@@ -647,7 +660,7 @@ export class SlackApps {
     const known = lane ? await this.d.lanes?.get(owner, routineId, lane).catch(() => null) : null;
     const earlier = e.thread_ts && e.thread_ts !== e.ts ? await this.threadMessages(app, e.channel, e.thread_ts, e.ts) : [];
     const before = known?.session ? threadSoFar(earlier.filter((m) => m.at > (known.seen ?? 0) && m.who !== "you"), "Said in the thread since you last answered:") : threadSoFar(earlier);
-    const body = `${who} wrote to you on Slack (${where}): ${said}${leftLine(left)}${before}\n\n(Your answer goes back to that Slack thread on its own.)`;
+    const body = `${who} wrote to you on Slack (${where}): ${said}${leftLine(left)}${before}\n\n(Your answer goes back to that Slack thread on its own. ${CHAT_STYLE})`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();
       // Old ones nobody answered go; the newest stay.
@@ -912,6 +925,47 @@ export class SlackApps {
     if (!done.ok) throw new SlackError("slack_failed", `Slack didn't share the file (${done.error ?? "no reason"}).`, 502);
   }
 
+  /** A Slack user: their name, and whether they're a guest, a bot, or from another workspace (Slack Connect). */
+  private async personOf(token: string, user: string): Promise<{ name: string; guest: boolean; bot: boolean; team: string | null }> {
+    const cached = this.people.get(user);
+    if (cached && this.now() - cached.at < 3600_000) return cached;
+    const out = await this.call<{ user?: { real_name?: string; team_id?: string; is_bot?: boolean; is_restricted?: boolean; is_ultra_restricted?: boolean; is_stranger?: boolean; profile?: { display_name?: string; real_name?: string } } }>("users.info", token, { user }, { form: true }).catch(() => null);
+    const u = out?.ok ? out.user : undefined;
+    // Not known (Slack said no): treated as not the company's own, so "everyone" doesn't take them.
+    const p = { name: u?.profile?.display_name || u?.real_name || u?.profile?.real_name || "Someone", guest: !u || !!u.is_restricted || !!u.is_ultra_restricted || !!u.is_stranger, bot: !!u?.is_bot, team: u?.team_id ?? null, at: this.now() };
+    if (u) {
+      this.people.set(user, p);
+      this.names.set(user, p.name);
+    }
+    return p;
+  }
+
+  /** The workspace's people, for the picker of who can ask a bot: no bots, no deactivated accounts. */
+  async members(owner: Owner, routineId: string): Promise<{ id: string; name: string; guest: boolean }[]> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.botToken) return [];
+    const out: { id: string; name: string; guest: boolean }[] = [];
+    let cursor = "";
+    for (let page = 0; page < 10; page++) {
+      const r = await this.call<{ members?: { id: string; deleted?: boolean; is_bot?: boolean; real_name?: string; is_restricted?: boolean; is_ultra_restricted?: boolean; profile?: { display_name?: string; real_name?: string } }[]; response_metadata?: { next_cursor?: string } }>("users.list", app.botToken, { limit: "200", ...(cursor ? { cursor } : {}) }, { form: true });
+      if (!r.ok) break;
+      for (const m of r.members ?? []) {
+        if (m.deleted || m.is_bot || m.id === "USLACKBOT") continue;
+        out.push({ id: m.id, name: m.profile?.display_name || m.real_name || m.profile?.real_name || m.id, guest: !!m.is_restricted || !!m.is_ultra_restricted });
+      }
+      cursor = r.response_metadata?.next_cursor ?? "";
+      if (!cursor) break;
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Who installed it (they can always ask it): their Slack id and name. */
+  async installerOf(owner: Owner, routineId: string): Promise<{ id: string; name: string } | null> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.botToken || !app.installer) return null;
+    return { id: app.installer, name: await this.nameOf(app.botToken, app.installer) };
+  }
+
   private async nameOf(token: string, user: string): Promise<string> {
     const cached = this.names.get(user);
     if (cached) return cached;
@@ -995,9 +1049,15 @@ export class SlackApps {
           }
           const now = this.now();
           await this.replies(owner, routineId, (cur) => ({ ...cur, asks: [...(cur.asks ?? []).filter((a) => now - a.at < ASK_FOR_MS), ...asks].slice(-TARGETS_MAX) }));
-        } else if (text.trim()) for (const t of mine) await this.post(app.botToken, t.channel, t.ts, text);
+        } else if (text.trim() && !(final && alreadyPosted(this.posted, runId, text))) {
+          for (const t of mine) await this.post(app.botToken, t.channel, t.ts, text);
+          if (!final) remember(this.posted, runId, text, this.now());
+        }
         for (const f of files) for (const t of mine) await this.upload(app, t.channel, t.ts, f);
-        if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}), ...(cur.asks ? { asks: cur.asks } : {}) }));
+        if (final) {
+          this.posted.delete(runId);
+          await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}), ...(cur.asks ? { asks: cur.asks } : {}) }));
+        }
       })(),
     );
   }

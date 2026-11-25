@@ -92,7 +92,11 @@ beforeAll(async () => {
           if (postError) return json({ ok: false, error: postError });
           return json({ ok: true, ts: `1800000000.000${++posted}` });
         case "users.info":
-          return json({ ok: true, user: { real_name: args.user === "U_LENA" ? "Lena Vogel" : "Max", profile: { display_name: args.user === "U_LENA" ? "Lena" : "Max", email: args.user === "U_LENA" ? "apple-lena-slack@example.com" : "max@other.example" } } });
+          if (args.user === "U_GUEST") return json({ ok: true, user: { real_name: "Gus", is_restricted: true, team_id: "T1", profile: { display_name: "Gus" } } });
+          if (args.user === "U_EXT") return json({ ok: true, user: { real_name: "Eve", team_id: "T2", profile: { display_name: "Eve" } } });
+          return json({ ok: true, user: { team_id: "T1", real_name: args.user === "U_LENA" ? "Lena Vogel" : "Max", profile: { display_name: args.user === "U_LENA" ? "Lena" : "Max", email: args.user === "U_LENA" ? "apple-lena-slack@example.com" : "max@other.example" } } });
+        case "users.list":
+          return json({ ok: true, members: [{ id: "U_LENA", real_name: "Lena Vogel", profile: { display_name: "Lena" } }, { id: "U_MAX", real_name: "Max", profile: { display_name: "Max" } }, { id: "U_GUEST", real_name: "Gus", is_restricted: true }, { id: "B_X", is_bot: true }, { id: "U_GONE", deleted: true }] });
         case "files.getUploadURLExternal":
           return json({ ok: true, upload_url: `${slackBase}/upload/F1`, file_id: "F1" });
         case "files.completeUploadExternal":
@@ -212,12 +216,12 @@ describe("a bot's own Slack app", () => {
     const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[];
     const fromSlack = thread.filter((m) => m.author === "Slack");
     expect(fromSlack).toHaveLength(1);
-    expect(fromSlack[0]!.text).toContain("Lena wrote to you on Slack (in a channel): what broke last night? see the log (https://x.dev)");
+    expect(fromSlack[0]!.text).toContain("Lena (your owner) wrote to you on Slack (in a channel): what broke last night? see the log (https://x.dev)");
     expect(calls.some((c) => c.method === "reactions.add" && c.args.channel === "C9")).toBe(true);
     const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; env: Record<string, string>; resume: { message: string } | null };
     expect(start.env.SLACK_BOT_TOKEN).toBe("xoxb-chatty");
     // Its first run: the wake-up, with the Slack message among what's new in its thread.
-    expect(start.resume?.message).toContain("Slack: Lena wrote to you on Slack (in a channel): what broke last night?");
+    expect(start.resume?.message).toContain("Slack: Lena (your owner) wrote to you on Slack (in a channel): what broke last night?");
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "**Two things** broke: [the digest](https://x.dev/1) and the scan." });
     await s.folders.slack!.idle();
     const answer = posts().at(-1)!;
@@ -252,6 +256,8 @@ describe("a bot's own Slack app", () => {
     const e = { type: "event_callback", event_id: "Ev2", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> hi", channel: "C9", ts: "1700000000.0002" } };
     expect((await sendEvent(e, { secret: "wrong" })).status).toBe(401);
     expect((await sendEvent({ ...e, event_id: "Ev3" }, { ts: Math.floor(Date.now() / 1000) - 3600 })).status).toBe(401);
+    // Only picked people (none): someone else is told who it listens to.
+    await call("PUT", `/v1/app/routines/${bot}/askers`, { mode: "selected", people: [] });
     const before = posts().length;
     const other = (id: string) => ({ type: "event_callback", event_id: id, event: { type: "app_mention", user: "U_MAX", text: "<@U_BOT> delete the repo", channel: "C9", ts: "1700000000.0005", thread_ts: "1700000000.0004" } });
     await sendEvent(other("Ev4"));
@@ -261,6 +267,7 @@ describe("a bot's own Slack app", () => {
     expect(posts().at(-1)!.args.text).toContain("only take instructions from <@U_LENA>");
     const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[];
     expect(thread.some((m) => m.text.includes("delete the repo"))).toBe(false);
+    await call("PUT", `/v1/app/routines/${bot}/askers`, { mode: "everyone" });
     // Its own messages and edits: nothing.
     await sendEvent({ type: "event_callback", event_id: "Ev6", event: { type: "message", channel_type: "im", user: "U_BOT", bot_id: "B1", text: "echo", channel: "D1", ts: "1700000000.0006" } });
     await s.folders.slack!.idle();
@@ -304,7 +311,7 @@ describe("a bot's own Slack app", () => {
     await sendEvent({ type: "event_callback", event_id: "EvN3", event: { type: "message", channel_type: "channel", user: "U_LENA", text: "unrelated thread", channel: "C9", ts: "1800000003.0001", thread_ts: "1700000000.9999" } });
     await s.folders.slack!.idle();
     const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[];
-    expect(thread.some((m) => m.text.includes("Lena wrote to you on Slack (in the thread under your post): since when?"))).toBe(true);
+    expect(thread.some((m) => m.text.includes("Lena (your owner) wrote to you on Slack (in the thread under your post): since when?"))).toBe(true);
     expect(thread.some((m) => m.text.includes("lunch anyone?") || m.text.includes("unrelated thread"))).toBe(false);
     // Its answer to that goes back under its post.
     const answering = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
@@ -403,7 +410,7 @@ describe("a bot's own Slack app", () => {
     await s.folders.slack!.idle();
     thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as typeof thread;
     const last = thread.at(-1)!;
-    expect(last.text).toContain("Lena wrote to you on Slack (in a direct message): sent a file");
+    expect(last.text).toContain("Lena (your owner) wrote to you on Slack (in a direct message): sent a file");
     expect(last.files).toMatchObject([{ name: "screenshot.png" }]);
     const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string; resume: { files?: { id: string; name: string }[] } | null };
     expect(start.resume?.files).toMatchObject([{ name: "screenshot.png" }]);
@@ -424,7 +431,7 @@ describe("a bot's own Slack app", () => {
     await s.folders.slack!.idle();
     const thread = (await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { text: string }[];
     const last = thread.at(-1)!.text;
-    expect(last).toContain("Lena wrote to you on Slack (in #anomalies): can you check again?");
+    expect(last).toContain("Lena (your owner) wrote to you on Slack (in #anomalies): can you check again?");
     expect(last).toContain("The thread so far (oldest first):\n- Max: the export is broken again\n- Lena: since this morning, see the screenshot [error.png]\n- you: I looked at it yesterday");
     expect(last).not.toContain("- Lena: @you can you check again?");
     const drain = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
@@ -506,6 +513,66 @@ describe("a bot's own Slack app", () => {
     expect((await hostCall(start.runToken, "GET", `/v1/bot/questions/${q2}`)).json).toEqual({ answer: "#releases", author: "Lena Vogel" });
     await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "Shipped." });
     await s.folders.slack!.idle();
+  });
+
+  it("everyone in the workspace can ask it by default; guests and other workspaces only once picked", async () => {
+    const said = async (t: string) => ((await call("GET", `/v1/app/routines/${bot}/thread`)).json.messages as { author: string | null; text: string }[]).filter((m) => m.author === "Slack" && m.text.includes(t));
+    await sendEvent({ type: "event_callback", event_id: "EvW1", event: { type: "app_mention", user: "U_MAX", text: "<@U_BOT> what broke?", channel: "C9", ts: "1800000030.0001" } });
+    await s.folders.slack!.idle();
+    const max = await said("what broke?");
+    expect(max).toHaveLength(1);
+    expect(max[0]!.text).toContain("Max wrote to you on Slack");
+    // A guest and someone from another workspace (Slack Connect): told, and nothing reaches it.
+    await sendEvent({ type: "event_callback", event_id: "EvW2", event: { type: "app_mention", user: "U_GUEST", text: "<@U_BOT> guest hi", channel: "C9", ts: "1800000031.0001" } });
+    await sendEvent({ type: "event_callback", event_id: "EvW3", event: { type: "app_mention", user: "U_EXT", text: "<@U_BOT> ext hi", channel: "C9", ts: "1800000032.0001" } });
+    await s.folders.slack!.idle();
+    expect(await said("guest hi")).toHaveLength(0);
+    expect(await said("ext hi")).toHaveLength(0);
+    expect(String(posts().at(-1)!.args.text)).toContain("I only take instructions from <@U_LENA>");
+    // The picker: Slack's people (no bots, no deactivated, not its owner), who's picked, who added it.
+    const page = (await call("GET", `/v1/app/routines/${bot}/askers`)).json as { mode: string; owners: unknown[]; candidates: { via: string; id: string; name: string; guest?: boolean }[] };
+    expect(page.mode).toBe("everyone");
+    expect(page.owners).toEqual([{ via: "slack", id: "U_LENA", name: "Lena" }]);
+    expect(page.candidates.filter((c) => c.via === "slack").map((c) => c.id)).toEqual(["U_GUEST", "U_MAX"]);
+    expect(page.candidates.find((c) => c.id === "U_GUEST")!.guest).toBe(true);
+    // Picked: the guest can ask; with only picked people, Max can't any more.
+    await call("PUT", `/v1/app/routines/${bot}/askers`, { mode: "selected", people: [{ via: "slack", id: "U_GUEST", name: "Gus" }] });
+    await sendEvent({ type: "event_callback", event_id: "EvW4", event: { type: "app_mention", user: "U_GUEST", text: "<@U_BOT> guest now?", channel: "C9", ts: "1800000033.0001" } });
+    await sendEvent({ type: "event_callback", event_id: "EvW5", event: { type: "app_mention", user: "U_MAX", text: "<@U_BOT> and me?", channel: "C9", ts: "1800000034.0001" } });
+    await s.folders.slack!.idle();
+    expect(await said("guest now?")).toHaveLength(1);
+    expect(await said("and me?")).toHaveLength(0);
+    expect(String(posts().at(-1)!.args.text)).toContain("<@U_LENA> and <@U_GUEST>");
+    // Over MCP too.
+    const pat = String((await call("POST", "/v1/app/pats", { label: "Claude askers" })).json.token);
+    const mcp = await mcpClient(`${s.origin}/mcp`, pat);
+    expect(text(await mcp.callTool({ name: "who_can_ask_bot", arguments: { bot, mode: "everyone" } }))).toContain("Everyone in the company can ask Chatty");
+    await mcp.close();
+    // Drain what's waiting, for the tests after.
+    const drain = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string } };
+    await hostCall(host, "POST", `/v1/host/runs/${drain.run.id}`, { status: "succeeded", summary: "Looked." });
+    await s.folders.slack!.idle();
+  });
+
+  it("posts an answer once: a result that repeats what the run already said isn't posted again", async () => {
+    await sendEvent({ type: "event_callback", event_id: "EvD1", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> status?", channel: "C9", ts: "1800000040.0001" } });
+    await s.folders.slack!.idle();
+    const start = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string };
+    const before = posts().length;
+    await hostCall(start.runToken, "POST", "/v1/bot/reply", { text: "All green since Friday." });
+    await s.folders.slack!.idle();
+    expect(posts()).toHaveLength(before + 1);
+    await hostCall(host, "POST", `/v1/host/runs/${start.run.id}`, { status: "succeeded", summary: "All green since Friday." });
+    await s.folders.slack!.idle();
+    expect(posts()).toHaveLength(before + 1);
+    // Something new at the end still goes.
+    await sendEvent({ type: "event_callback", event_id: "EvD2", event: { type: "app_mention", user: "U_LENA", text: "<@U_BOT> and now?", channel: "C9", ts: "1800000041.0001" } });
+    await s.folders.slack!.idle();
+    const next = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as { run: { id: string }; runToken: string };
+    await hostCall(next.runToken, "POST", "/v1/bot/reply", { text: "Checking." });
+    await hostCall(host, "POST", `/v1/host/runs/${next.run.id}`, { status: "succeeded", summary: "Export fixed." });
+    await s.folders.slack!.idle();
+    expect(posts().slice(-2).map((p) => p.args.text)).toEqual(["Checking.", "Export fixed."]);
   });
 
   it("puts Ambient itself in the workspace: a direct message is the writer's own Amb chat, answered there", async () => {

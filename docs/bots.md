@@ -1067,10 +1067,11 @@ the app; the person taps Allow once (`gateway/src/bots/slack-apps.ts`).
   signing secret (`v0` HMAC, at most 5 minutes old). Slack's first check of the URL
   (`url_verification`, while the app is being made) only needs the hook to be Ambient's. An event
   Slack sends again is taken once.
-- **Who it listens to.** Whoever installed it (the Slack user who tapped Allow): its runs hold its
-  owner's secrets. An install where Slack doesn't say who allowed it is refused, and an app without
-  a known installer takes instructions from no one. Anyone else who mentions it is told once per thread that it takes instructions
-  from that person. Its own messages, other bots', edits and joins are left out.
+- **Who it listens to.** Whoever installed it (the Slack user who tapped Allow), and by default
+  everyone in the workspace; see "Who can ask it" below. An install where Slack doesn't say who
+  allowed it is refused, and an app without a known installer takes instructions from no one.
+  Anyone it doesn't take is told once per thread who can ask it. Its own messages, other bots',
+  edits and joins are left out. The writer's line says "(your owner)" when it's the installer.
 - **A message.** An @mention or a DM goes into the bot's thread from "Slack" ("Lena wrote to you
   on Slack (in a channel): …", Slack's links as text), gets a 👀 on Slack, and starts a run
   like its owner's message. A paused bot says so in the Slack thread.
@@ -1127,7 +1128,8 @@ registration and a free Azure Bot (F0) in the company's Azure subscription
   opens the app in Teams (one tap: Add); `chatUrl` opens a chat with it.
 - **Who it listens to.** The person who added it in Ambient, found in the company by their
   sign-in email (`GET /users/<email>`); when they aren't there, the admin who connected Teams.
-  Anyone else is told once per chat that it takes instructions from that person.
+  They always can; by default everyone in the company can too (see "Who can ask it"). Anyone it
+  doesn't take is told once per chat who can ask it.
 - **What Teams sends.** The hook in the endpoint is signed by Ambient and names the bot, so an
   activity finds its app without a table; it is then checked as the Bot Framework's for that bot's
   app id (`msteams/botframework.ts`), and refused from another tenant. An activity Teams sends
@@ -1158,6 +1160,28 @@ registration and a free Azure Bot (F0) in the company's Azure subscription
   new in Convex. The bot's secret never leaves the gateway.
 - **Not yet:** a new secret before the two years are up, and installing it for the owner without the
   Add tap.
+
+## Who can ask it
+
+A bot's owner chooses who can give it instructions in Slack and Teams (`bots/askers.ts`, sealed
+record `bot:askers` per bot): **everyone** (the default) or **only people they pick**. Whoever
+added it to Slack or Teams always can. Its runs hold its owner's secrets and keys, so whoever can
+ask it can use them: that's why it's the owner's choice, in the app or over MCP.
+
+- **Everyone** means the company's own people: in Slack, not a guest (`is_restricted`,
+  `is_ultra_restricted`, `is_stranger`) and of the app's own workspace (Slack Connect people from
+  another workspace are left out); in Teams, the app's tenant and `userRole` "user" (guests,
+  `#EXT#` accounts, are left out). Someone Slack or Teams can't tell us about is left out. Picking
+  a guest takes them.
+- **The picker** (`GET/PUT /v1/app/routines/:id/askers`, MCP `who_can_ask_bot`):
+  `{ mode, people, owners, candidates }`. Candidates are Slack's members (`users.list`, no bots,
+  no deactivated accounts) and, for Teams (no member list for a bot), the people who wrote to it.
+  Picked people stay when switching back to everyone, for next time.
+- **How it talks in chat.** Every Slack and Teams message comes with a style line: short, one
+  message, no explanations of its setup unless asked (`bots/chat-style.ts`).
+- **Said once.** A run that answered mid-run (`/v1/bot/reply`) usually ends with the same words as
+  its result; the result isn't posted to Slack or Teams again when it repeats what that run
+  already posted there (before 2026-11-25 every such answer showed up twice).
 
 ## Files in Slack and Teams
 

@@ -31,6 +31,8 @@ import type { Attachments, FileRef } from "./attachments.ts";
 import { download, FILES_BYTES_MAX, leftLine, takeFiles, threadSoFar, THREAD_MAX, type OfferedFile, type ThreadMessage } from "../channels/channel-files.ts";
 import { AMB, forAmb, type AmbDoorDeps, type TeamTurnPayload } from "../channels/amb-doors.ts";
 import type { AmbChannel, OutFile, Question } from "../channels/reach.ts";
+import { onlyLine, type BotAskers } from "./askers.ts";
+import { alreadyPosted, CHAT_STYLE, remember } from "./chat-style.ts";
 
 const TENANT = "teams:tenant";
 const APP = "teams:app";
@@ -200,6 +202,10 @@ const ownerKey = (owner: Owner) => JSON.stringify(ownerArgs(owner));
 export class TeamsApps {
   private seen = new Map<string, number>();
   private warned = new Set<string>();
+  /** People of the company (not guests, same tenant), checked once an hour (aad object id → yes/no). */
+  private company = new Map<string, { yes: boolean; at: number }>();
+  /** What each run already posted, so its result isn't posted a second time (runId → texts). */
+  private posted = new Map<string, { texts: string[]; at: number }>();
   private pending = new Set<Promise<unknown>>();
   private locks = new Map<string, Promise<void>>();
   private clients = new Map<string, BotClient>();
@@ -235,6 +241,8 @@ export class TeamsApps {
       now?: () => number;
       /** Amb in Teams: its chat, and whose account a direct message is (channels/amb-doors.ts). */
       amb?: AmbDoorDeps;
+      /** Who can ask each bot (bots/askers.ts); without it, only whoever added it. */
+      askers?: BotAskers;
     },
   ) {}
 
@@ -755,12 +763,19 @@ export class TeamsApps {
     if (kind !== "personal" && !mentioned && !underOwnPost) return;
     if (kind === "channel" && mentioned) app = await this.remember(owner, routineId, app, conv, a).catch(() => app);
     const target = kind === "channel" ? `${conv};messageid=${root ?? a.id}` : a.conversation.id;
-    // It takes instructions from the person who added it (its runs hold its owner's secrets).
-    if (!app.installer || a.from.aadObjectId !== app.installer) {
+    // Who can ask it: whoever added it, and everyone in the company or only the people its owner
+    // picked (bots/askers.ts; its runs hold its owner's secrets).
+    const aad = a.from.aadObjectId ?? "";
+    const isOwner = !!app.installer && aad === app.installer;
+    const askers = this.d.askers ? await this.d.askers.get(owner, routineId) : null;
+    if (aad && this.d.askers) void this.d.askers.saw(owner, routineId, { via: "teams", id: aad, name: a.from.name ?? "Someone" }).catch(() => undefined);
+    const company = !!aad && !isOwner && askers?.mode === "everyone" ? await this.isCompany(client, a, app.tenantId) : false;
+    if (!app.installer || !aad || !(askers ? this.d.askers!.allows(askers, "teams", aad, { installer: isOwner, company }) : isOwner)) {
       const warnKey = `${routineId}:${target}`;
       if (!this.warned.has(warnKey)) {
         this.warned.add(warnKey);
-        await client.send(a.serviceUrl, target, { text: app.installerName ? `I only take instructions from ${app.installerName} for now.` : "I don't know who added me, so I'm not taking instructions. Add me to Teams again from Ambient.", textFormat: "markdown" }).catch(() => undefined);
+        const text = !app.installer ? "I don't know who added me, so I'm not taking instructions. Add me to Teams again from Ambient." : askers ? onlyLine(askers, "teams", app.installerName ?? "the person who added me") : `I only take instructions from ${app.installerName ?? "the person who added me"} for now.`;
+        await client.send(a.serviceUrl, target, { text, textFormat: "markdown" }).catch(() => undefined);
       }
       return;
     }
@@ -768,7 +783,7 @@ export class TeamsApps {
     const text = teamsToPlain(a.text ?? "");
     const offered = this.offered(client, a, kind);
     if (!text && !offered.length) return;
-    const who = a.from.name ?? "Someone";
+    const who = `${a.from.name ?? "Someone"}${isOwner ? " (your owner)" : ""}`;
     const placeName = a.channelData?.channel?.name ?? app.channels?.find((c) => c.id === (a.channelData?.channel?.id ?? conv))?.name;
     const placeLabel = placeName ? `${a.channelData?.team?.name ? `${a.channelData.team.name} › ` : ""}${placeName}` : "";
     const where = kind === "personal" ? "in a direct message" : underOwnPost ? `in the thread under your post${placeLabel ? ` in ${placeLabel}` : ""}` : kind === "groupChat" ? "in a group chat" : placeLabel ? `in ${placeLabel}` : "in a channel";
@@ -781,7 +796,7 @@ export class TeamsApps {
     const known = lane ? await this.d.lanes?.get(owner, routineId, lane).catch(() => null) : null;
     const earlier = kind === "channel" && root ? await this.threadMessages(app, a, root) : [];
     const before = known?.session ? threadSoFar(earlier.filter((m) => m.at > (known.seen ?? 0) && m.who !== "you"), "Said in the thread since you last answered:") : threadSoFar(earlier);
-    const body = `${who} wrote to you on Microsoft Teams (${where}): ${said}${leftLine(left)}${before}\n\n(Your answer goes back to that Teams thread on its own.)`;
+    const body = `${who} wrote to you on Microsoft Teams (${where}): ${said}${leftLine(left)}${before}\n\n(Your answer goes back to that Teams thread on its own. ${CHAT_STYLE})`;
     await this.replies(owner, routineId, (r) => {
       const now = this.now();
       const kept = r.targets.filter((t) => now - t.at <= REPLY_FOR_MS && !(t.conv === target && !t.runId));
@@ -1103,6 +1118,27 @@ export class TeamsApps {
   }
 
   /** A run said something: it goes to the Teams threads that run took, and nowhere else. */
+  /** One of the company's own people: same tenant, and not a guest (another company's account). Unknown: no. */
+  private async isCompany(client: BotClient, a: Activity, tenantId: string): Promise<boolean> {
+    const aad = a.from.aadObjectId!;
+    const cached = this.company.get(aad);
+    if (cached && this.now() - cached.at < 3600_000) return cached.yes;
+    const tenant = a.channelData?.tenant?.id ?? a.conversation.tenantId;
+    if (tenant && tenant !== tenantId) return false;
+    const m = await client.member(a.serviceUrl, a.conversation.id.split(";messageid=")[0]!, a.from.id).catch(() => null);
+    if (!m) return false;
+    const yes = (m.userRole ?? "user") === "user" && !(m.userPrincipalName ?? "").includes("#EXT#") && (!m.tenantId || m.tenantId === tenantId);
+    this.company.set(aad, { yes, at: this.now() });
+    return yes;
+  }
+
+  /** Who added it to Teams (they can always ask it): their Entra object id and name. */
+  async installerOf(owner: Owner, routineId: string): Promise<{ id: string; name: string } | null> {
+    const app = await this.get<AppRecord>(owner, APP, routineId);
+    if (!app?.secret || !app.installer) return null;
+    return { id: app.installer, name: app.installerName ?? "The person who added it" };
+  }
+
   said(owner: Owner, routineId: string, text: string, final: boolean, run: { id?: string; hash?: string }, question?: { id: string; text: string; choices: string[]; details?: string }, files: { ref: FileRef; data: string }[] = []): void {
     this.track(
       (async () => {
@@ -1124,9 +1160,15 @@ export class TeamsApps {
           }
           const now = this.now();
           await this.replies(owner, routineId, (cur) => ({ ...cur, asks: [...(cur.asks ?? []).filter((a) => now - a.at < ASK_FOR_MS && !mine.some((t) => t.conv === a.conv)), ...asks].slice(-TARGETS_MAX) }));
-        } else if (text.trim()) for (const t of mine) for (const part of splitText(text)) await client.send(app.serviceUrl, t.conv, { text: part, textFormat: "markdown" });
+        } else if (text.trim() && !(final && alreadyPosted(this.posted, runId, text))) {
+          for (const t of mine) for (const part of splitText(text)) await client.send(app.serviceUrl, t.conv, { text: part, textFormat: "markdown" });
+          if (!final) remember(this.posted, runId, text, this.now());
+        }
         if (files.length) for (const t of mine) await this.sendFiles(owner, routineId, client, app.serviceUrl, t.conv, files);
-        if (final) await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}), ...(cur.asks ? { asks: cur.asks } : {}) }));
+        if (final) {
+          this.posted.delete(runId);
+          await this.replies(owner, routineId, (cur) => ({ targets: cur.targets.filter((t) => t.runId !== runId), ...(cur.run && cur.run.id !== runId ? { run: cur.run } : {}), ...(cur.asks ? { asks: cur.asks } : {}) }));
+        }
       })(),
     );
   }

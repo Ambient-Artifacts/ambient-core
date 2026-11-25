@@ -21,6 +21,7 @@ import { GitHubError, WATCH_MODES, type GitHubEvents } from "./github.ts";
 import { page as githubPage, type GitHubApps } from "./github-apps.ts";
 import { SlackError, type SlackApps } from "./slack-apps.ts";
 import { TeamsError, type TeamsApps } from "./teams-apps.ts";
+import { askersPage, PEOPLE_MAX, type BotAskers } from "./askers.ts";
 import type { Activity } from "../msteams/botframework.ts";
 import { IMessageError, type IMessageChannel } from "../channels/imessage.ts";
 import type { AmbReach } from "../channels/reach.ts";
@@ -77,6 +78,7 @@ export function botAppRoutes(
     githubApp?: () => GitHubApps | undefined;
     slack?: () => SlackApps | undefined;
     teams?: () => TeamsApps | undefined;
+    askers?: () => BotAskers | undefined;
     learning?: () => BotLearning | undefined;
     ambSettings?: () => AmbSettings | undefined;
     imessage?: () => IMessageChannel | undefined;
@@ -536,6 +538,36 @@ export function botAppRoutes(
     try {
       if (!(await sl.remove(d.routines.botOwner(await actor(res), teamOf(req)), "amb"))) return res.status(404).json({ error: "no_app", message: "Ambient isn't in Slack." });
       res.status(204).end();
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  // Who can ask a bot in Slack and Teams: everyone in the company (the default) or only the people
+  // picked; whoever added it can always (docs/bots.md, "Who can ask it").
+  r.get("/v1/app/routines/:id/askers", d.auth, async (req, res) => {
+    const ak = d.askers?.();
+    if (!ak) return notEnabled(res);
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), false);
+      res.json(await askersPage(ak, d.slack?.(), d.teams?.(), f.owner, f.routineId));
+    } catch (err) {
+      slackFail(res, err);
+    }
+  });
+  r.put("/v1/app/routines/:id/askers", d.auth, d.json, async (req, res) => {
+    const ak = d.askers?.();
+    if (!ak) return notEnabled(res);
+    const body = z
+      .object({
+        mode: z.enum(["everyone", "selected"]),
+        people: z.array(z.object({ via: z.enum(["slack", "teams"]), id: z.string().trim().min(1).max(64), name: z.string().max(100) })).max(PEOPLE_MAX).optional(),
+      })
+      .safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "bad_request", message: 'Send mode ("everyone" or "selected") and, for selected, people: [{ via: "slack"|"teams", id, name }].' });
+    try {
+      const f = await d.routines.folderOf(await actor(res), id(req), true);
+      await ak.set(f.owner, f.routineId, body.data.mode, body.data.people);
+      res.json(await askersPage(ak, d.slack?.(), d.teams?.(), f.owner, f.routineId));
     } catch (err) {
       slackFail(res, err);
     }
