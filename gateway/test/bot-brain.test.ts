@@ -102,3 +102,33 @@ describe("a team bot", () => {
     expect(await botPrincipal({ control: control as never, directory: directory as never }, "Bearer ambient_pat_x", { url: "https://x/mcp", teamSlug: null })).toBeNull();
   });
 });
+
+describe("a team bot's own files", () => {
+  it("are its to change, even when its maker is a plain member of the team", async () => {
+    // The real case: Loopie's GOAL.md was refused with "Only the team's owners and admins…".
+    const ben = await signIn(s, "apple-ben-botbrain", "Ben Kraus");
+    await appCall(s, ben.access_token, "POST", "/v1/app/teams/join", { code: INVITE });
+    await s.t.run(async (ctx) => {
+      for (const m of await ctx.db.query("members").collect()) await ctx.db.patch(m._id, { role: "admin" });
+    });
+    const code = String((await appCall(s, ben.access_token, "POST", "/v1/app/computers", { name: "Team server", team: "acme" })).json.code);
+    const teamHost = String((await hostCall("", "POST", "/v1/host/setup", { code, info })).json.token);
+    const made = await appCall(s, ben.access_token, "POST", "/v1/app/routines", { name: "Follow-ups", prompt: "Build the follow-ups.", schedule: daily, team: "acme", bot: {} });
+    expect(made.status, JSON.stringify(made.json)).toBe(200);
+    const id = (made.json.routine as { id: string }).id;
+    // Ben is a member again: the bot still keeps its own files.
+    await s.t.run(async (ctx) => {
+      for (const m of await ctx.db.query("members").collect()) await ctx.db.patch(m._id, { role: "member" });
+    });
+    const start = await hostCall(teamHost, "POST", `/v1/host/routines/${id}/runs`);
+    expect(start.status, JSON.stringify(start.json)).toBe(200);
+    const mcp = await mcpClient(`${s.origin}/mcp`, String(start.json.runToken));
+    const goal = text(await mcp.callTool({ name: "update_my_file", arguments: { path: "GOAL.md", content: "Useful follow-ups, never annoying.\n", why: "Ben gave me the goal." } }));
+    expect(goal).toContain("Saved your GOAL.md");
+    const job = text(await mcp.callTool({ name: "update_my_file", arguments: { path: "AGENTS.md", content: "Build the follow-ups and watch how they land.\n", why: "Ben added monitoring." } }));
+    expect(job).toContain("Saved your AGENTS.md");
+    const read = await appCall(s, ben.access_token, "GET", `/v1/app/routines/${id}/files/content?path=GOAL.md`);
+    expect(JSON.stringify(read.json)).toContain("Useful follow-ups, never annoying.");
+    await hostCall(teamHost, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Kept my files." });
+  });
+});

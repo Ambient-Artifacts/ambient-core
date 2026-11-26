@@ -19,7 +19,8 @@ export interface Principal {
   /** Teams readable on this resource (team:read): all memberships on /mcp, one on /t/<slug>/mcp. */
   teams: Team[];
   /** A bot's run (mcp/bot-principal.ts): the brain as an employee's AI app has it, no more. */
-  bot?: { routineId: string; name: string; teamId?: string | null };
+  /** A bot's run (bot-principal.ts); runTokenHash proves it's that bot, for its own files. */
+  bot?: { routineId: string; name: string; teamId?: string | null; runTokenHash?: string };
 }
 
 export class AuthError extends Error {

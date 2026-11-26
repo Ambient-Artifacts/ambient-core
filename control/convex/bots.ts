@@ -269,6 +269,23 @@ export const runOwner = query({
   },
 });
 
+/**
+ * A bot's run changes its own prompt (AGENTS.md) when its owner told it its job changed
+ * (update_my_file). The run token is the authority, so a team bot made by a plain member can keep
+ * its own job current; it changes nothing else of the bot. Answers the prompt it replaced.
+ */
+export const setOwnPrompt = mutation({
+  args: { ...secretArg, runTokenHash: v.string(), promptIv: v.string(), promptCt: v.string(), now: v.number() },
+  handler: async (ctx, { secret, runTokenHash, promptIv, promptCt, now }) => {
+    assertService(secret);
+    const found = await runByToken(ctx, runTokenHash);
+    if (!found) return { ok: false as const, error: "run_over" };
+    const { r } = found;
+    await ctx.db.patch(r._id, { promptIv, promptCt, updatedAt: now, source: "bot" });
+    return { ok: true as const, routineId: r._id, teamId: r.teamId ?? null, createdBy: r.userId, beforeIv: r.promptIv, beforeCt: r.promptCt };
+  },
+});
+
 /** A bot's run asks its owner something. A newer question replaces one still open. */
 export const ask = mutation({
   args: { ...secretArg, runTokenHash: v.string(), iv: v.string(), ct: v.string(), now: v.number() },

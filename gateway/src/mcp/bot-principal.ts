@@ -32,10 +32,11 @@ export const BOT_TOOLS = new Set([
 export async function botPrincipal(d: { control: Control; directory: Directory }, authorization: string | undefined, target: ResourceTarget): Promise<Principal | null> {
   const token = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
   if (!token.startsWith(RUN_TOKEN_PREFIX)) return null;
-  const run = await d.control.q(api.bots.runOwner, { runTokenHash: sha256Hex(token) });
+  const runTokenHash = sha256Hex(token);
+  const run = await d.control.q(api.bots.runOwner, { runTokenHash });
   if (!run) throw new AuthError(401, "invalid_token", "This bot's run is over.", true);
   const uid = String(run.createdBy);
-  const bot = { routineId: String(run.routineId), name: run.name, teamId: run.teamId ? String(run.teamId) : null };
+  const bot = { routineId: String(run.routineId), name: run.name, teamId: run.teamId ? String(run.teamId) : null, runTokenHash };
   if (run.teamId) {
     const team = (await d.control.q(api.teams.byId, { teamId: run.teamId as never })) as unknown as Team | null;
     if (!team || team.status !== "active") throw new AuthError(403, "insufficient_scope", "This bot's team isn't active.");

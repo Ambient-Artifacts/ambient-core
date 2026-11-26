@@ -834,6 +834,25 @@ export class RoutineService {
     return { kind: "user", uid: actor.uid };
   }
 
+  /**
+   * A bot's run sets its own prompt (its AGENTS.md; update_my_file), on its run token alone: a team
+   * bot made by a plain member keeps its own job current too. A version of AGENTS.md like any change.
+   */
+  async setOwnPrompt(runTokenHash: string, prompt: string, by: Author, why: string): Promise<{ owner: Owner; routineId: string }> {
+    const run = await this.d.control.q(api.bots.runOwner, { runTokenHash });
+    if (!run) throw refused("run_over");
+    const owner = this.ownerOf({ teamId: run.teamId ? String(run.teamId) : null, createdBy: String(run.createdBy) });
+    const sealed = await this.d.keys.seal(owner, "routine:prompt", prompt);
+    const out = await this.d.control.m(api.bots.setOwnPrompt, { runTokenHash, promptIv: sealed.iv, promptCt: sealed.ciphertext, now: this.now() });
+    if (!out.ok) throw refused(out.error);
+    const routineId = String(out.routineId);
+    if (this.d.folder) {
+      const before = await this.d.keys.open(owner, "routine:prompt", out.beforeIv, out.beforeCt).catch(() => null);
+      if (before !== prompt) await this.d.folder.recordAgents(owner, routineId, prompt, before, by, why).catch((err: Error) => console.warn(`[folder] AGENTS.md version not kept: ${err.message}`));
+    }
+    return { owner, routineId };
+  }
+
   async folderOf(actor: Actor, id: string, write: boolean): Promise<{ owner: Owner; routineId: string; name: string; agents: string; teamId: string | null }> {
     const { r } = await this.row(actor, id);
     if (!r.bot) throw new RoutineError("no_such_bot", "There's no such bot.", 404);

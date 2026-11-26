@@ -365,13 +365,6 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
   if (principal.bot && folders) {
     const files = folders.files;
     const bot = principal.bot;
-    const actor = {
-      uid: principal.uid,
-      teams: principal.teams,
-      personal: principal.personal,
-      canWritePersonal: principal.personal && principal.scopes.has("personal:write"),
-      canWriteTeams: principal.scopes.has("team:write"),
-    };
     const by = { kind: "bot" as const, name: bot.name };
     server.registerTool(
       "update_my_file",
@@ -391,7 +384,9 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
           const p = path.trim();
           if (p === "memory.md") return { content: [{ type: "text" as const, text: "Your memory is the memory.md in your run's out folder (your instructions say where): change it there with your file tools." }], isError: true };
           if (p === "AGENTS.md" && !content.trim()) return { content: [{ type: "text" as const, text: "AGENTS.md is your job: it can't be empty. Send the whole new file." }], isError: true };
-          const f = await files.write(actor, bot.routineId, p, content, by, why, `bot:${bot.routineId}`);
+          if (!bot.runTokenHash) return { content: [{ type: "text" as const, text: "Only a bot's own run can change its files." }], isError: true };
+          // Its run token is the authority (files.writeOwn), not its maker's team role.
+          const f = await files.writeOwn({ routineId: bot.routineId, teamId: bot.teamId, uid: principal.uid, runTokenHash: bot.runTokenHash }, p, content, by, why);
           return { content: [{ type: "text" as const, text: `Saved your ${f.path} (version ${f.version}). It applies from your next run; your owner can see and undo it under Files.` }], structuredContent: { file: { path: f.path, version: f.version } } };
         } catch (err) {
           return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
