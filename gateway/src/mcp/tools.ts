@@ -300,7 +300,7 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     : "";
   const general = (canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS) + (defaultRule ? `\n${defaultRule}` : "");
   const botNote = principal.bot
-    ? `You're the bot "${principal.bot.name}". You read the brain like any member of the ${principal.personal ? "owner's teams" : "team"} would, and you can't change its pages: when one is wrong, send suggest_correction; when you finished meaningful work, log it with log_work. Both say they came from you. Your own GOAL.md, AGENTS.md, SOUL.md and skills you change with update_my_file, when your owner tells you something that belongs there.`
+    ? `You're the bot "${principal.bot.name}". You read the brain like any member of the ${principal.personal ? "owner's teams" : "team"} would, and you can't change its pages: when one is wrong, send suggest_correction; when you finished meaningful work, log it with log_work. Both say they came from you. Your own GOAL.md, AGENTS.md, SOUL.md and skills you read with read_my_files and change with update_my_file, when your owner asked for it or said yes to your proposal.`
     : "";
   const instructions = [general, botNote, personal].filter(Boolean).join("\n\n");
   const server = new McpServer({ name: "ambient", version }, { instructions });
@@ -366,12 +366,40 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     const files = folders.files;
     const bot = principal.bot;
     const by = { kind: "bot" as const, name: bot.name };
+    // To change a file, a bot first needs it as it is now (2026-11-26: a bot rewrote its GOAL.md and
+    // AGENTS.md from memory, "I couldn't read the old versions"). Reading only needs membership.
+    const reader = { uid: principal.uid, teams: principal.teams, personal: principal.personal, canWritePersonal: false, canWriteTeams: false };
+    server.registerTool(
+      "read_my_files",
+      {
+        title: "Read your own files",
+        description:
+          "Your own files as they are now: AGENTS.md (your job), GOAL.md (the outcome you own), SOUL.md (how you talk) and your skills, each with who changed it last. Read them before you propose or make a change with update_my_file, so the new file keeps what still holds. (memory.md is in your run's out folder.)",
+        inputSchema: {},
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async () => {
+        try {
+          const { files: list } = await files.list(reader, bot.routineId);
+          const parts: string[] = [];
+          for (const f of list) {
+            if (f.path === "memory.md") continue;
+            const view = f.version === 0 && f.size === 0 ? null : await files.read(reader, bot.routineId, f.path);
+            const who = f.by ? `, changed by ${f.by.name ?? f.by.kind}` : "";
+            parts.push(`## ${f.path}${view ? ` (version ${view.version}${who})` : ""}\n\n${view?.content.trim() || "(empty)"}`);
+          }
+          return { content: [{ type: "text" as const, text: parts.join("\n\n") }] };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
+        }
+      },
+    );
     server.registerTool(
       "update_my_file",
       {
         title: "Change one of your own files",
         description:
-          "Change one of your own files in Ambient, when your owner tells you something that belongs there: GOAL.md (the outcome you own: the result in one sentence, the metric and how you measure it, the target, by when, your limits), AGENTS.md (your job: what you do and how), SOUL.md (how you talk and behave: tone, length, language), or a skill (skills/<name>/SKILL.md: when to use it, then how). Send the whole new file, keeping what still holds. Only what your owner said or clearly agreed to; when it's unclear what they want there, ask first. Takes effect from your next run (follow it already in this one). Every change is a version your owner sees and can undo in the app; tell them in your answer what you changed. Not memory.md (that's the memory.md in your run's out folder, which you change with your file tools), never secrets.",
+          "Change one of your own files in Ambient, when your owner tells you something that belongs there: GOAL.md (the outcome you own: the result in one sentence, the metric and how you measure it, the target, by when, your limits), AGENTS.md (your job: what you do and how), SOUL.md (how you talk and behave: tone, length, language), or a skill (skills/<name>/SKILL.md: when to use it, then how). Read it first (read_my_files) and send the whole new file, keeping what still holds. Only what your owner asked for or said yes to: when you noticed a lasting change yourself, propose it first (your instructions say how). Takes effect from your next run (follow it already in this one). Every change is a version your owner sees and can undo in the app; tell them in your answer what you changed. Not memory.md (that's the memory.md in your run's out folder, which you change with your file tools), never secrets.",
         inputSchema: {
           path: z.string().max(200).describe("GOAL.md, AGENTS.md, SOUL.md, or skills/<name>/<file>."),
           content: z.string().max(70_000).describe("The whole new file."),

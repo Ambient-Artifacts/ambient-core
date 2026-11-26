@@ -73,6 +73,12 @@ describe("a bot's run", () => {
     expect(goal).toContain("Saved your GOAL.md");
     const soul = text(await mcp.callTool({ name: "update_my_file", arguments: { path: "SOUL.md", content: "Short, casual, English.\n", why: "Lena wants shorter answers." } }));
     expect(soul).toContain("Saved your SOUL.md");
+    // It reads its files as they are now before it changes or offers one.
+    const mine = text(await mcp.callTool({ name: "read_my_files", arguments: {} }));
+    expect(mine).toContain("## GOAL.md (version 1, changed by Reviewer)");
+    expect(mine).toContain("Every open PR reviewed within a day.");
+    expect(mine).toContain("Review the open pull requests.");
+    expect(mine).not.toContain("## memory.md");
     const read = await appCall(s, lena.access_token, "GET", `/v1/app/routines/${botId}/files/content?path=GOAL.md`);
     expect(JSON.stringify(read.json)).toContain("Every open PR reviewed within a day.");
     expect(JSON.stringify(read.json)).toContain("Reviewer");
@@ -127,6 +133,7 @@ describe("a team bot's own files", () => {
     expect(goal).toContain("Saved your GOAL.md");
     const job = text(await mcp.callTool({ name: "update_my_file", arguments: { path: "AGENTS.md", content: "Build the follow-ups and watch how they land.\n", why: "Ben added monitoring." } }));
     expect(job).toContain("Saved your AGENTS.md");
+    expect(text(await mcp.callTool({ name: "read_my_files", arguments: {} }))).toContain("Build the follow-ups and watch how they land.");
     const read = await appCall(s, ben.access_token, "GET", `/v1/app/routines/${id}/files/content?path=GOAL.md`);
     expect(JSON.stringify(read.json)).toContain("Useful follow-ups, never annoying.");
     await hostCall(teamHost, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Kept my files." });
