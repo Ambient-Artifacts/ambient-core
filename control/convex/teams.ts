@@ -3,6 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel.js";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server.js";
 import { assertService, secretArg } from "./lib/service.js";
 import { role } from "./schema.js";
+import { shareWithOwnedTeam } from "./routines.js";
 
 function shape(team: Doc<"teams">, member?: Doc<"members">) {
   return {
@@ -266,9 +267,14 @@ export const createOwned = mutation({
     const teamId = await ctx.db.insert("teams", { slug, name: clean, status: "active", ...(server ? { serverUrl: server.url } : {}), createdAt: now });
     await ctx.db.insert("members", { teamId, userId: uid, role: "owner", peopleSlug, joinedAt: now });
     if (server) await ctx.db.patch(server._id, { status: "claimed", teamId });
+    // The owner's computer is the team's too until they connect another for it (docs/bots.md,
+    // "Personal bots on the team's computer"): the one seen last, when they have several.
+    const own = (await ctx.db.query("routineHosts").withIndex("by_user", (q) => q.eq("userId", uid)).take(20)).filter((h) => h.tokenHash && !h.teamId);
+    const mine = own.sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0))[0];
+    const computer = mine && (await shareWithOwnedTeam(ctx, mine, now)) ? { id: mine._id, name: mine.name } : null;
     const team = (await ctx.db.get(teamId))!;
     const member = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid)).unique();
-    return { ok: true as const, team: shape(team, member ?? undefined), server: server ? { serverId: server.serverId, url: server.url } : null };
+    return { ok: true as const, team: shape(team, member ?? undefined), server: server ? { serverId: server.serverId, url: server.url } : null, computer };
   },
 });
 
@@ -315,6 +321,10 @@ export const abandonCreate = mutation({
     for (const m of await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).collect()) await ctx.db.delete(m._id);
     const server = await ctx.db.query("teamServers").filter((q) => q.eq(q.field("teamId"), teamId)).first();
     if (server) await ctx.db.patch(server._id, release === false ? { teamId: undefined } : { status: "free", teamId: undefined });
+    // The owner's computer that was to serve it is only theirs again.
+    for (const h of await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).collect()) {
+      if (h.userId) await ctx.db.patch(h._id, { teamId: undefined });
+    }
     await ctx.db.delete(teamId);
   },
 });

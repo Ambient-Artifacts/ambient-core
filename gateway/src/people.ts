@@ -85,9 +85,12 @@ export class PeopleService {
     }
     const t = made.team;
     const server = made.server;
+    // The owner's computer that serves the team too until they connect another for it (docs/bots.md).
+    const computer = (made as { computer?: { id: string; name: string } | null }).computer ?? null;
+    const shared = computer ? { computer: { id: String(computer.id), name: computer.name } } : {};
     if (!server) {
       this.d.directory.invalidate(uid);
-      return { status: 200, json: { team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: "none" } } };
+      return { status: 200, json: { team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: "none", ...shared } } };
     }
     try {
       await this.d.teams.claim(server, { id: t.id, name: t.name });
@@ -107,7 +110,7 @@ export class PeopleService {
     this.d.directory.invalidate(uid);
     // Best effort: the server restarts as the team's; notes queue on the phone until it's up.
     await this.d.teams.ready(server.url);
-    return { status: 200, json: { team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: "hosted" } } };
+    return { status: 200, json: { team: { slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: "hosted", ...shared } } };
   }
 
   /** Join with an invite code (or the code from an invite link). */

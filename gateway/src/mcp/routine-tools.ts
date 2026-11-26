@@ -245,7 +245,7 @@ export function registerRoutineTools(server: McpServer, principal: Principal, ro
         prompt: z.string().min(1).max(20_000),
         schedule: Schedule,
         ...teamArg,
-        computer: z.string().max(80).optional().describe("For the user's own routines: the computer's name or id (see list_routines); defaults to the only one."),
+        computer: z.string().max(80).optional().describe("For the user's own routines: the computer's name or id (see list_routines), one of theirs or their team's computer; defaults to their only one, else their team's."),
         folder: z.string().max(500).optional().describe("Working folder on that computer, e.g. ~/blog."),
         ...(hasBots ? { bot: BotArg.optional() } : {}),
       },
