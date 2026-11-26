@@ -5,6 +5,7 @@
 import { api } from "../control.ts";
 import type { Actor, RoutineService } from "../routines/service.ts";
 import { AGENTS, FolderError, MEMORY, checkPath, type Author, type BotFolder, type FileInfo, type FileView, type Handoff } from "./folder.ts";
+import type { Owner } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
 import type { BotMirror, MirrorStatus } from "./mirror.ts";
 
@@ -78,6 +79,20 @@ export class BotFiles {
     } else view = await this.d.folder.write(f.owner, f.routineId, p, content, by, why);
     if (by.kind === "amb" && p !== MEMORY) await this.note(actor, id, `I changed ${p}${why ? `: ${why}` : "."} (version ${view.version}; you can undo it under Files.)`);
     return view;
+  }
+
+  /**
+   * A bot's run changes one of its own files (update_my_file). The run token is the authority, not
+   * its maker's team role: a team bot made by a plain member keeps its own goal, job and tone too.
+   */
+  async writeOwn(bot: { routineId: string; teamId?: string | null; uid: string; runTokenHash: string }, path: string, content: string, by: Author, why: string): Promise<FileView> {
+    const p = checkPath(path);
+    if (p === AGENTS) {
+      const { owner, routineId } = await this.d.routines.setOwnPrompt(bot.runTokenHash, content, by, why);
+      return this.d.folder.read(owner, routineId, AGENTS, content);
+    }
+    const owner: Owner = bot.teamId ? { kind: "team", teamId: bot.teamId } : { kind: "user", uid: bot.uid };
+    return this.d.folder.write(owner, bot.routineId, p, content, by, why);
   }
 
   async remove(actor: Actor, id: string, path: string, by: Author, why: string | null): Promise<void> {
