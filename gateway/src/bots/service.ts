@@ -73,6 +73,8 @@ function refused(code: string, message: string, status = 400) {
 export class BotService {
   /** What happened in a bot's thread, for automations (docs/bots.md, "Automations"). */
   onEvent?: (e: AutomationEvent) => void;
+  /** A bot's offers to change its own files (BotFiles): settled when its owner answers one. */
+  proposals?: Pick<import("./files.ts").BotFiles, "pendingFor" | "settleProposal">;
   /** The bot said something while it runs (a reply, a question): Slack answers the thread that asked. */
   /** With `question`: the run asks its owner (ask_owner); its id and choices (Teams shows a card). */
   onSaid?: (owner: Owner, routineId: string, text: string, tokenHash: string, question?: { id: string; text: string; choices: string[]; details?: string }, files?: { ref: FileRef; data: string; name: string; type: string }[]) => void;
@@ -193,6 +195,10 @@ export class BotService {
       const asked = (await this.thread(actor, id, 100, { markSeen: false })).messages.find((m) => m.id === opts.question && m.kind === "question");
       if (asked) older = await sealMessage(this.d.routines.keys, owner, { text: replyText(asked.text, body || "(See the attached files.)"), files });
     }
+    // The bot offered new versions of its own files: is this the answer to that offer? (Only its
+    // maker's own answer settles it; Ambient never says yes to it for them.)
+    const offer = !opts.asAmbient && this.proposals ? await this.proposals.pendingFor(actor, id).catch(() => null) : null;
+    const answering = offer ? (opts.question ?? (await this.thread(actor, id, 20, { markSeen: false })).openQuestion?.id ?? null) : null;
     // A team bot's thread is a group chat: everyone in the team writes (not only its admins).
     const out = await this.d.routines.control.m(api.bots.post, {
       ...(r.teamId ? this.access(actor) : this.writeAccess(actor)),
@@ -216,6 +222,9 @@ export class BotService {
       };
       const [m, s] = messages[out.error] ?? ["That didn't work.", 400];
       throw refused(out.error, m, s);
+    }
+    if (offer && answering === offer.questionId && (out.message as unknown as MessageRow).kind === "answer") {
+      await this.proposals!.settleProposal(actor, id, offer, body).catch((err: Error) => console.warn(`[bots] an offer to change files wasn't settled: ${err.message}`));
     }
     const routine = await this.d.routines.get(actor, id);
     if (routine.computer) this.d.startNow?.(routine.computer.id, id);
@@ -273,7 +282,14 @@ export class BotService {
   /** A run asks its bot's owner; every channel gets the question. Returns the question's id. */
   /** `details`: what the question is about, shown with it (the draft, the PR's link, the file). */
   async ask(authorization: string | undefined, question: string, choices: string[] = [], details?: string, incoming: IncomingFile[] = []): Promise<{ id: string }> {
-    const runTokenHash = this.tokenHash(authorization);
+    return this.askAs(this.tokenHash(authorization), question, choices, details, incoming);
+  }
+
+  /**
+   * The same, for a run already known by its token's hash (its MCP tools). `ownerOnly`: Ambient
+   * doesn't answer it for the owner (a bot's offer to change its own files is theirs to accept).
+   */
+  async askAs(runTokenHash: string, question: string, choices: string[] = [], details?: string, incoming: IncomingFile[] = [], opts: { ownerOnly?: boolean } = {}): Promise<{ id: string }> {
     const who = await this.d.routines.control.q(api.bots.runOwner, { runTokenHash });
     if (!who) throw refused("run_over", "This run is over; it can't ask anything anymore.", 409);
     const owner = this.ownerOf({ teamId: who.teamId ? String(who.teamId) : null, createdBy: String(who.createdBy) });
@@ -298,7 +314,7 @@ export class BotService {
         choices: picks,
         ...(work ? { details: work } : {}),
         ...(files.length ? { files: files.map((f) => f.name) } : {}),
-        delegate: (who as { delegate?: "never" | "brain" | "most" }).delegate ?? "brain",
+        delegate: opts.ownerOnly ? "never" : ((who as { delegate?: "never" | "brain" | "most" }).delegate ?? "brain"),
         team: out.team,
       });
     } else {

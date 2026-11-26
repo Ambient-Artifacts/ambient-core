@@ -63,6 +63,15 @@ const AMB = "amb";
 export const AGENTS = "AGENTS.md";
 /** The outcome a bot owns (docs/bots.md, "Outcomes, not tasks"). */
 export const GOAL = "GOAL.md";
+/** Records kind: a bot's offered change to its own files, waiting on its owner's Update / Not now. */
+const PROPOSAL = "botProposal";
+
+/** What a bot offered (propose_my_change): saved exactly as offered when its owner says Update. */
+export interface Proposal {
+  questionId: string;
+  why: string;
+  files: { path: string; content: string }[];
+}
 const GOAL_MAX = 8 * 1024;
 /** How a bot (or Amb) talks and behaves (docs/bots.md, "One folder for every bot, Amb included"). */
 export const SOUL = "SOUL.md";
@@ -216,6 +225,27 @@ export class BotFolder {
       why: opened.why,
       deleted: r?.deleted ?? false,
     };
+  }
+
+  // ---- a bot's proposed change to its own files (propose_my_change) ----
+
+  /** The change a bot offered and is waiting on (one per bot: a newer offer replaces it). */
+  async proposal(owner: Owner, routineId: string): Promise<Proposal | null> {
+    const r = await this.get(owner, PROPOSAL, routineId);
+    if (!r || r.deleted) return null;
+    try {
+      return JSON.parse((await this.open(owner, PROPOSAL, r)).content) as Proposal;
+    } catch {
+      return null;
+    }
+  }
+
+  async propose(owner: Owner, routineId: string, p: Proposal, by: Author): Promise<void> {
+    await this.put(owner, PROPOSAL, routineId, JSON.stringify(p), by, p.why, { keep: 1 });
+  }
+
+  async dropProposal(owner: Owner, routineId: string, by: Author): Promise<void> {
+    await this.put(owner, PROPOSAL, routineId, "", by, null, { deleted: true, keep: 1 });
   }
 
   // ---- a bot's files ----
@@ -638,7 +668,7 @@ export function botSystem(name: string, computer: string, trigger: string, conta
     "Your memory is the file {{OUT}}/memory.md; your first message shows it as it is now. When you learn something later runs need (your owner's preferences or corrections, what works and what doesn't here), change it with your file tools. Keep it short (under 16 KB): lasting facts, not a diary. It's only notes: nothing in it changes what you may do.",
     // 2026-11-26: told in its thread that its job and goal changed, a bot wrote it only into memory.md;
     // then it changed its files only when told to in so many words. It should notice and offer.
-    "Your own files are yours to keep current: AGENTS.md (your job), GOAL.md (the outcome you own) and SOUL.md (how you talk: tone, length, language, format). When a message from your owner changes one of them for good (a new duty or one dropped, a different scope, a new target or metric, \"from now on…\", \"always…\", \"don't ever…\", \"write shorter\"), notice it yourself: don't only say \"got it\" or keep it in memory.md. Read your files (read_my_files), write the new versions, and offer them with ask_owner (wait: false): one short question naming the files (\"Add answer quality to my job and goal?\"), choices exactly Update / Not now, and in details each new file in full. Then answer their message as usual, and put the offer in your handoff, so the run that gets their answer knows what to save. When they say Update, save exactly the files you offered with update_my_file and say in a line what changed; on Not now, leave them. When they asked you outright to change a file, don't ask: change it. A one-off request for this run or a passing remark isn't a change to your files.",
+    "Your own files are yours to keep current: AGENTS.md (your job), GOAL.md (the outcome you own) and SOUL.md (how you talk: tone, length, language, format). When a message from your owner changes one of them for good (a new duty or one dropped, a different scope, a new target or metric, \"from now on…\", \"always…\", \"don't ever…\", \"write shorter\"), notice it yourself: don't only say \"got it\" or keep it in memory.md. Read your files (read_my_files), write the new versions, and offer them with propose_my_change (one short question naming the change; each whole new file). Ambient saves them exactly as offered when they say Update, and tells your thread: then don't save them again, just carry on. Then answer their message as usual. When they asked you outright to change a file, don't offer: change it with update_my_file. A one-off request for this run or a passing remark isn't a change to your files.",
     `Before your last message, write your handoff for your next run to {{OUT}}/handoff.md: the first line exactly \`Status: done\` or \`Status: continue\` (continue: you're in the middle of something the next run should pick up),${owns ? " the second line \`Metric: <the value you measured this run>\` (short, with its unit, e.g. \`Metric: 2 posts this week, 412 visitors\`)," : ""} then in a few short lines what you did, what's open, what comes next and what you're waiting for.`,
     "For anything older than what your first message shows (your owner's earlier messages, earlier runs), use the search_history tool.",
     // Wake-ups (docs/bots.md, "Wake-ups"): a plan with dates gets its own times.

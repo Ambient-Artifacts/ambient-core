@@ -139,3 +139,55 @@ describe("a team bot's own files", () => {
     await hostCall(teamHost, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Kept my files." });
   });
 });
+
+describe("a bot's offer to change its own files", () => {
+  it("is saved exactly as offered when its owner says Update, and not at all on Not now", async () => {
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "Watcher", prompt: "Watch the costs.", schedule: daily, bot: {} });
+    const id = (made.json.routine as { id: string }).id;
+    const goalOf = async () => JSON.stringify((await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/files/content?path=GOAL.md`)).json);
+
+    // Run 1: the owner said "from now on also keep an eye on answer quality"; the bot offers.
+    const start = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    const mcp = await mcpClient(`${s.origin}/mcp`, String(start.json.runToken));
+    const offered = text(
+      await mcp.callTool({
+        name: "propose_my_change",
+        arguments: {
+          question: "Add answer quality to my job and goal?",
+          why: "Lena asked me to keep an eye on answer quality from now on.",
+          files: [
+            { path: "GOAL.md", content: "Costs and answer quality hold after the switch.\n" },
+            { path: "AGENTS.md", content: "Watch the costs and sample answers for quality.\n" },
+          ],
+        },
+      }),
+    );
+    expect(offered).toContain("Offered GOAL.md and AGENTS.md");
+    // Nothing changes before the answer; the question carries both files in full.
+    expect(await goalOf()).not.toContain("answer quality");
+    const thread = (await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/thread?seen=0`)).json as { openQuestion: { id: string; choices: string[]; details?: string } | null };
+    expect(thread.openQuestion?.choices).toEqual(["Update", "Not now"]);
+    expect(thread.openQuestion?.details).toContain("The new AGENTS.md:");
+    // Refused before it's asked: memory.md isn't offered.
+    expect(text(await mcp.callTool({ name: "propose_my_change", arguments: { question: "q", why: "w", files: [{ path: "memory.md", content: "x" }] } }))).toContain("out folder");
+    await hostCall(host, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Offered." });
+
+    // The owner taps Update on the card: saved as offered, as theirs, and the thread says so.
+    const answered = await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "Update", question: thread.openQuestion!.id });
+    expect(answered.status, JSON.stringify(answered.json)).toBe(200);
+    expect(await goalOf()).toContain("Costs and answer quality hold after the switch.");
+    const agents = JSON.stringify((await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/files/content?path=AGENTS.md`)).json);
+    expect(agents).toContain("sample answers for quality");
+    const after = (await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/thread?seen=0`)).json as { messages: { text: string }[] };
+    expect(after.messages.map((m) => m.text).join("\n")).toMatch(/Saved GOAL\.md \(version \d+\) and AGENTS\.md/);
+
+    // Run 2 offers a SOUL.md; the owner says Not now (typed): nothing is saved.
+    const run2 = await hostCall(host, "POST", `/v1/host/routines/${id}/runs`);
+    const mcp2 = await mcpClient(`${s.origin}/mcp`, String(run2.json.runToken));
+    await mcp2.callTool({ name: "propose_my_change", arguments: { question: "Write shorter from now on?", why: "Lena said my reports are long.", files: [{ path: "SOUL.md", content: "Short.\n" }] } });
+    await appCall(s, lena.access_token, "POST", `/v1/app/routines/${id}/thread`, { text: "Not now" });
+    const soul = JSON.stringify((await appCall(s, lena.access_token, "GET", `/v1/app/routines/${id}/files/content?path=SOUL.md`)).json);
+    expect(soul).not.toContain("Short.");
+    await hostCall(host, "POST", `/v1/host/runs/${(run2.json.run as { id: string }).id}`, { status: "succeeded", summary: "Asked." });
+  });
+});

@@ -216,6 +216,8 @@ export function createApp(deps: AppDeps) {
     startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false,
     onQuestion: (q) => (onQuestion ? onQuestion(q) : undefined),
   });
+  // A bot's offers to change its own files are saved when its owner says Update (propose_my_change).
+  bots.proposals = folders.files;
   // Wake-ups bots book for themselves (bots/wakes.ts): fired by its ticker, started at once.
   const wakes = new Wakes({ routines, startNow: (hostId, routineId) => startNow?.(hostId, routineId) ?? false });
   folders.wakes = wakes;
