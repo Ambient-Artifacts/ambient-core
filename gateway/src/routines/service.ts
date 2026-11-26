@@ -1338,6 +1338,11 @@ export class RoutineService {
     const text = result.summary?.trim();
     const clipped = text && text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX)}…` : text;
     const sealed = clipped ? await this.d.keys.seal(owner, "routine:run", clipped) : undefined;
+    // The conversation it was to continue isn't on this computer (the bot moved, or Claude Code's
+    // history was cleared): no session goes back, so the next run starts afresh instead of failing
+    // the same way every time (a bot moved to its team's computer, 2026-11-26).
+    const lost = result.status === "failed" && LOST_SESSION.test(text ?? "");
+    const sessionId = lost ? undefined : result.sessionId;
     // A bot's thread gets the result too (Convex decides whether it's news).
     // Substance of its own (a draft, a report): shown even when the run also asked something.
     // An answer to a thread belongs to that thread's card in the app.
@@ -1352,7 +1357,7 @@ export class RoutineService {
       summaryCt: sealed?.ciphertext,
       costUsd: result.costUsd,
       turns: result.turns,
-      sessionId: result.sessionId,
+      sessionId,
       message,
       now: this.now(),
     });
@@ -1366,7 +1371,7 @@ export class RoutineService {
     // The session it answered a thread in is that thread's from now on.
     if (lane) {
       this.runLanes.delete(runId);
-      if (result.sessionId && this.botLanes) await this.botLanes.put(lane.owner, lane.routineId, lane.lane, { session: result.sessionId, seen: this.now() }).catch((err: Error) => console.warn(`[bots] a thread's session wasn't kept: ${err.message}`));
+      if ((sessionId || lost) && this.botLanes) await this.botLanes.put(lane.owner, lane.routineId, lane.lane, { session: sessionId, seen: this.now() }).catch((err: Error) => console.warn(`[bots] a thread's session wasn't kept: ${err.message}`));
     }
     // A bot's handoff and memory for its next run (docs/bots.md, "How a bot wakes up").
     if (who.bot && this.d.folder) {
@@ -1405,6 +1410,9 @@ export class RoutineService {
     });
   }
 }
+
+/** What Claude Code says when the session a run resumes isn't on the computer. */
+const LOST_SESSION = /No conversation found with session ID/i;
 
 /** The push when a routine's run failed. Tapping it opens the run in the app. */
 export function routineFailedPush(n: { routineId: string; runId: string; name: string; team: string | null }): PushMessage {

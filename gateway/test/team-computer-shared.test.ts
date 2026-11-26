@@ -173,3 +173,30 @@ describe("connecting a computer after creating the team", () => {
     expect(c).toMatchObject({ yours: true, team: null });
   });
 });
+
+describe("a bot's conversation", () => {
+  const session = async (id: string) => s.t.run(async (ctx) => (await ctx.db.get(id as never) as { lastSessionId?: string } | null)?.lastSessionId ?? null);
+
+  it("starts afresh on another computer, and after a run that couldn't find it", async () => {
+    const pia = (await signIn(s, "apple-pia-shared", "Pia Roth")).access_token;
+    const one = await connect(pia, "Pia one");
+    const two = await connect(pia, "Pia two");
+    const made = await appCall(s, pia, "POST", "/v1/app/routines", { name: "Notes", prompt: "x", schedule: weekly, computer: one.id, bot: HOST });
+    const id = (made.json.routine as Routine).id;
+    const runOn = async (token: string, result: Record<string, unknown>) => {
+      const run = await hostCall(token, "POST", `/v1/host/routines/${id}/runs`);
+      expect(run.status, JSON.stringify(run.json)).toBe(200);
+      expect((await hostCall(token, "POST", `/v1/host/runs/${(run.json.run as { id: string }).id}`, result)).status).toBeLessThan(300);
+    };
+    await runOn(one.token, { status: "succeeded", summary: "Done.", sessionId: "sess-one" });
+    expect(await session(id)).toBe("sess-one");
+    // Moved: the conversation stayed on the first computer.
+    expect((await appCall(s, pia, "PATCH", `/v1/app/routines/${id}`, { computer: two.id })).status).toBe(200);
+    expect(await session(id)).toBeNull();
+    await runOn(two.token, { status: "succeeded", summary: "Done.", sessionId: "sess-two" });
+    expect(await session(id)).toBe("sess-two");
+    // Claude Code couldn't find it there (history cleared): the next run doesn't try it again.
+    await runOn(two.token, { status: "failed", exitCode: 1, summary: "Claude Code ended with exit code 1 (error_during_execution).\n\nNo conversation found with session ID: sess-two", sessionId: "sess-two" });
+    expect(await session(id)).toBeNull();
+  });
+});

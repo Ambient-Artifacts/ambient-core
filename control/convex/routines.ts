@@ -297,6 +297,8 @@ export const update = mutation({
         if (!host) return { ok: false as const, error: "no_such_computer" };
         patch.hostId = host._id;
       }
+      // Its conversation lives on the computer it ran on: on another one it starts afresh.
+      if (patch.hostId !== r.hostId) patch.lastSessionId = undefined;
     }
     await ctx.db.patch(r._id, patch);
     return { ok: true as const, routine: routineShape((await ctx.db.get(r._id))!) };
@@ -415,7 +417,8 @@ async function rehome(ctx: MutationCtx, hostId: Id<"routineHosts">, now: number)
   for (const r of routines) {
     if (r.teamId) continue;
     const next = await defaultHost(ctx, r.userId, { exclude: hostId, any: true });
-    await ctx.db.patch(r._id, { hostId: next?._id, updatedAt: now });
+    // Its conversation stayed on the computer that's going: it starts afresh on the next one.
+    await ctx.db.patch(r._id, { hostId: next?._id, lastSessionId: undefined, updatedAt: now });
   }
 }
 
@@ -429,7 +432,7 @@ async function adoptHomeless(ctx: MutationCtx, teamId: Id<"teams">, now: number)
   for (const m of await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(200)) {
     const homeless = (await personalRoutines(ctx, m.userId)).filter((r) => r.bot && !r.hostId);
     if (!homeless.length || (await defaultHost(ctx, m.userId))?._id !== host._id) continue;
-    for (const r of homeless) await ctx.db.patch(r._id, { hostId: host._id, updatedAt: now });
+    for (const r of homeless) await ctx.db.patch(r._id, { hostId: host._id, lastSessionId: undefined, updatedAt: now });
   }
 }
 
