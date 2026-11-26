@@ -12,7 +12,7 @@ import { GraphError, graphFor as defaultGraphFor, GraphTokens, type DriveFolder,
 import { destinationFiles, IngestError, ingestNote } from "./ingest.ts";
 import type { TeamSettingsStore } from "./settings.ts";
 import { ReadOnlyWiki, type TeamWiki } from "./wiki.ts";
-import { BotsMirror, MAX_MIRROR_BYTES, MirrorError, mirrorBots } from "./bots.ts";
+import { BotsMirror, MAX_MIRROR_BYTES, MirrorError, mirrorBots, mirrorRefusal } from "./bots.ts";
 
 export interface TeamAppConfig {
   teamId: string;
@@ -106,7 +106,8 @@ export function createTeamApp(wiki: TeamWiki, cfg: TeamAppConfig): Express {
   app.put("/v1/bots", express.json({ limit: MAX_MIRROR_BYTES * 2 }), auth("bots"), async (req, res) => {
     const parsed = BotsMirror.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: "bad_request", issues: parsed.error.issues.slice(0, 5).map((i) => i.path.join(".")) });
+      const issues = parsed.error.issues.slice(0, 5).map((i) => i.path.join("."));
+      res.status(400).json({ error: "bad_request", message: mirrorRefusal(req.body, issues), issues });
       return;
     }
     const repo = () => {

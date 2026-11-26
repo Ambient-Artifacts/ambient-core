@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { mirrorBots, type BotsMirror } from "../src/bots.ts";
+import { BotsMirror as BotsMirrorSchema, mirrorBots, mirrorRefusal, type BotsMirror } from "../src/bots.ts";
 import { TeamRemote } from "../src/remote.ts";
 import { ReadOnlyWiki, TeamWiki } from "../src/wiki.ts";
 
@@ -69,6 +69,22 @@ describe("bots in a team's wiki repo", () => {
     expect(existsSync(join(dir, "bots/dev"))).toBe(false);
     expect(readFileSync(join(dir, "bots/builder/AGENTS.md"), "utf8")).toBe("Fix the flaky test.\n");
     expect(existsSync(join(dir, "bots/ours/plan.md"))).toBe(true);
+  });
+
+  it("take a bot's GOAL.md and SOUL.md (2026-11-26: refused with a bare 400 before)", async () => {
+    const loopie = { slug: "loopie", files: [{ path: "AGENTS.md", content: "Build follow-ups.\n" }, { path: "GOAL.md", content: "Useful follow-ups.\n" }, { path: "SOUL.md", content: "Short and warm.\n" }, { path: "memory.md", content: "" }] };
+    const sent = body([loopie]);
+    expect(BotsMirrorSchema.safeParse(sent).success).toBe(true);
+    const { wiki, dir } = await freshWiki();
+    await mirrorBots(wiki, sent);
+    expect(readFileSync(join(dir, "bots/loopie/GOAL.md"), "utf8")).toBe("Useful follow-ups.\n");
+    expect(readFileSync(join(dir, "bots/loopie/SOUL.md"), "utf8")).toBe("Short and warm.\n");
+    // A file it doesn't know yet is named, not a bare 400.
+    const odd = body([{ slug: "loopie", files: [{ path: "TOOLS.md", content: "x" }] }]);
+    const parsed = BotsMirrorSchema.safeParse(odd);
+    expect(parsed.success).toBe(false);
+    const issues = parsed.success ? [] : parsed.error.issues.map((i) => i.path.join("."));
+    expect(mirrorRefusal(odd, issues)).toContain("TOOLS.md for loopie");
   });
 
   it("refuse bad paths and twin folders", async () => {
