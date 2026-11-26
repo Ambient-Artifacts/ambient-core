@@ -270,6 +270,44 @@ chat says no computer is connected.
   `ANTHROPIC_API_KEY` when the computer has both (runner 0.7.2); in `extra.env` it signs in the
   team's bots and Ambient alike.
 
+## Personal bots on the team's computer
+
+One computer is enough for a person and their team. Their bots, the team's bots and the team's brain
+can share it, and teammates without a computer of their own get one without connecting anything.
+
+- **A personal bot may run on its owner's computer or on a computer of their team**, while they're in
+  the team (`mayRunOn` in `control/convex/routines.ts`). Picked by id or name like their own
+  (`computer` on create or update, the MCP routine tools); the app and MCP list the team's
+  computers next to theirs. Someone who leaves the team takes their bots off it: the computer stops
+  getting them at its next sync, and they stay asleep until they're given another computer.
+- **Nobody picks a computer:** a new bot of one's own goes on the person's only computer, or with none
+  of their own, on their team's computer (`defaultHost`); several of their own are theirs to choose
+  from (`bot_needs_computer`). A teammate's bots therefore land on the team's computer by default.
+- **The owner's computer serves the team too:** creating a team while you have a computer (the one
+  seen last, with several), or connecting a computer while you own a team that has none, makes it
+  the team's computer as well (`shareWithOwnedTeam`). The row keeps its owner (`userId`) and gets
+  the team (`teamId`); the app and `get_settings` show it as yours (`yours: true`) and the team's.
+  It runs the team's brain when the team has no server (docs/architecture.md, "A team on its own
+  computer"), the team's bots, and the people's own bots placed there.
+- **A different computer for the team:** connecting one with `team` (an owner or admin) makes it
+  the computer the team's bots run on (`teamComputer` prefers a team's own computer over its
+  owner's). The team's brain stays where its data already is: moving a team's brain between
+  computers isn't built. People's bots placed on the owner's computer stay there.
+- **When a computer is removed** its personal bots move to their owner's next computer, or their
+  team's, instead of losing theirs (`rehome`). When a team's computer is set up, its people's bots
+  that have no computer and whose owner has none of their own go there (`adoptHomeless`).
+- **Whose Claude:** a run uses the sign-in of the computer it runs on. A teammate's bot on the team's
+  computer uses the team computer's Claude plan, and on the owner's computer, the owner's.
+- **What the computer's admins can see:** a personal bot's run gets its owner's secrets and a token
+  for their own brain, on that machine, and a teammate without a computer of their own has Ambient's
+  chat there too (as on any team computer). Whoever has root there (the team's owner, or whoever runs
+  the team's computer) could read them. A person who doesn't want that connects a computer of their
+  own: their bots and chat go there first. Their brain's upkeep never runs on a computer that isn't
+  theirs.
+- **Keys:** a person's computer's stored Claude plan, API key and OpenAI key stay sealed with their
+  own key once it serves a team (`hostOwner`); a team's own computer's with the team's. Its owner
+  changes its settings as before, and the team's owners and admins may too.
+
 ## Whose Claude a computer uses
 
 - The computer can store its own Claude plan (runner 0.10.0, `install.sh` after `claude setup-token`
@@ -1596,8 +1634,9 @@ template says which rights in words (no merge rights for any).
 
 A bot of one's own always has a computer: creating one without (here, `POST /v1/app/routines`,
 the MCP tools), making a loop without one a bot, or taking a bot's computer away answers
-`400 bot_needs_computer`. A team's bots run on the team's computer (its server, or a computer
-an owner or admin connected for the team): a team's bot made while the team has none answers
+`400 bot_needs_computer` (with none given, Convex picks the person's only computer or their team's:
+"Personal bots on the team's computer"). A team's bots run on the team's computer (its server, a computer
+an owner or admin connected for the team, or its owner's computer serving it): a team's bot made while the team has none answers
 `400 team_needs_computer`, and writing to one whose team lost it, `400 no_team_server`.
 
 MCP tools: `bot_templates`, `create_bot_from_template` (made paused, as anything an AI app

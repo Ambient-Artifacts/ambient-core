@@ -42,8 +42,8 @@ export class Upkeep implements UpkeepComputers {
   constructor(private d: { routines: Pick<RoutineService, "computersOf">; computers: Pick<AmbientComputers, "connected" | "complete"> }) {}
 
   async computerFor(uid: string): Promise<UpkeepComputer | null> {
-    // A team's server runs Ambient for its people too, but a person's own notes never go there.
-    const own = (await this.d.routines.computersOf(uid)).filter((c) => c.team === null);
+    // A team's own computer runs Ambient for its people too, but a person's own notes never go there; their computer that also serves their team is still theirs.
+    const own = (await this.d.routines.computersOf(uid)).filter((c) => c.own);
     if (!own.length) return null;
     const pick = own.find((c) => this.d.computers.connected(c.id)) ?? own[0]!;
     return { id: pick.id, name: pick.name, connected: this.d.computers.connected(pick.id) };

@@ -83,7 +83,7 @@ export async function describeAccount(principal: Principal, d: AccountDeps, acto
       about: about.about,
       upkeep,
       session_rules: rules,
-      computers: computers.map((c) => ({ id: c.id, name: c.name, team: c.team?.slug ?? null, ready: c.ready, online: c.online, claude_signed_in: c.claudeSignedIn ?? null, hostname: c.hostname })),
+      computers: computers.map((c) => ({ id: c.id, name: c.name, team: c.team?.slug ?? null, yours: c.yours, ready: c.ready, online: c.online, claude_signed_in: c.claudeSignedIn ?? null, hostname: c.hostname })),
     },
   };
 }
@@ -114,7 +114,7 @@ export function registerAccountTools(server: McpServer, principal: Principal, d:
         title: "Connect a computer",
         description:
           `Connect a Linux server to Ambient: Ambient's chat, the bots and the brain's upkeep run there, with the user's own Claude plan. ${ASKED} ` +
-          "Returns one command to paste on that computer as root (curl … | sudo bash -s <code>); the code works once, for 30 minutes. The command installs only what's missing (git, Node, Claude Code), never touches what's already there, and signs Claude in. With team (its owner or an admin): the team's computer, which also runs the team's brain when the team has no server. get_settings shows the computers and whether they're online.",
+          "Returns one command to paste on that computer as root (curl … | sudo bash -s <code>); the code works once, for 30 minutes. The command installs only what's missing (git, Node, Claude Code), never touches what's already there, and signs Claude in. With team (its owner or an admin): the team's computer, which also runs the team's brain when the team has no server; the team's bots move there from its owner's computer. Without team, a computer of the owner of a team that has none serves that team too. get_settings shows the computers and whether they're online.",
         inputSchema: {
           name: z.string().trim().min(1).max(60).describe('What to call it, e.g. "Build server".'),
           team: z.string().max(80).optional().describe("A team's slug or name, for the team's computer. Leave out for the user's own."),
@@ -166,7 +166,7 @@ export function registerAccountTools(server: McpServer, principal: Principal, d:
       title: "Create a team",
       description:
         `Create a team the user owns: a shared brain for the people they invite (team_people invite). ${ASKED} ` +
-        "A new team runs on a computer of its own: connect it with connect_computer and the team's slug; until then people can join, and the brain switches on once the computer is there.",
+        "A new team runs on a computer of its own. When the user already has a computer, it becomes the team's too (its brain, its bots, and its people's own bots), until they connect a different one with connect_computer and the team's slug; otherwise people can join, and the brain switches on once a computer is there.",
       inputSchema: { name: z.string().trim().min(1).max(80) },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -174,9 +174,10 @@ export function registerAccountTools(server: McpServer, principal: Principal, d:
       if (!canChangeOwn) return readOnly();
       const out = await d.people.createTeam(principal.uid, (args as { name: string }).name);
       if (out.status !== 200) return result(`Not created: ${why(out)}`, { error: out.json }, true);
-      const t = (out.json as { team: { slug: string; name: string; server: string } }).team;
-      const next =
-        t.server === "none"
+      const t = (out.json as { team: { slug: string; name: string; server: string; computer?: { name: string } } }).team;
+      const next = t.computer
+        ? ` It runs on the user's computer "${t.computer.name}" too, with the people's own bots; a different one for the team: connect_computer (team "${t.slug}"). Invite people with team_people.`
+        : t.server === "none"
           ? ` It runs on a computer of its own: connect one with connect_computer (team "${t.slug}"). Invite people with team_people.`
           : " Invite people with team_people.";
       return result(`Created the team ${t.name} (slug "${t.slug}"); the user owns it.${next}`, out.json as Record<string, unknown>);

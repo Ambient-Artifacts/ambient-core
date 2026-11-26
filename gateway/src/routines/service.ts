@@ -51,7 +51,7 @@ const MESSAGES: Record<string, [string, number]> = {
   no_such_computer: ["There's no such computer. Connect one in the Ambient app under Loops.", 400],
   no_computer: ["This loop has no computer to run on. Pick one first.", 400],
   bots_only: ["With bots, every loop is a bot: it can't be turned back into a plain loop. Pause it instead, or delete it.", 400],
-  bot_needs_computer: ["A bot of your own runs on one of your computers, and none is picked. Connect a computer in the Ambient app (Bots, then Computers) or pick one, then try again. A team's bots run on the team's server.", 400],
+  bot_needs_computer: ["A bot of your own runs on one of your computers or your team's, and none is picked. Connect a computer in the Ambient app (Bots, then Computers) or pick one, then try again.", 400],
   no_team_server: ["The team has no computer for its bots yet. An owner or admin connects one on the team's page in the Ambient app (Computers), with the same one-line command as a computer of your own.", 400],
   team_needs_computer: ["The team has no computer for its bots yet. An owner or admin connects one on the team's page in the Ambient app (Computers), with the same one-line command as a computer of your own. Then make the bot again, or make it one of your own.", 400],
   team_routine_computer: ["A team's loops run on the team's server; leave the computer out.", 400],
@@ -224,6 +224,8 @@ interface RoutineRow {
 interface HostRow {
   id: string;
   teamId: string | null;
+  /** The person whose computer it is (also when it serves their team); null: a team's own. */
+  ownerUid: string | null;
   name: string;
   ready: boolean;
   codeExpiresAt: number | null;
@@ -283,8 +285,10 @@ export type TeamRef = { slug: string; name: string };
 export interface Computer {
   id: string;
   name: string;
-  /** A team's server (runs the team's routines), or null for one of the user's own computers. */
+  /** The team it serves (runs the team's bots and brain), or null for a computer only its owner's. */
   team: TeamRef | null;
+  /** The user's own computer: also when it serves their team (`team` set) too. */
+  yours: boolean;
   /** False until `ambient-runner setup` ran with its code. */
   ready: boolean;
   online: boolean;
@@ -516,11 +520,12 @@ export class RoutineService {
    * Where Ambient can run for a user, in order: their own computers, then their teams' servers
    * (Ambient's own machine for the team, one session per person there).
    */
-  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null; teamId: string | null }[]> {
+  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null; teamId: string | null; own: boolean }[]> {
     const teams = ((await this.d.teamsOf?.(uid).catch(() => [])) ?? []).filter((t) => t.status === "active");
     const out = (await this.d.control.q(api.routines.list, { uid: uid as never, teamIds: teams.map((t) => t.id) as never })) as unknown as { hosts: HostRow[] };
     const ready = out.hosts.filter((h) => h.ready);
-    return [...ready.filter((h) => !h.teamId), ...ready.filter((h) => h.teamId)].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null, teamId: h.teamId ? String(h.teamId) : null }));
+    // `own`: theirs, also when it serves their team; a team's own computer isn't (their notes' upkeep never goes there).
+    return [...ready.filter((h) => isOwn(h, uid)), ...ready.filter((h) => !isOwn(h, uid))].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null, teamId: h.teamId ? String(h.teamId) : null, own: isOwn(h, uid) }));
   }
 
   get keys(): RoutineKeys {
@@ -575,6 +580,7 @@ export class RoutineService {
       id: h.id,
       name: h.name,
       team: team ? { slug: team.slug, name: team.name } : null,
+      yours: Boolean(actor && isOwn(h, actor.uid)),
       ready: h.ready,
       online: h.ready && h.lastSeenAt !== null && this.now() - h.lastSeenAt < OFFLINE_AFTER_MS,
       setupCodeExpiresAt: h.codeExpiresAt,
@@ -709,14 +715,15 @@ export class RoutineService {
     return { id: r.id, teamId: r.teamId, createdBy: r.createdBy, bot: r.bot, name: r.name };
   }
 
-  /** One of the user's own computers by id or name (case-insensitive); the only ready one when `ref` is undefined. */
+  /**
+   * A computer for a bot of the user's own, by id or name (case-insensitive): one of theirs, or a
+   * ready computer of their team (docs/bots.md, "Personal bots on the team's computer").
+   * Undefined `ref`: Convex picks (their only computer, else their team's).
+   */
   private async resolveComputer(actor: Actor, ref: string | null | undefined): Promise<string | null | undefined> {
     if (ref === null) return null;
-    const hosts = (await this.rows(actor)).hosts.filter((h) => !h.teamId);
-    if (ref === undefined) {
-      const ready = hosts.filter((h) => h.ready);
-      return ready.length === 1 ? ready[0]!.id : undefined;
-    }
+    if (ref === undefined) return undefined;
+    const hosts = (await this.rows(actor)).hosts.filter((h) => isOwn(h, actor.uid) || (h.teamId && h.ready));
     const want = ref.toLowerCase();
     const h = hosts.find((x) => x.id === ref) ?? hosts.find((x) => x.name.toLowerCase() === want || x.info?.hostname.toLowerCase() === want);
     if (!h) throw refused("no_such_computer");
@@ -737,8 +744,9 @@ export class RoutineService {
     // Every routine is a bot (docs/bots.md, "Loops are bots"): one made without bot settings gets
     // a new bot's defaults.
     if (!input.bot) input = { ...input, bot: {} };
-    // A bot of one's own without a computer would only ever sit there asleep: refused up front.
-    if (!team && !hostId) throw refused("bot_needs_computer");
+    // A bot of one's own without a computer would only ever sit there asleep: Convex gives it
+    // its owner's only computer or their team's, or refuses it (bot_needs_computer).
+    if (!team && hostId === null) throw refused("bot_needs_computer");
     const sealed = await this.d.keys.seal(owner, "routine:prompt", input.prompt);
     const out = await this.d.control.m(api.routines.create, {
       uid: actor.uid as never,
@@ -979,15 +987,18 @@ export class RoutineService {
     const want = ref.toLowerCase();
     const h = hosts.find((x) => x.id === ref) ?? hosts.find((x) => x.name.toLowerCase() === want || x.info?.hostname.toLowerCase() === want);
     if (!h) throw refused("no_such_computer");
-    if (h.teamId) {
+    // Its owner changes their computer, also one that serves their team; a team's own, its owners and admins.
+    if (isOwn(h, actor.uid)) {
+      if (!actor.canWritePersonal) throw refused("read_only");
+    } else if (h.teamId) {
       const team = this.teamOf(actor, h.teamId);
       if (!team || !isManager(team) || !actor.canWriteTeams) throw refused("claude_admins_only");
-    } else if (!actor.canWritePersonal) throw refused("read_only");
+    } else throw refused("no_such_computer");
     return h;
   }
 
   private computerOwner(h: HostRow, actor: Actor): Owner {
-    return h.teamId ? { kind: "team", teamId: h.teamId } : { kind: "user", uid: actor.uid };
+    return hostOwner({ uid: h.ownerUid ?? (h.teamId ? null : actor.uid), teamId: h.teamId });
   }
 
   private afterClaude(actor: Actor, out: { ok: boolean; error?: string; host?: unknown }): Computer {
@@ -1095,7 +1106,7 @@ export class RoutineService {
   async hostOpenAI(host: Host): Promise<{ version: string | null; env: Record<string, string> }> {
     const c = await this.d.control.q(api.routines.hostOpenAI, { hostId: host.id as never });
     if (!c) return { version: null, env: {} };
-    const owner: Owner = c.teamId ? { kind: "team", teamId: String(c.teamId) } : { kind: "user", uid: String(c.uid) };
+    const owner = hostOwner({ uid: c.uid ? String(c.uid) : null, teamId: c.teamId ? String(c.teamId) : null });
     return { version: `key:${c.at}`, env: { CODEX_API_KEY: await this.d.keys.open(owner, "host:openai:key", c.iv, c.ct) } };
   }
 
@@ -1107,11 +1118,11 @@ export class RoutineService {
   async hostSetClaude(host: Host, kind: "plan" | "key", token: string): Promise<void> {
     const t = pastedToken(token);
     if (!/^[A-Za-z0-9_-]+$/.test(t) || (kind === "plan" ? !t.startsWith("sk-ant-oat") : !t.startsWith("sk-ant-api"))) throw refused("bad_token");
-    const owner: Owner = host.teamId ? { kind: "team", teamId: host.teamId } : { kind: "user", uid: host.uid! };
+    const owner = hostOwner(host);
     const sealed = await this.d.keys.seal(owner, `host:claude:${kind}`, t);
-    const out = host.teamId
-      ? await this.d.control.m(api.routines.setClaudeByHost, { hostId: host.id as never, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() })
-      : await this.d.control.m(api.routines.setClaude, { uid: host.uid as never, id: host.id, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() });
+    const out = host.uid
+      ? await this.d.control.m(api.routines.setClaude, { uid: host.uid as never, id: host.id, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() })
+      : await this.d.control.m(api.routines.setClaudeByHost, { hostId: host.id as never, kind, iv: sealed.iv, ct: sealed.ciphertext, now: this.now() });
     if (!out.ok) throw refused(out.error ?? "bad_request");
     this.signedIn.set(host.id, true);
     this.claudeBroken.delete(host.id);
@@ -1121,8 +1132,8 @@ export class RoutineService {
   async hostClaude(host: Host): Promise<{ version: string | null; env: Record<string, string> }> {
     const c = await this.d.control.q(api.routines.hostClaude, { hostId: host.id as never });
     if (!c) return { version: null, env: {} };
-    // A personal computer's is sealed with its owner's key, a team server's with the team's.
-    const owner: Owner = c.teamId ? { kind: "team", teamId: String(c.teamId) } : { kind: "user", uid: String(c.uid) };
+    // A person's computer's is sealed with their key (also when it serves their team), a team's own with the team's.
+    const owner = hostOwner({ uid: c.uid ? String(c.uid) : null, teamId: c.teamId ? String(c.teamId) : null });
     const value = await this.d.keys.open(owner, `host:claude:${c.kind}`, c.iv, c.ct);
     return { version: `${c.kind}:${c.at}`, env: c.kind === "plan" ? { CLAUDE_CODE_OAUTH_TOKEN: value } : { ANTHROPIC_API_KEY: value } };
   }
@@ -1147,7 +1158,8 @@ export class RoutineService {
     if (!out.ok && out.error === "invalid_code") out = await this.claim(legacy!, sha256Hex(token), info);
     if (!out.ok) throw refused(out.error);
     if (info.claudeSignedIn !== undefined) this.signedIn.set(String(out.host.id), info.claudeSignedIn);
-    return { token, computer: { id: String(out.host.id), name: out.host.name, team: Boolean(out.host.teamId) } };
+    // `team`: a team's own computer; a person's that also serves their team is theirs.
+    return { token, computer: { id: String(out.host.id), name: out.host.name, team: Boolean(out.host.teamId && !out.host.uid) } };
   }
 
   async sync(
@@ -1445,4 +1457,18 @@ export const FIRST_RUN =
 /** The earlier of two times; null when both are. */
 function soonest(a: number | null, b: number | null): number | null {
   return a === null ? b : b === null ? a : Math.min(a, b);
+}
+
+/** A person's computer, also when it serves their team; a team's own computer is nobody's. */
+function isOwn(h: { teamId: string | null; ownerUid: string | null }, uid: string): boolean {
+  return h.ownerUid ? h.ownerUid === uid : !h.teamId;
+}
+
+/**
+ * Whose key seals what is stored for a computer (its Claude plan or key, its OpenAI key): its
+ * owner's for a person's computer, also once it serves their team (what was stored before stays
+ * readable); the team's for a team's own.
+ */
+function hostOwner(h: { uid: string | null; teamId: string | null }): Owner {
+  return h.uid ? { kind: "user", uid: h.uid } : { kind: "team", teamId: h.teamId! };
 }

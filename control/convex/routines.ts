@@ -1,5 +1,5 @@
 // Routines: prompts Claude Code runs on a schedule. A personal routine runs on one of the
-// user's computers; a team's runs on the team's server. The gateway seals prompts, run
+// user's computers, or on their team's computer; a team's runs on the team's computer. The gateway seals prompts, run
 // summaries and secrets with the owner's data key, and decides who may do what: it passes the
 // user's id and the teams they may read (or, for changes, manage), and these functions only
 // touch rows owned by one of those. The computer (a "host") reads its routines and reports
@@ -54,6 +54,8 @@ function hostShape(h: Doc<"routineHosts">) {
   return {
     id: h._id,
     teamId: h.teamId ?? null,
+    /** The person whose computer it is; set on a person's computer also when it's their team's (null: a team's own). */
+    ownerUid: h.userId ?? null,
     name: h.name,
     ready: Boolean(h.tokenHash),
     codeExpiresAt: h.tokenHash ? null : (h.codeExpiresAt ?? null),
@@ -111,10 +113,53 @@ export async function routineFor(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, 
   return (r.teamId ? teamIds.includes(r.teamId) : r.userId === uid) ? r : null;
 }
 
+/** Whether `uid` is in `teamId` right now (any role). */
+async function isMember(ctx: { db: QueryCtx["db"] }, teamId: Id<"teams">, uid: Id<"users">): Promise<boolean> {
+  return !!(await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid)).unique());
+}
+
+async function activeTeam(ctx: { db: QueryCtx["db"] }, teamId: Id<"teams"> | undefined): Promise<boolean> {
+  return !!teamId && (await ctx.db.get(teamId))?.status === "active";
+}
+
+/** One of the user's own computers (also one that is their team's computer too). */
 async function ownHost(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, id: string) {
   const hostId = ctx.db.normalizeId("routineHosts", id);
   const h = hostId ? await ctx.db.get(hostId) : null;
-  return h && h.userId === uid && !h.teamId ? h : null;
+  return h && h.userId === uid ? h : null;
+}
+
+/**
+ * Whether a personal bot of `uid` may run on `h` (docs/bots.md, "Personal bots on the team's
+ * computer"): their own computer, or a computer of a team they're in, while they're in it.
+ */
+async function mayRunOn(ctx: { db: QueryCtx["db"] }, h: Doc<"routineHosts">, uid: Id<"users">): Promise<boolean> {
+  if (h.userId === uid) return true;
+  return !!h.teamId && Boolean(h.tokenHash) && (await activeTeam(ctx, h.teamId)) && (await isMember(ctx, h.teamId, uid));
+}
+
+/** A computer the user may put a bot of their own on, by id: theirs, or their team's. */
+async function usableHost(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, id: string) {
+  const hostId = ctx.db.normalizeId("routineHosts", id);
+  const h = hostId ? await ctx.db.get(hostId) : null;
+  return h && (await mayRunOn(ctx, h, uid)) ? h : null;
+}
+
+/**
+ * Where a bot of `uid`'s own goes when nobody picked a computer: their only computer, or with
+ * none of their own, their team's computer. With several of their own it's theirs to pick
+ * (`any`: the one seen last, for bots whose computer was just removed). `exclude`: not that one.
+ */
+export async function defaultHost(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, opts: { exclude?: Id<"routineHosts">; any?: boolean } = {}): Promise<Doc<"routineHosts"> | null> {
+  const own = (await ctx.db.query("routineHosts").withIndex("by_user", (q) => q.eq("userId", uid)).take(MAX_HOSTS * 2)).filter((h) => h.tokenHash && h._id !== opts.exclude);
+  if (own.length === 1 || (own.length > 1 && opts.any)) return own.sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0))[0]!;
+  if (own.length) return null;
+  for (const m of await ctx.db.query("members").withIndex("by_user", (q) => q.eq("userId", uid)).take(20)) {
+    if (!(await activeTeam(ctx, m.teamId))) continue;
+    const h = await teamComputer(ctx, m.teamId);
+    if (h && h._id !== opts.exclude) return h;
+  }
+  return null;
 }
 
 async function personalRoutines(ctx: { db: QueryCtx["db"] }, uid: Id<"users">) {
@@ -133,10 +178,11 @@ export const list = query({
   handler: async (ctx, { secret, uid, teamIds }) => {
     assertService(secret);
     const routines = await personalRoutines(ctx, uid);
-    const hosts = (await ctx.db.query("routineHosts").withIndex("by_user", (q) => q.eq("userId", uid)).take(MAX_HOSTS * 2)).filter((h) => !h.teamId);
+    // Their own computers (one may be their team's too), and their teams' (each once).
+    const hosts = await ctx.db.query("routineHosts").withIndex("by_user", (q) => q.eq("userId", uid)).take(MAX_HOSTS * 2);
     for (const teamId of teamIds) {
       routines.push(...(await teamRoutines(ctx, teamId)));
-      hosts.push(...(await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(5)));
+      for (const h of await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(5)) if (!hosts.some((x) => x._id === h._id)) hosts.push(h);
     }
     // A team bot's thread is a group chat: read is each person's own (`botReads`).
     const shapes = [];
@@ -157,11 +203,13 @@ export const list = query({
 
 /**
  * The computer a team's bots run on: one set up (with a token) among the team's. A code still
- * waiting for setup isn't one, whichever row comes first.
+ * waiting for setup isn't one, whichever row comes first. A computer connected for the team
+ * wins over its owner's computer that serves the team too (docs/bots.md, "Personal bots on the
+ * team's computer"): picking a different one for the team moves the team's bots there.
  */
 export async function teamComputer(ctx: { db: QueryCtx["db"] }, teamId: Id<"teams">): Promise<Doc<"routineHosts"> | null> {
-  const hosts = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(MAX_HOSTS * 2);
-  return hosts.find((h) => h.tokenHash) ?? null;
+  const ready = (await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(MAX_HOSTS * 2)).filter((h) => h.tokenHash);
+  return ready.find((h) => !h.userId) ?? ready[0] ?? null;
 }
 
 export const create = mutation({
@@ -189,8 +237,13 @@ export const create = mutation({
     if (count >= MAX_ROUTINES) return { ok: false as const, error: "too_many_routines" };
     let host: Doc<"routineHosts"> | null = null;
     if (hostId && !teamId) {
-      host = await ownHost(ctx, uid, hostId);
+      host = await usableHost(ctx, uid, hostId);
       if (!host) return { ok: false as const, error: "no_such_computer" };
+    }
+    // A bot of one's own that nobody gave a computer: their only one, or their team's.
+    if (!teamId && !host && fields.bot) {
+      host = await defaultHost(ctx, uid);
+      if (!host) return { ok: false as const, error: "bot_needs_computer" };
     }
     // A team's bot without a computer for the team's bots would only ever sit there asleep (as a
     // personal one without a computer, bot_needs_computer): refused up front.
@@ -240,7 +293,7 @@ export const update = mutation({
     if (hostId !== undefined && !r.teamId) {
       if (hostId === null) patch.hostId = undefined;
       else {
-        const host = await ownHost(ctx, uid, hostId);
+        const host = await usableHost(ctx, uid, hostId);
         if (!host) return { ok: false as const, error: "no_such_computer" };
         patch.hostId = host._id;
       }
@@ -339,19 +392,63 @@ export const addTeamHost = mutation({
   },
 });
 
-/** Remove one of the user's computers. Its routines stay, without a computer, until they're given another. */
+/**
+ * Remove one of the user's computers (also one that was their team's too). Its bots move to their
+ * owner's other computer, or their team's (`defaultHost`); without one they stay, asleep, until
+ * they're given one.
+ */
 export const removeHost = mutation({
   args: { ...secretArg, uid: v.id("users"), id: v.string(), now: v.number() },
   handler: async (ctx, { secret, uid, id, now }) => {
     assertService(secret);
     const h = await ownHost(ctx, uid, id);
     if (!h) return { ok: false as const, error: "no_such_computer" };
-    const routines = await ctx.db.query("routines").withIndex("by_host", (q) => q.eq("hostId", h._id)).take(MAX_ROUTINES * 2);
-    for (const r of routines) await ctx.db.patch(r._id, { hostId: undefined, updatedAt: now });
+    await rehome(ctx, h._id, now);
     await ctx.db.delete(h._id);
     return { ok: true as const };
   },
 });
+
+/** The personal bots on a computer that is going away, each to its owner's next computer (or none). */
+async function rehome(ctx: MutationCtx, hostId: Id<"routineHosts">, now: number) {
+  const routines = await ctx.db.query("routines").withIndex("by_host", (q) => q.eq("hostId", hostId)).take(MAX_ROUTINES * 20);
+  for (const r of routines) {
+    if (r.teamId) continue;
+    const next = await defaultHost(ctx, r.userId, { exclude: hostId, any: true });
+    await ctx.db.patch(r._id, { hostId: next?._id, updatedAt: now });
+  }
+}
+
+/**
+ * A team's computer was just set up: the bots of its people that have no computer (theirs was
+ * removed) and no computer of their own go there, as a bot made now would.
+ */
+async function adoptHomeless(ctx: MutationCtx, teamId: Id<"teams">, now: number) {
+  const host = await teamComputer(ctx, teamId);
+  if (!host) return;
+  for (const m of await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(200)) {
+    const homeless = (await personalRoutines(ctx, m.userId)).filter((r) => r.bot && !r.hostId);
+    if (!homeless.length || (await defaultHost(ctx, m.userId))?._id !== host._id) continue;
+    for (const r of homeless) await ctx.db.patch(r._id, { hostId: host._id, updatedAt: now });
+  }
+}
+
+/**
+ * A person's computer serves their team too (docs/bots.md, "Personal bots on the team's
+ * computer"): when they own a team that has no computer of its own yet. Called when they connect
+ * one and when they create the team.
+ */
+export async function shareWithOwnedTeam(ctx: MutationCtx, h: Doc<"routineHosts">, now: number): Promise<Id<"teams"> | null> {
+  if (!h.userId || h.teamId || !h.tokenHash) return null;
+  const uid = h.userId;
+  for (const m of await ctx.db.query("members").withIndex("by_user", (q) => q.eq("userId", uid)).take(20)) {
+    if (m.role !== "owner" || !(await activeTeam(ctx, m.teamId)) || (await teamComputer(ctx, m.teamId))) continue;
+    await ctx.db.patch(h._id, { teamId: m.teamId });
+    await adoptHomeless(ctx, m.teamId, now);
+    return m.teamId;
+  }
+  return null;
+}
 
 /**
  * Staff: a computer waiting for setup, for a user found by email or for a team's server by slug
@@ -363,7 +460,14 @@ export const staffAddHost = internalMutation({
     if (team) {
       const t = await ctx.db.query("teams").withIndex("by_slug", (q) => q.eq("slug", team)).unique();
       if (!t) throw new Error(`no team ${team}`);
-      for (const old of await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", t._id)).collect()) await ctx.db.delete(old._id);
+      // Its owner's computer that served the team stays theirs; the team's own rows go.
+      for (const old of await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", t._id)).collect()) {
+        if (old.userId) await ctx.db.patch(old._id, { teamId: undefined });
+        else {
+          await rehome(ctx, old._id, Date.now());
+          await ctx.db.delete(old._id);
+        }
+      }
       const id = await ctx.db.insert("routineHosts", { teamId: t._id, name, codeHash, codeExpiresAt: expiresAt, createdAt: Date.now() });
       return { id, team: t.slug };
     }
@@ -490,7 +594,12 @@ export const claimHost = mutation({
     if (!h || h.tokenHash) return { ok: false as const, error: "invalid_code" };
     if ((h.codeExpiresAt ?? 0) < now) return { ok: false as const, error: "expired_code" };
     await ctx.db.patch(h._id, { tokenHash, codeHash: undefined, codeExpiresAt: undefined, info, lastSeenAt: now });
-    return { ok: true as const, host: { id: h._id, uid: h.userId ?? null, teamId: h.teamId ?? null, name: h.name } };
+    const claimed = (await ctx.db.get(h._id))!;
+    // A person's computer serves the team they own while it has none; a team's computer takes in
+    // its people's bots that lost theirs.
+    const shared = await shareWithOwnedTeam(ctx, claimed, now);
+    if (claimed.teamId) await adoptHomeless(ctx, claimed.teamId, now);
+    return { ok: true as const, host: { id: h._id, uid: h.userId ?? null, teamId: shared ?? h.teamId ?? null, name: h.name } };
   },
 });
 
@@ -500,21 +609,39 @@ export const hostByToken = query({
     assertService(secret);
     const h = await ctx.db.query("routineHosts").withIndex("by_token", (q) => q.eq("tokenHash", tokenHash)).unique();
     if (!h) return null;
-    if (h.teamId) {
-      const team = await ctx.db.get(h.teamId);
-      if (!team || team.status !== "active") return null;
-    }
-    return { id: h._id, uid: h.userId ?? null, teamId: h.teamId ?? null, name: h.name };
+    // A team's own computer goes with its team; a person's computer that served it stays theirs.
+    const teamOk = !h.teamId || (await activeTeam(ctx, h.teamId));
+    if (!teamOk && !h.userId) return null;
+    return { id: h._id, uid: h.userId ?? null, teamId: teamOk ? (h.teamId ?? null) : null, name: h.name };
   },
 });
 
-/** The routines a computer runs: its user's that name it, or all of its team's. */
-async function hostRoutines(ctx: { db: QueryCtx["db"] }, h: Doc<"routineHosts">) {
-  return h.teamId ? teamRoutines(ctx, h.teamId) : ctx.db.query("routines").withIndex("by_host", (q) => q.eq("hostId", h._id)).take(MAX_ROUTINES * 2);
+/** Whether `h` is the computer its team's bots run on now. */
+async function runsTeamBots(ctx: { db: QueryCtx["db"] }, h: Doc<"routineHosts">): Promise<boolean> {
+  return !!h.teamId && (await activeTeam(ctx, h.teamId)) && (await teamComputer(ctx, h.teamId))?._id === h._id;
 }
 
-function runsOn(h: Doc<"routineHosts">, r: Doc<"routines">) {
-  return h.teamId ? r.teamId === h.teamId : r.hostId === h._id && !r.teamId;
+/**
+ * The routines a computer runs: the personal bots placed on it whose owners may still use it
+ * (its owner's; on a team's computer, its people's), and all of its team's when it is the
+ * computer the team's bots run on.
+ */
+async function hostRoutines(ctx: { db: QueryCtx["db"] }, h: Doc<"routineHosts">) {
+  const placed = await ctx.db.query("routines").withIndex("by_host", (q) => q.eq("hostId", h._id)).take(MAX_ROUTINES * 20);
+  const allowed = new Map<string, boolean>();
+  const personal: Doc<"routines">[] = [];
+  for (const r of placed) {
+    if (r.teamId) continue;
+    const key = String(r.userId);
+    if (!allowed.has(key)) allowed.set(key, await mayRunOn(ctx, h, r.userId));
+    if (allowed.get(key)) personal.push(r);
+  }
+  return (await runsTeamBots(ctx, h)) ? [...(await teamRoutines(ctx, h.teamId!)), ...personal] : personal;
+}
+
+async function runsOn(ctx: { db: QueryCtx["db"] }, h: Doc<"routineHosts">, r: Doc<"routines">) {
+  if (r.teamId) return r.teamId === h.teamId && (await runsTeamBots(ctx, h));
+  return r.hostId === h._id && (await mayRunOn(ctx, h, r.userId));
 }
 
 /** The computer's routines (with their run requests); records that it checked in. */
@@ -550,7 +677,7 @@ export const startRun = mutation({
     const h = await ctx.db.get(hostId);
     const routineId = ctx.db.normalizeId("routines", id);
     const r = routineId ? await ctx.db.get(routineId) : null;
-    if (!h || !r || !runsOn(h, r)) return { ok: false as const, error: "no_such_routine" };
+    if (!h || !r || !(await runsOn(ctx, h, r))) return { ok: false as const, error: "no_such_routine" };
     const stale = await ctx.db
       .query("routineRuns")
       .withIndex("by_routine", (q) => q.eq("routineId", r._id))
@@ -738,13 +865,14 @@ export const runOwner = query({
 
 // ---- whose Claude a computer uses (docs/bots.md) ----
 
-/** A computer the user may set Claude for: their own, or the server of a team they manage. */
+/** A computer the user may set Claude for: their own (also one serving their team), or the computer of a team they manage. */
 async function claudeHost(ctx: { db: QueryCtx["db"] }, uid: Id<"users">, id: string) {
   const hostId = ctx.db.normalizeId("routineHosts", id);
   const h = hostId ? await ctx.db.get(hostId) : null;
   if (!h) return null;
+  if (h.userId === uid) return h;
   if (h.teamId) return (await manages(ctx, uid, h.teamId)) ? h : null;
-  return h.userId === uid ? h : null;
+  return null;
 }
 
 /** Store a plan token or an API key (sealed by the gateway) and use it. */
