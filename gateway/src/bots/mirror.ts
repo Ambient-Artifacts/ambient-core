@@ -326,7 +326,7 @@ export class BotMirror {
       const out = await this.d.teams.mirrorBots(team, body);
       const repo = (out.json.repo ?? null) as { url?: string; status?: string; lastError?: string | null } | null;
       if (out.status === 409) return { at, state: "read_only", repo: repo?.url ?? null, folder: null, error: null };
-      if (out.status !== 200) return { at, state: "error", repo: repo?.url ?? null, folder: null, error: String(out.json.message ?? `The team's server answered ${out.status}.`) };
+      if (out.status !== 200) return { at, state: "error", repo: repo?.url ?? null, folder: null, error: String(out.json.message ?? refusedFile(body.bots, out.json.issues) ?? `The team's server answered ${out.status}.`) };
       const folder = typeof out.json.folder === "string" ? out.json.folder : BOTS_DIR;
       // Mirrored into the brain's git on the server; pushing to the team's repo may have failed.
       if (repo?.status === "error") return { at, state: "error", repo: repo.url ?? null, folder, error: repo.lastError ?? "Pushing to the team's repo failed." };
@@ -415,4 +415,20 @@ function authorOf(changes: FolderChange[]): string | null {
   if (!changes.length || changes.some((c) => c.by.kind !== "user")) return null;
   const names = new Set(changes.map((c) => c.by.name).filter((n): n is string => Boolean(n)));
   return names.size === 1 ? [...names][0]! : null;
+}
+
+/**
+ * A team server from before a file kind existed (GOAL.md, SOUL.md) refuses the whole mirror with
+ * a bare 400 and the failing fields (bots.<i>.files.<j>.path): name the file, so the app says
+ * what to do instead of "400".
+ */
+export function refusedFile(bots: { slug: string; files: { path: string }[] }[], issues: unknown): string | null {
+  if (!Array.isArray(issues)) return null;
+  for (const issue of issues) {
+    const m = /^bots\.(\d+)\.files\.(\d+)\.path$/.exec(String(issue));
+    const bot = m ? bots[Number(m[1])] : undefined;
+    const path = m ? bot?.files[Number(m[2])]?.path : undefined;
+    if (bot && path) return `The team's server doesn't take ${path} (${bot.slug}) yet: it needs an update. The bot itself is fine.`;
+  }
+  return null;
 }

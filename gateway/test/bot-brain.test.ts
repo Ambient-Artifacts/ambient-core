@@ -68,6 +68,22 @@ describe("a bot's run", () => {
     const logged = text(await mcp.callTool({ name: "log_work", arguments: { title: "Reviewed PR 12", summary: "Reviewed the login retry change and asked for a test.", project: "none" } }));
     expect(logged).not.toMatch(/can't/);
 
+    // Its own files: told in its thread that its goal or tone changed, it updates them itself.
+    const goal = text(await mcp.callTool({ name: "update_my_file", arguments: { path: "GOAL.md", content: "Every open PR reviewed within a day.\n", why: "Lena asked me to own review speed." } }));
+    expect(goal).toContain("Saved your GOAL.md");
+    const soul = text(await mcp.callTool({ name: "update_my_file", arguments: { path: "SOUL.md", content: "Short, casual, English.\n", why: "Lena wants shorter answers." } }));
+    expect(soul).toContain("Saved your SOUL.md");
+    const read = await appCall(s, lena.access_token, "GET", `/v1/app/routines/${botId}/files/content?path=GOAL.md`);
+    expect(JSON.stringify(read.json)).toContain("Every open PR reviewed within a day.");
+    expect(JSON.stringify(read.json)).toContain("Reviewer");
+    // Memory stays the run's own file, and the job can't be emptied.
+    expect(text(await mcp.callTool({ name: "update_my_file", arguments: { path: "memory.md", content: "x", why: "y" } }))).toContain("out folder");
+    expect(text(await mcp.callTool({ name: "update_my_file", arguments: { path: "AGENTS.md", content: " ", why: "y" } }))).toContain("can't be empty");
+    const job = text(await mcp.callTool({ name: "update_my_file", arguments: { path: "AGENTS.md", content: "Review the open pull requests, and watch how merged ones do.\n", why: "Lena added watching merged PRs." } }));
+    expect(job).toContain("Saved your AGENTS.md");
+    const agents = await appCall(s, lena.access_token, "GET", `/v1/app/routines/${botId}/files/content?path=AGENTS.md`);
+    expect(JSON.stringify(agents.json)).toContain("watch how merged ones do");
+
     await hostCall(host, "POST", `/v1/host/runs/${runId}`, { status: "succeeded", summary: "Reviewed PR 12." });
     await expect(mcpClient(`${s.origin}/mcp`, runToken)).rejects.toThrow();
   });

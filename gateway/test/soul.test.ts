@@ -48,7 +48,7 @@ describe("a bot's SOUL.md", () => {
     expect(files.map((f) => f.path)).toEqual(["SOUL.md", "AGENTS.md", "GOAL.md", "memory.md"]);
     expect(files[0]!.version).toBe(0);
     const before = (await hostCall(host, "POST", `/v1/host/routines/${bot}/runs`)).json as unknown as Start;
-    expect(before.workspace!.system).not.toContain("SOUL.md");
+    expect(before.workspace!.system).not.toContain("How you talk and behave (SOUL.md)");
     await hostCall(host, "POST", `/v1/host/runs/${before.run.id}`, { status: "succeeded", summary: "ok" });
 
     await call("PUT", `/v1/app/routines/${bot}/files/content?path=SOUL.md`, { content: "Warm, short, no emojis.", why: "her taste" });

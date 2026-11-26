@@ -300,7 +300,7 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     : "";
   const general = (canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS) + (defaultRule ? `\n${defaultRule}` : "");
   const botNote = principal.bot
-    ? `You're the bot "${principal.bot.name}". You read the brain like any member of the ${principal.personal ? "owner's teams" : "team"} would, and you can't change its pages: when one is wrong, send suggest_correction; when you finished meaningful work, log it with log_work. Both say they came from you.`
+    ? `You're the bot "${principal.bot.name}". You read the brain like any member of the ${principal.personal ? "owner's teams" : "team"} would, and you can't change its pages: when one is wrong, send suggest_correction; when you finished meaningful work, log it with log_work. Both say they came from you. Your own GOAL.md, AGENTS.md, SOUL.md and skills you change with update_my_file, when your owner tells you something that belongs there.`
     : "";
   const instructions = [general, botNote, personal].filter(Boolean).join("\n\n");
   const server = new McpServer({ name: "ambient", version }, { instructions });
@@ -354,6 +354,45 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
           const out = await teams.postNews(owner, bot.routineId, said);
           const where = out.channel.name ? out.channel.name : "your Teams channel";
           return { content: [{ type: "text" as const, text: `Posted in ${where}. Replies in that thread reach you.` }], structuredContent: { posted: true, channel: out.channel } };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
+        }
+      },
+    );
+  }
+  // A bot keeps its own files up to date when its owner tells it to (2026-11-26: told in its thread
+  // that its job and goal changed, a bot could only write memory.md, and its GOAL.md stayed empty).
+  if (principal.bot && folders) {
+    const files = folders.files;
+    const bot = principal.bot;
+    const actor = {
+      uid: principal.uid,
+      teams: principal.teams,
+      personal: principal.personal,
+      canWritePersonal: principal.personal && principal.scopes.has("personal:write"),
+      canWriteTeams: principal.scopes.has("team:write"),
+    };
+    const by = { kind: "bot" as const, name: bot.name };
+    server.registerTool(
+      "update_my_file",
+      {
+        title: "Change one of your own files",
+        description:
+          "Change one of your own files in Ambient, when your owner tells you something that belongs there: GOAL.md (the outcome you own: the result in one sentence, the metric and how you measure it, the target, by when, your limits), AGENTS.md (your job: what you do and how), SOUL.md (how you talk and behave: tone, length, language), or a skill (skills/<name>/SKILL.md: when to use it, then how). Send the whole new file, keeping what still holds. Only what your owner said or clearly agreed to; when it's unclear what they want there, ask first. Takes effect from your next run (follow it already in this one). Every change is a version your owner sees and can undo in the app; tell them in your answer what you changed. Not memory.md (that's the memory.md in your run's out folder, which you change with your file tools), never secrets.",
+        inputSchema: {
+          path: z.string().max(200).describe("GOAL.md, AGENTS.md, SOUL.md, or skills/<name>/<file>."),
+          content: z.string().max(70_000).describe("The whole new file."),
+          why: z.string().min(1).max(300).describe("One short sentence your owner reads: what changed and why (e.g. \"you asked me to also monitor follow-ups in real chats\")."),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ path, content, why }: { path: string; content: string; why: string }) => {
+        try {
+          const p = path.trim();
+          if (p === "memory.md") return { content: [{ type: "text" as const, text: "Your memory is the memory.md in your run's out folder (your instructions say where): change it there with your file tools." }], isError: true };
+          if (p === "AGENTS.md" && !content.trim()) return { content: [{ type: "text" as const, text: "AGENTS.md is your job: it can't be empty. Send the whole new file." }], isError: true };
+          const f = await files.write(actor, bot.routineId, p, content, by, why, `bot:${bot.routineId}`);
+          return { content: [{ type: "text" as const, text: `Saved your ${f.path} (version ${f.version}). It applies from your next run; your owner can see and undo it under Files.` }], structuredContent: { file: { path: f.path, version: f.version } } };
         } catch (err) {
           return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
         }
