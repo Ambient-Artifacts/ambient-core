@@ -4,7 +4,8 @@
 // bot's thread says so, where its owner talks to it.
 import { api } from "../control.ts";
 import type { Actor, RoutineService } from "../routines/service.ts";
-import { AGENTS, FolderError, MEMORY, checkPath, type Author, type BotFolder, type FileInfo, type FileView, type Handoff } from "./folder.ts";
+import { AGENTS, FolderError, MEMORY, checkPath, type Author, type BotFolder, type FileInfo, type FileView, type Handoff, type Proposal } from "./folder.ts";
+import { saysYes } from "./decisions.ts";
 import type { Owner } from "../routines/keys.ts";
 import { sealMessage } from "./messages.ts";
 import type { BotMirror, MirrorStatus } from "./mirror.ts";
@@ -93,6 +94,61 @@ export class BotFiles {
     }
     const owner: Owner = bot.teamId ? { kind: "team", teamId: bot.teamId } : { kind: "user", uid: bot.uid };
     return this.d.folder.write(owner, bot.routineId, p, content, by, why);
+  }
+
+  /**
+   * A bot offers new versions of its own files (propose_my_change): kept exactly as offered, next
+   * to the question it asked, until its owner answers. Checked now, so Update can't fail on a path.
+   */
+  /** Refuses an offer that couldn't be saved as it is (before the question goes out). */
+  checkOffer(files: { path: string; content: string }[]): void {
+    if (!files.length) throw new FolderError("bad_path", "Offer at least one file.");
+    const seen = new Set<string>();
+    for (const f of files) {
+      const path = checkPath(f.path);
+      if (seen.has(path)) throw new FolderError("bad_path", `${path} is in the offer twice.`);
+      seen.add(path);
+      if (path === MEMORY) throw new FolderError("bad_path", "memory.md is yours to keep in your run's out folder: don't propose it.");
+      if (path === AGENTS && !f.content.trim()) throw new FolderError("bad_path", "AGENTS.md is your job: it can't be empty.");
+    }
+  }
+
+  async proposeOwn(bot: { routineId: string; teamId?: string | null; uid: string; name: string }, p: Proposal): Promise<void> {
+    this.checkOffer(p.files);
+    const owner: Owner = bot.teamId ? { kind: "team", teamId: bot.teamId } : { kind: "user", uid: bot.uid };
+    await this.d.folder.propose(owner, bot.routineId, p, { kind: "bot", name: bot.name });
+  }
+
+  /** The bot's offer waiting on this question, if any (BotService asks before an answer is posted). */
+  async pendingFor(actor: Actor, id: string): Promise<Proposal | null> {
+    const f = await this.d.routines.folderOf(actor, id, false);
+    return this.d.folder.proposal(f.owner, f.routineId);
+  }
+
+  /**
+   * Its owner answered the bot's offer: on Update the files are saved exactly as offered, as the
+   * owner's change (who said yes, and the bot's why); on anything else nothing changes. Either way
+   * the offer is settled, and the thread says what happened. The bot's run still gets the answer.
+   */
+  async settleProposal(actor: Actor, id: string, p: Proposal, answer: string): Promise<string | null> {
+    const f = await this.d.routines.folderOf(actor, id, false);
+    await this.d.folder.dropProposal(f.owner, f.routineId, { kind: "user", name: null });
+    if (!saysYes(answer) && !/^\s*update\b/i.test(answer)) return null;
+    const by: Author = { kind: "user", name: null };
+    const saved: string[] = [];
+    try {
+      for (const file of p.files) {
+        const v = await this.write(actor, id, file.path, file.content, by, `said yes to ${f.name}'s proposal: ${p.why}`, "app");
+        saved.push(`${v.path} (version ${v.version})`);
+      }
+    } catch (err) {
+      const said = `${saved.length ? `Saved ${saved.join(", ")}, but ` : ""}couldn't save the rest: ${(err as Error).message}`;
+      await this.note(actor, id, said);
+      return said;
+    }
+    const said = `Saved ${saved.join(" and ")}. You can undo it under Files.`;
+    await this.note(actor, id, said);
+    return said;
   }
 
   async remove(actor: Actor, id: string, path: string, by: Author, why: string | null): Promise<void> {

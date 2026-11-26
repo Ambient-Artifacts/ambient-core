@@ -2,7 +2,7 @@
 // with its run token, valid only while the run goes. It gets the brain the way an employee's AI app
 // has it: everything to read that its owner may read (a personal bot: their wiki and their teams';
 // a team bot: that team's only, never a member's personal wiki), and to write only what anyone may:
-// corrections and its work log, and its own files (update_my_file). No pages edited, no notes saved in someone's name, no settings, no
+// corrections and its work log, and its own files (read_my_files, propose_my_change, update_my_file). No pages edited, no notes saved in someone's name, no settings, no
 // other bots, computers, accounts or secrets (BOT_TOOLS).
 import { sha256Hex } from "../crypto.ts";
 import { api, type Control } from "../control.ts";
@@ -25,6 +25,8 @@ export const BOT_TOOLS = new Set([
   "log_work",
   "post_to_slack",
   "post_to_teams",
+  "read_my_files",
+  "propose_my_change",
   "update_my_file",
 ]);
 

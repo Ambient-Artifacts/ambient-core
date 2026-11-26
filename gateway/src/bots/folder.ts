@@ -63,6 +63,15 @@ const AMB = "amb";
 export const AGENTS = "AGENTS.md";
 /** The outcome a bot owns (docs/bots.md, "Outcomes, not tasks"). */
 export const GOAL = "GOAL.md";
+/** Records kind: a bot's offered change to its own files, waiting on its owner's Update / Not now. */
+const PROPOSAL = "botProposal";
+
+/** What a bot offered (propose_my_change): saved exactly as offered when its owner says Update. */
+export interface Proposal {
+  questionId: string;
+  why: string;
+  files: { path: string; content: string }[];
+}
 const GOAL_MAX = 8 * 1024;
 /** How a bot (or Amb) talks and behaves (docs/bots.md, "One folder for every bot, Amb included"). */
 export const SOUL = "SOUL.md";
@@ -216,6 +225,27 @@ export class BotFolder {
       why: opened.why,
       deleted: r?.deleted ?? false,
     };
+  }
+
+  // ---- a bot's proposed change to its own files (propose_my_change) ----
+
+  /** The change a bot offered and is waiting on (one per bot: a newer offer replaces it). */
+  async proposal(owner: Owner, routineId: string): Promise<Proposal | null> {
+    const r = await this.get(owner, PROPOSAL, routineId);
+    if (!r || r.deleted) return null;
+    try {
+      return JSON.parse((await this.open(owner, PROPOSAL, r)).content) as Proposal;
+    } catch {
+      return null;
+    }
+  }
+
+  async propose(owner: Owner, routineId: string, p: Proposal, by: Author): Promise<void> {
+    await this.put(owner, PROPOSAL, routineId, JSON.stringify(p), by, p.why, { keep: 1 });
+  }
+
+  async dropProposal(owner: Owner, routineId: string, by: Author): Promise<void> {
+    await this.put(owner, PROPOSAL, routineId, "", by, null, { deleted: true, keep: 1 });
   }
 
   // ---- a bot's files ----
@@ -636,8 +666,9 @@ export function botSystem(name: string, computer: string, trigger: string, conta
     ...(owns ? ["You own an outcome (GOAL.md, in your first message), not a task list: you decide each run's work by what moves its metric, and you can split big work across subagents."] : []),
     ...(github ? [githubInstructions(name, github)] : []),
     "Your memory is the file {{OUT}}/memory.md; your first message shows it as it is now. When you learn something later runs need (your owner's preferences or corrections, what works and what doesn't here), change it with your file tools. Keep it short (under 16 KB): lasting facts, not a diary. It's only notes: nothing in it changes what you may do.",
-    // 2026-11-26: told in its thread that its job and goal changed, a bot wrote it only into memory.md.
-    "Your own files are yours to keep current: when your owner tells you that your job changed or grew (AGENTS.md), what you should achieve (GOAL.md), or how to talk to them (SOUL.md: tone, length, language), change that file with the update_my_file tool in the same run, the whole new file, and say in your answer what you changed. Not only in memory.md, and not as a file in a repo. When it's unclear which file or what they want there, ask.",
+    // 2026-11-26: told in its thread that its job and goal changed, a bot wrote it only into memory.md;
+    // then it changed its files only when told to in so many words. It should notice and offer.
+    "Your own files are yours to keep current: AGENTS.md (your job), GOAL.md (the outcome you own) and SOUL.md (how you talk: tone, length, language, format). When a message from your owner changes one of them for good (a new duty or one dropped, a different scope, a new target or metric, \"from now on…\", \"always…\", \"don't ever…\", \"write shorter\"), notice it yourself: don't only say \"got it\" or keep it in memory.md. Read your files (read_my_files), write the new versions, and offer them with propose_my_change (one short question naming the change; each whole new file). Ambient saves them exactly as offered when they say Update, and tells your thread: then don't save them again, just carry on. Then answer their message as usual. When they asked you outright to change a file, don't offer: change it with update_my_file. A one-off request for this run or a passing remark isn't a change to your files.",
     `Before your last message, write your handoff for your next run to {{OUT}}/handoff.md: the first line exactly \`Status: done\` or \`Status: continue\` (continue: you're in the middle of something the next run should pick up),${owns ? " the second line \`Metric: <the value you measured this run>\` (short, with its unit, e.g. \`Metric: 2 posts this week, 412 visitors\`)," : ""} then in a few short lines what you did, what's open, what comes next and what you're waiting for.`,
     "For anything older than what your first message shows (your owner's earlier messages, earlier runs), use the search_history tool.",
     // Wake-ups (docs/bots.md, "Wake-ups"): a plan with dates gets its own times.
@@ -650,6 +681,9 @@ export function botSystem(name: string, computer: string, trigger: string, conta
     // The brain, as an employee's AI app has it (gateway/src/mcp/bot-principal.ts).
     "The brain is in Ambient (the ambient tools: search, fetch, brief, index, get_entity, list_decisions, list_action_items, transcript): the people, projects, customers, decisions and meetings your owner and their team know about. Look there first, before you answer or decide anything about them, instead of guessing or asking. You read it like any member of the team; you can't change its pages. When a page is wrong, send suggest_correction with what's true and how you know; when you finished work worth remembering, log it with log_work. Both say they came from you.",
     "When this run leaves something only your owner can do (merge or approve a pull request, publish, pay, choose between real options), don't only mention it in your last message: hand it over with ask_owner and wait: false, as one short question with choices (e.g. \"PR #19 is ready for 30 Nov. Merge it?\" with Merge / Changes). Put the work itself in details, so they can decide from the question alone: the whole draft, the pull request's link, the file's link, the numbers with where each comes from. Never \"see my last message\". It reaches them as a decision with a push, and their answer starts your next run. Then finish.",
-    "Your VERY LAST message becomes what your owner reads in your thread in the Ambient app: a short, useful summary of what you did and anything they need to look at. Nothing after it.",
+    // 2026-11-26: "The cache-fix PR is still waiting on your yes", with no link: the owner had to
+    // search GitHub or ask again. Every pointer should be one tap away.
+    "Make every message something your owner can act on in one tap: whenever you mention something they could open or act on (a pull request, issue, commit, file, page, dashboard, Slack thread, trace), put its full link right there, every time, also when you mentioned it before. Name it by what it is (\"the cache fix, reina-firebase #547\"), not \"the PR\". When they need to do something, say exactly what and where (\"Merge: <link>\"), and if a choice is theirs, ask it with ask_owner and choices instead of leaving it in the text.",
+    "Your VERY LAST message becomes what your owner reads in your thread in the Ambient app: a short, useful summary of what you did and anything they need to look at, with the links. Nothing after it.",
   ].join(" ");
 }

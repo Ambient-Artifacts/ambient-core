@@ -300,7 +300,7 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     : "";
   const general = (canLog ? `${INSTRUCTIONS}\n${LOG_WORK_INSTRUCTIONS}` : INSTRUCTIONS) + (defaultRule ? `\n${defaultRule}` : "");
   const botNote = principal.bot
-    ? `You're the bot "${principal.bot.name}". You read the brain like any member of the ${principal.personal ? "owner's teams" : "team"} would, and you can't change its pages: when one is wrong, send suggest_correction; when you finished meaningful work, log it with log_work. Both say they came from you. Your own GOAL.md, AGENTS.md, SOUL.md and skills you change with update_my_file, when your owner tells you something that belongs there.`
+    ? `You're the bot "${principal.bot.name}". You read the brain like any member of the ${principal.personal ? "owner's teams" : "team"} would, and you can't change its pages: when one is wrong, send suggest_correction; when you finished meaningful work, log it with log_work. Both say they came from you. Your own GOAL.md, AGENTS.md, SOUL.md and skills you read with read_my_files, change with update_my_file when your owner asks outright, and otherwise offer with propose_my_change.`
     : "";
   const instructions = [general, botNote, personal].filter(Boolean).join("\n\n");
   const server = new McpServer({ name: "ambient", version }, { instructions });
@@ -366,12 +366,71 @@ export function buildMcpServer({ principal, readers, routines, bots, admin, deci
     const files = folders.files;
     const bot = principal.bot;
     const by = { kind: "bot" as const, name: bot.name };
+    // To change a file, a bot first needs it as it is now (2026-11-26: a bot rewrote its GOAL.md and
+    // AGENTS.md from memory, "I couldn't read the old versions"). Reading only needs membership.
+    const reader = { uid: principal.uid, teams: principal.teams, personal: principal.personal, canWritePersonal: false, canWriteTeams: false };
+    server.registerTool(
+      "read_my_files",
+      {
+        title: "Read your own files",
+        description:
+          "Your own files as they are now: AGENTS.md (your job), GOAL.md (the outcome you own), SOUL.md (how you talk) and your skills, each with who changed it last. Read them before you propose or make a change with update_my_file, so the new file keeps what still holds. (memory.md is in your run's out folder.)",
+        inputSchema: {},
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async () => {
+        try {
+          const { files: list } = await files.list(reader, bot.routineId);
+          const parts: string[] = [];
+          for (const f of list) {
+            if (f.path === "memory.md") continue;
+            const view = f.version === 0 && f.size === 0 ? null : await files.read(reader, bot.routineId, f.path);
+            const who = f.by ? `, changed by ${f.by.name ?? f.by.kind}` : "";
+            parts.push(`## ${f.path}${view ? ` (version ${view.version}${who})` : ""}\n\n${view?.content.trim() || "(empty)"}`);
+          }
+          return { content: [{ type: "text" as const, text: parts.join("\n\n") }] };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
+        }
+      },
+    );
+    // A lasting change the bot noticed itself: offered, saved by Ambient exactly as offered when the
+    // owner says Update (BotFiles.settleProposal), never through a later run's memory of it.
+    if (bots) {
+      const service = bots;
+      server.registerTool(
+        "propose_my_change",
+        {
+          title: "Offer a change to your own files",
+          description:
+            "Offer your owner new versions of your own files when something they said changes your job (AGENTS.md), your goal (GOAL.md), how you talk (SOUL.md) or a skill for good, and they didn't ask you to change the file. They get one question in your thread with Update / Not now and each new file in full; on Update Ambient saves exactly these files, as theirs, and you don't save them again. Read your files first (read_my_files) and send each whole new file, keeping what still holds. One offer at a time: a newer one replaces the last.",
+          inputSchema: {
+            question: z.string().min(1).max(300).describe('One short question naming the change, e.g. "Add answer quality to my job and goal?"'),
+            why: z.string().min(1).max(300).describe("One sentence: what they said that this follows from."),
+            files: z.array(z.object({ path: z.string().max(200).describe("GOAL.md, AGENTS.md, SOUL.md, or skills/<name>/<file>."), content: z.string().max(70_000).describe("The whole new file.") })).min(1).max(4),
+          },
+          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+        },
+        async ({ question, why, files: offered }: { question: string; why: string; files: { path: string; content: string }[] }) => {
+          try {
+            if (!bot.runTokenHash) return { content: [{ type: "text" as const, text: "Only a bot's own run can offer changes to its files." }], isError: true };
+            files.checkOffer(offered);
+            const details = offered.map((f) => `The new ${f.path}:\n\n${f.content.trim()}`).join("\n\n---\n\n");
+            const asked = await service.askAs(bot.runTokenHash, question, ["Update", "Not now"], details, [], { ownerOnly: true });
+            await files.proposeOwn({ routineId: bot.routineId, teamId: bot.teamId, uid: principal.uid, name: bot.name }, { questionId: asked.id, why, files: offered.map((f) => ({ path: f.path.trim(), content: f.content })) });
+            return { content: [{ type: "text" as const, text: `Offered ${offered.map((f) => f.path).join(" and ")}. On Update, Ambient saves them and tells your thread; don't save them yourself. Now answer their message as usual.` }], structuredContent: { question: asked.id } };
+          } catch (err) {
+            return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
+          }
+        },
+      );
+    }
     server.registerTool(
       "update_my_file",
       {
         title: "Change one of your own files",
         description:
-          "Change one of your own files in Ambient, when your owner tells you something that belongs there: GOAL.md (the outcome you own: the result in one sentence, the metric and how you measure it, the target, by when, your limits), AGENTS.md (your job: what you do and how), SOUL.md (how you talk and behave: tone, length, language), or a skill (skills/<name>/SKILL.md: when to use it, then how). Send the whole new file, keeping what still holds. Only what your owner said or clearly agreed to; when it's unclear what they want there, ask first. Takes effect from your next run (follow it already in this one). Every change is a version your owner sees and can undo in the app; tell them in your answer what you changed. Not memory.md (that's the memory.md in your run's out folder, which you change with your file tools), never secrets.",
+          "Change one of your own files in Ambient, when your owner tells you something that belongs there: GOAL.md (the outcome you own: the result in one sentence, the metric and how you measure it, the target, by when, your limits), AGENTS.md (your job: what you do and how), SOUL.md (how you talk and behave: tone, length, language), or a skill (skills/<name>/SKILL.md: when to use it, then how). Read it first (read_my_files) and send the whole new file, keeping what still holds. Only when your owner asked you outright to change the file: a lasting change you noticed yourself you offer with propose_my_change instead. Takes effect from your next run (follow it already in this one). Every change is a version your owner sees and can undo in the app; tell them in your answer what you changed. Not memory.md (that's the memory.md in your run's out folder, which you change with your file tools), never secrets.",
         inputSchema: {
           path: z.string().max(200).describe("GOAL.md, AGENTS.md, SOUL.md, or skills/<name>/<file>."),
           content: z.string().max(70_000).describe("The whole new file."),
