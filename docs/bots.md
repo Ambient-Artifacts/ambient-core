@@ -302,11 +302,39 @@ can share it, and teammates without a computer of their own get one without conn
   for their own brain, on that machine, and a teammate without a computer of their own has Ambient's
   chat there too (as on any team computer). Whoever has root there (the team's owner, or whoever runs
   the team's computer) could read them. A person who doesn't want that connects a computer of their
-  own: their bots and chat go there first. Their brain's upkeep never runs on a computer that isn't
-  theirs.
+  own: their bots and chat go there first. Their brain's upkeep runs on the team's computer only
+  once they said yes to that (below).
 - **Keys:** a person's computer's stored Claude plan, API key and OpenAI key stay sealed with their
   own key once it serves a team (`hostOwner`); a team's own computer's with the team's. Its owner
   changes its settings as before, and the team's owners and admins may too.
+
+## Every computer has a person
+
+A computer always has someone who runs it, and their personal space runs there as on a computer of
+their own. Others' personal space goes there only when they say so, since whoever runs it can see
+what runs there.
+
+- **A person's computer** is theirs (`userId`), also while it serves their team.
+- **A team's own computer** is run by whoever connected it (`runBy`, set by `addTeamHost`, while
+  they're in the team: `runByOf`). Rows from before have nobody, and nor does one whose runner left:
+  whoever has root there may be someone else, so everyone's personal space, the owner's included,
+  goes there only after saying yes (below). For the person who runs it, it is
+  `yours: true` in the app and `get_settings`, and their upkeep runs there. Its settings and stored
+  keys stay the team's: changing its Claude sign-in still takes an owner or admin, and its keys stay
+  sealed with the team's key.
+- **A teammate's personal space** (their brain's upkeep) goes on the team's computer only after
+  they said yes: `PUT /v1/app/teams/:slug/personal-on-computer { "on": true }`, or the MCP tool
+  `use_team_computer` (`members.personalOnTeamComputer`). A computer of their own always comes first
+  (`Upkeep.computerFor`: `computersOf` lists theirs first, `personal` marks where it may run).
+  Their bots and Ambient's chat already use the team's computer when they have none of their own
+  (above).
+- **Creating a team** shares the owner's computer with it only when they say so:
+  `POST /v1/app/teams { "name": "…", "shareComputer": false }` leaves it theirs alone (`create_team`
+  takes `share_computer`). Absent, from apps and tools before it asked: shared, as before.
+- **Not built yet:** each person's own Claude sign-in for their runs on a shared computer (today a
+  run uses the computer's), handing a team's computer to another person (and revoking its token when
+  the person who ran it leaves: they may still have root there), and moving a team's brain between
+  computers.
 
 ## Whose Claude a computer uses
 

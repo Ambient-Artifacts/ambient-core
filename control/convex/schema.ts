@@ -274,6 +274,11 @@ export default defineSchema({
     /** The member's page in the team wiki, e.g. people/anna-mueller */
     peopleSlug: v.string(),
     joinedAt: v.number(),
+    /**
+     * They agreed that their personal space (the upkeep of their own brain) runs on the team's
+     * computer while they have none of their own; whoever runs it can see what runs there.
+     */
+    personalOnTeamComputer: v.optional(v.boolean()),
   })
     .index("by_team", ["teamId"])
     .index("by_user", ["userId"])
@@ -377,6 +382,12 @@ export default defineSchema({
     /** The user whose computer it is; absent on a team's server. */
     userId: v.optional(v.id("users")),
     teamId: v.optional(v.id("teams")),
+    /**
+     * On a team's own computer: the person who runs it (who connected it; absent on rows from
+     * before). While they're in the team it is their computer too: their personal space runs there
+     * (docs/bots.md, "Every computer has a person"). Its stored keys stay sealed with the team's.
+     */
+    runBy: v.optional(v.id("users")),
     name: v.string(),
     /** The one-time setup code, until it's used or expires. */
     codeHash: v.optional(v.string()),
