@@ -69,6 +69,7 @@ describe("the team's own computer", () => {
     expect(await upkeepComputer(tom)).toBeNull();
     expect((await appCall(s, tom, "PUT", `/v1/app/teams/${slug}/personal-on-computer`, { on: true })).status).toBe(204);
     expect(await upkeepComputer(tom)).toBe("Foundry VPS");
+    expect(((await appCall(s, tom, "GET", "/v1/app/me")).json.teams as { slug: string; personalOnTeamComputer: boolean }[]).find((t) => t.slug === slug)?.personalOnTeamComputer).toBe(true);
     // Still not theirs to change.
     expect((await computers(tom)).find((c) => c.id === teamComputer)).toMatchObject({ yours: false });
   });

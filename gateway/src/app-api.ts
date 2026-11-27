@@ -271,7 +271,7 @@ export function appApiRouter(d: AppApiDeps): Router {
     res.json({
       user,
       // Where each team's brain runs: Ambient's server ("hosted"), the team's computer, or nowhere yet.
-      teams: teams.map((t) => ({ slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: serverKind(t.serverUrl) })),
+      teams: teams.map((t) => ({ slug: t.slug, name: t.name, status: t.status, role: t.role, peopleSlug: t.peopleSlug, server: serverKind(t.serverUrl), personalOnTeamComputer: t.personalOnTeamComputer ?? false })),
       // Claude upkeep is opt-in: the app asks once (consolidateAsked) and it's off until then.
       prefs: { consolidate: record?.consolidate ?? false, consolidateAsked: record?.consolidateAsked ?? false, digest: record?.digest ?? true, pcc: record?.pcc ?? true },
       // What's left to set up (the app's reminder dot).
