@@ -285,7 +285,8 @@ can share it, and teammates without a computer of their own get one without conn
   from (`bot_needs_computer`). A teammate's bots therefore land on the team's computer by default.
 - **The owner's computer serves the team too:** creating a team while you have a computer (the one
   seen last, with several), or connecting a computer while you own a team that has none, makes it
-  the team's computer as well (`shareWithOwnedTeam`). The row keeps its owner (`userId`) and gets
+  the team's computer as well (`shareWithOwnedTeam`), unless you said no when creating the team
+  (`shareComputer: false`, below). The row keeps its owner (`userId`) and gets
   the team (`teamId`); the app and `get_settings` show it as yours (`yours: true`) and the team's.
   It runs the team's brain when the team has no server (docs/architecture.md, "A team on its own
   computer"), the team's bots, and the people's own bots placed there.
