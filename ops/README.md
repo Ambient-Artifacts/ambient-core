@@ -148,3 +148,7 @@ In the Ambient app go to **Settings → Connect an AI app** and keep the 8-chara
 - **Updates:** `ops/deploy.sh <role> root@<ip>` again; it rsyncs the current checkout and restarts.
 - **Restore:** Hetzner's daily backups restore the whole VM. The gateway keeps no state of its own; everything is in Convex.
 - **Remove someone from a team:** the owner or an admin does it in the app (Settings → Teams → the team). By hand: `npx convex run teams:removeMember '{"slug":"acme","uid":"<user id>"}'`. Their access ends within a minute.
+
+## Checking the connection catalogue
+
+`node --import tsx ops/check-connections.ts` walks every service in `gateway/src/bots/mcp-catalog.ts` the way Ambient connects it, up to where a person would sign in: it finds the sign-in server, registers Ambient as a client with the gateway's real return address, and opens the sign-in page (open services: their tools; token services: that they want the token). No accounts needed. `--only figma,notion`, `--json`. "FAIL" is a service that refuses Ambient (an approval or an allowlisted return address it wants); "check" is a sign-in page behind a bot check, to open in a browser. What happens after the sign-in (the token, the tools) still needs an account at the service.
