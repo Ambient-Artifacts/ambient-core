@@ -563,7 +563,12 @@ export function appApiRouter(d: AppApiDeps): Router {
 
   // Create a team (the user owns it): on a computer of its own, or a pool server (people.ts).
   r.post("/v1/app/teams", auth, json, async (req, res) => {
-    send(res, await people.createTeam(uidOf(res), req.body?.name));
+    send(res, await people.createTeam(uidOf(res), req.body?.name, req.body?.shareComputer));
+  });
+
+  // Whether the user's personal space runs on the team's computer (docs/bots.md, "Every computer has a person").
+  r.put("/v1/app/teams/:slug/personal-on-computer", auth, json, async (req, res) => {
+    send(res, await people.setPersonalOnTeamComputer(uidOf(res), String(req.params.slug), req.body?.on));
   });
 
   const managed = async (req: Request, res: Response) => {

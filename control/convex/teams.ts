@@ -14,6 +14,7 @@ function shape(team: Doc<"teams">, member?: Doc<"members">) {
     serverUrl: team.serverUrl ?? null,
     role: member?.role ?? null,
     peopleSlug: member?.peopleSlug ?? null,
+    personalOnTeamComputer: member?.personalOnTeamComputer ?? false,
   };
 }
 
@@ -133,6 +134,23 @@ export const joinWithInvite = mutation({
   },
 });
 
+/**
+ * Whether a member's personal space (their own brain's upkeep) may run on the team's computer
+ * while they have none of their own (docs/bots.md, "Every computer has a person"). Their choice
+ * only: whoever runs that computer can see what runs there.
+ */
+export const setPersonalOnTeamComputer = mutation({
+  args: { ...secretArg, uid: v.id("users"), teamId: v.id("teams"), on: v.boolean() },
+  handler: async (ctx, { secret, uid, teamId, on }) => {
+    assertService(secret);
+    const m = await ctx.db.query("members").withIndex("by_team_user", (q) => q.eq("teamId", teamId).eq("userId", uid)).unique();
+    const team = await ctx.db.get(teamId);
+    if (!m || !team || team.status !== "active") return { ok: false as const, error: "not_a_member" };
+    await ctx.db.patch(m._id, { personalOnTeamComputer: on || undefined });
+    return { ok: true as const, team: shape(team, (await ctx.db.get(m._id))!) };
+  },
+});
+
 // ---- Staff operations: `npx convex run teams:create '{...}'` (internal, no secret) ----
 
 export const create = internalMutation({
@@ -246,8 +264,12 @@ export const createOwned = mutation({
    * the team starts without a server and runs on a computer of its own, connected by its owner
    * (docs/architecture.md, "A team on its own computer"); creating it never waits for the pool.
    */
-  args: { ...secretArg, uid: v.id("users"), name: v.string(), peopleSlug: v.string(), now: v.number(), pool: v.optional(v.boolean()) },
-  handler: async (ctx, { secret, uid, name, peopleSlug, now, pool = true }) => {
+  /**
+   * `shareComputer`: whether the owner's computer serves the new team too (the app asks; absent,
+   * from apps and tools before it asked: yes).
+   */
+  args: { ...secretArg, uid: v.id("users"), name: v.string(), peopleSlug: v.string(), now: v.number(), pool: v.optional(v.boolean()), shareComputer: v.optional(v.boolean()) },
+  handler: async (ctx, { secret, uid, name, peopleSlug, now, pool = true, shareComputer = true }) => {
     assertService(secret);
     const clean = name.trim().slice(0, 80);
     if (!clean) return { ok: false as const, error: "bad_name" };
@@ -267,9 +289,9 @@ export const createOwned = mutation({
     const teamId = await ctx.db.insert("teams", { slug, name: clean, status: "active", ...(server ? { serverUrl: server.url } : {}), createdAt: now });
     await ctx.db.insert("members", { teamId, userId: uid, role: "owner", peopleSlug, joinedAt: now });
     if (server) await ctx.db.patch(server._id, { status: "claimed", teamId });
-    // The owner's computer is the team's too until they connect another for it (docs/bots.md,
-    // "Personal bots on the team's computer"): the one seen last, when they have several.
-    const own = (await ctx.db.query("routineHosts").withIndex("by_user", (q) => q.eq("userId", uid)).take(20)).filter((h) => h.tokenHash && !h.teamId);
+    // The owner's computer is the team's too, when they said so, until they connect another for it
+    // (docs/bots.md, "Personal bots on the team's computer"): the one seen last, when they have several.
+    const own = shareComputer ? (await ctx.db.query("routineHosts").withIndex("by_user", (q) => q.eq("userId", uid)).take(20)).filter((h) => h.tokenHash && !h.teamId) : [];
     const mine = own.sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0))[0];
     const computer = mine && (await shareWithOwnedTeam(ctx, mine, now)) ? { id: mine._id, name: mine.name } : null;
     const team = (await ctx.db.get(teamId))!;

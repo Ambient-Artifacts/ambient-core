@@ -18,6 +18,8 @@ export interface Team {
   serverUrl: string | null;
   role?: Role | null;
   peopleSlug?: string | null;
+  /** Their personal space may run on this team's computer (docs/bots.md, "Every computer has a person"). */
+  personalOnTeamComputer?: boolean;
 }
 
 export class Directory {

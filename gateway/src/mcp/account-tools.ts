@@ -75,6 +75,7 @@ export async function describeAccount(principal: Principal, d: AccountDeps, acto
     `- Work sessions go to a team by folder or repo: ${rules.length ? rules.map((r) => `${r.match} → ${r.team}`).join("; ") : "no rules (they stay personal unless the work names a team)"}`,
     computers.length ? "Computers (where Ambient's chat, the bots and upkeep run)" : "Computers: none connected (connect one with connect_computer)",
     ...computers.map(computerLine),
+    ...principal.teams.filter((t) => t.status === "active").map((t) => `- Personal space on ${t.name}'s computer (while none of your own): ${t.personalOnTeamComputer ? "yes" : "no (use_team_computer)"}`),
   ];
   return {
     text: lines.join("\n"),
@@ -84,6 +85,7 @@ export async function describeAccount(principal: Principal, d: AccountDeps, acto
       upkeep,
       session_rules: rules,
       computers: computers.map((c) => ({ id: c.id, name: c.name, team: c.team?.slug ?? null, yours: c.yours, ready: c.ready, online: c.online, claude_signed_in: c.claudeSignedIn ?? null, hostname: c.hostname })),
+      personal_on_team_computer: principal.teams.filter((t) => t.status === "active" && t.personalOnTeamComputer).map((t) => t.slug),
     },
   };
 }
@@ -166,13 +168,17 @@ export function registerAccountTools(server: McpServer, principal: Principal, d:
       title: "Create a team",
       description:
         `Create a team the user owns: a shared brain for the people they invite (team_people invite). ${ASKED} ` +
-        "A new team runs on a computer of its own. When the user already has a computer, it becomes the team's too (its brain, its bots, and its people's own bots), until they connect a different one with connect_computer and the team's slug; otherwise people can join, and the brain switches on once a computer is there.",
-      inputSchema: { name: z.string().trim().min(1).max(80) },
+        "A new team runs on a computer of its own. When the user already has a computer, it becomes the team's too (its brain, its bots, and its people's own bots) unless share_computer is false, until they connect a different one with connect_computer and the team's slug; otherwise people can join, and the brain switches on once a computer is there. Ask the user whether their computer should serve the team before passing share_computer.",
+      inputSchema: {
+        name: z.string().trim().min(1).max(80),
+        share_computer: z.boolean().optional().describe("Whether the user's computer serves the team too (default true)."),
+      },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async (args) => {
       if (!canChangeOwn) return readOnly();
-      const out = await d.people.createTeam(principal.uid, (args as { name: string }).name);
+      const a = args as { name: string; share_computer?: boolean };
+      const out = await d.people.createTeam(principal.uid, a.name, a.share_computer);
       if (out.status !== 200) return result(`Not created: ${why(out)}`, { error: out.json }, true);
       const t = (out.json as { team: { slug: string; name: string; server: string; computer?: { name: string } } }).team;
       const next = t.computer
@@ -181,6 +187,28 @@ export function registerAccountTools(server: McpServer, principal: Principal, d:
           ? ` It runs on a computer of its own: connect one with connect_computer (team "${t.slug}"). Invite people with team_people.`
           : " Invite people with team_people.";
       return result(`Created the team ${t.name} (slug "${t.slug}"); the user owns it.${next}`, out.json as Record<string, unknown>);
+    },
+  );
+
+  server.registerTool(
+    "use_team_computer",
+    {
+      title: "Use the team's computer for my personal space",
+      description:
+        `Whether the user's personal space (keeping their own brain current from their notes) runs on their team's computer while they have no computer of their own. ${ASKED} ` +
+        "Whoever runs the team's computer can see what runs there, so only when the user said so for exactly this. Their own computer, once connected, always comes first. get_settings shows the team's computer and who runs it.",
+      inputSchema: {
+        team: z.string().min(1).max(80).describe("The team's slug or name."),
+        on: z.boolean().describe("True: use the team's computer; false: only a computer of their own."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (args) => {
+      if (!canChangeOwn) return readOnly();
+      const a = args as { team: string; on: boolean };
+      const out = await d.people.setPersonalOnTeamComputer(principal.uid, teamSlug(a.team), a.on);
+      if (out.status !== 204) return result(`Not changed: ${why(out)}`, { error: out.json }, true);
+      return result(a.on ? "The user's personal space now runs on the team's computer while they have none of their own." : "The user's personal space now runs only on a computer of their own.", { on: a.on });
     },
   );
 

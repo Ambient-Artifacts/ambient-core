@@ -226,6 +226,8 @@ interface HostRow {
   teamId: string | null;
   /** The person whose computer it is (also when it serves their team); null: a team's own. */
   ownerUid: string | null;
+  /** Who runs a team's own computer (docs/bots.md, "Every computer has a person"); absent from older Convex functions. */
+  runByUid?: string | null;
   name: string;
   ready: boolean;
   codeExpiresAt: number | null;
@@ -520,12 +522,19 @@ export class RoutineService {
    * Where Ambient can run for a user, in order: their own computers, then their teams' servers
    * (Ambient's own machine for the team, one session per person there).
    */
-  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null; teamId: string | null; own: boolean }[]> {
+  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null; teamId: string | null; own: boolean; personal: boolean }[]> {
     const teams = ((await this.d.teamsOf?.(uid).catch(() => [])) ?? []).filter((t) => t.status === "active");
     const out = (await this.d.control.q(api.routines.list, { uid: uid as never, teamIds: teams.map((t) => t.id) as never })) as unknown as { hosts: HostRow[] };
     const ready = out.hosts.filter((h) => h.ready);
-    // `own`: theirs, also when it serves their team; a team's own computer isn't (their notes' upkeep never goes there).
-    return [...ready.filter((h) => isOwn(h, uid)), ...ready.filter((h) => !isOwn(h, uid))].map((h) => ({ id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null, teamId: h.teamId ? String(h.teamId) : null, own: isOwn(h, uid) }));
+    // `own`: theirs, also when it serves their team or when they run the team's computer.
+    // `personal`: their personal space (their notes' upkeep) may run there: their own, or their
+    // team's when they said yes to that (docs/bots.md, "Every computer has a person").
+    const agreed = new Set(teams.filter((t) => t.personalOnTeamComputer).map((t) => String(t.id)));
+    const shaped = ready.map((h) => {
+      const own = isYours(h, uid);
+      return { id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null, teamId: h.teamId ? String(h.teamId) : null, own, personal: own || (!!h.teamId && agreed.has(String(h.teamId))) };
+    });
+    return [...shaped.filter((h) => h.own), ...shaped.filter((h) => !h.own)];
   }
 
   get keys(): RoutineKeys {
@@ -580,7 +589,7 @@ export class RoutineService {
       id: h.id,
       name: h.name,
       team: team ? { slug: team.slug, name: team.name } : null,
-      yours: Boolean(actor && isOwn(h, actor.uid)),
+      yours: Boolean(actor && isYours(h, actor.uid)),
       ready: h.ready,
       online: h.ready && h.lastSeenAt !== null && this.now() - h.lastSeenAt < OFFLINE_AFTER_MS,
       setupCodeExpiresAt: h.codeExpiresAt,
@@ -1470,6 +1479,15 @@ function soonest(a: number | null, b: number | null): number | null {
 /** A person's computer, also when it serves their team; a team's own computer is nobody's. */
 function isOwn(h: { teamId: string | null; ownerUid: string | null }, uid: string): boolean {
   return h.ownerUid ? h.ownerUid === uid : !h.teamId;
+}
+
+/**
+ * Theirs to use as their own: a computer of theirs, or the team's own computer they run
+ * (docs/bots.md, "Every computer has a person"). Changing its settings still follows `isOwn`
+ * and the team's roles: a team's computer keeps its team's keys.
+ */
+function isYours(h: { teamId: string | null; ownerUid: string | null; runByUid?: string | null }, uid: string): boolean {
+  return isOwn(h, uid) || (!!h.runByUid && h.runByUid === uid);
 }
 
 /**

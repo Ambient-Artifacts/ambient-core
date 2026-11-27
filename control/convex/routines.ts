@@ -56,6 +56,11 @@ function hostShape(h: Doc<"routineHosts">) {
     teamId: h.teamId ?? null,
     /** The person whose computer it is; set on a person's computer also when it's their team's (null: a team's own). */
     ownerUid: h.userId ?? null,
+    /**
+     * Who runs a team's own computer: whoever connected it, or the team's owner on rows from before
+     * (`list` fills that in). Their personal space runs there as on a computer of their own.
+     */
+    runByUid: h.userId ? null : ((h.runBy as string | undefined) ?? null),
     name: h.name,
     ready: Boolean(h.tokenHash),
     codeExpiresAt: h.tokenHash ? null : (h.codeExpiresAt ?? null),
@@ -194,12 +199,23 @@ export const list = query({
       }
       shapes.push(shape);
     }
-    return {
-      routines: shapes,
-      hosts: hosts.sort((a, b) => a.createdAt - b.createdAt).map(hostShape),
-    };
+    const shaped = [];
+    for (const h of hosts.sort((a, b) => a.createdAt - b.createdAt)) shaped.push({ ...hostShape(h), runByUid: await runByOf(ctx, h) });
+    return { routines: shapes, hosts: shaped };
   },
 });
+
+/**
+ * Who runs a team's own computer (docs/bots.md, "Every computer has a person"): whoever connected
+ * it, or the team's owner on rows from before. Null on a person's computer (its owner is `userId`).
+ */
+export async function runByOf(ctx: { db: QueryCtx["db"] }, h: Doc<"routineHosts">): Promise<string | null> {
+  if (h.userId || !h.teamId) return null;
+  // Someone who left the team no longer runs its computer: its owner does.
+  if (h.runBy && (await isMember(ctx, h.teamId, h.runBy))) return h.runBy;
+  const owner = (await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", h.teamId!)).take(200)).find((m) => m.role === "owner");
+  return owner?.userId ?? null;
+}
 
 /**
  * The computer a team's bots run on: one set up (with a token) among the team's. A code still
@@ -389,7 +405,8 @@ export const addTeamHost = mutation({
     const hosts = await ctx.db.query("routineHosts").withIndex("by_team", (q) => q.eq("teamId", teamId)).take(MAX_HOSTS * 2);
     for (const h of hosts) if (!h.tokenHash && (h.codeExpiresAt ?? 0) < now) await ctx.db.delete(h._id);
     if (hosts.filter((h) => h.tokenHash).length >= MAX_HOSTS) return { ok: false as const, error: "too_many_computers" };
-    const id = await ctx.db.insert("routineHosts", { teamId, name, codeHash, codeExpiresAt: expiresAt, createdAt: now });
+    // Whoever connects it runs it: it's their computer too (docs/bots.md, "Every computer has a person").
+    const id = await ctx.db.insert("routineHosts", { teamId, runBy: uid, name, codeHash, codeExpiresAt: expiresAt, createdAt: now });
     return { ok: true as const, host: hostShape((await ctx.db.get(id))!) };
   },
 });

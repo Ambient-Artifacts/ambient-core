@@ -64,7 +64,11 @@ export class PeopleService {
   // ---- teams ----
 
   /** A team the person owns: on a computer of its own (no server yet), or a pool server. */
-  async createTeam(uid: string, rawName: unknown): Promise<Reply> {
+  /**
+   * `shareComputer`: whether the owner's computer serves the team too (the app asks; absent: yes,
+   * as before it asked).
+   */
+  async createTeam(uid: string, rawName: unknown, shareComputer?: unknown): Promise<Reply> {
     const name = typeof rawName === "string" ? rawName.trim() : "";
     if (!name || name.length > 80 || !this.limit(`create:${uid}`)) {
       return { status: 400, json: { error: "bad_request", message: "Give the team a name (up to 80 characters)." } };
@@ -73,7 +77,8 @@ export class PeopleService {
     // A new team runs on a computer of its own (relay.ts), connected by its owner; Ambient's pool
     // of hosted servers only with BRAIN_TEAM_POOL=true (self-hosting with spare servers).
     const pool = this.d.pool ? this.d.pool() : process.env.BRAIN_TEAM_POOL === "true";
-    const made = await this.d.control.m(api.teams.createOwned, { uid: uid as never, name, peopleSlug: this.peopleSlug(user?.name), now: Date.now(), pool });
+    const share = typeof shareComputer === "boolean" ? { shareComputer } : {};
+    const made = await this.d.control.m(api.teams.createOwned, { uid: uid as never, name, peopleSlug: this.peopleSlug(user?.name), now: Date.now(), pool, ...share });
     if (!made.ok) {
       if (made.error === "no_server") {
         console.warn("[gateway] team creation refused: the server pool is empty");
@@ -179,6 +184,19 @@ export class PeopleService {
     if (role !== "admin" && role !== "member") return { status: 400, json: { error: "bad_request" } };
     const out = await this.d.control.m(api.teams.setRole, { uid: uid as never, slug: team.slug, target, role });
     this.d.directory.invalidate(target);
+    return out.ok ? DONE : refused(out.error);
+  }
+
+  /**
+   * Whether the user's personal space (their own brain's upkeep) runs on the team's computer while
+   * they have none of their own (docs/bots.md, "Every computer has a person"). Their choice only.
+   */
+  async setPersonalOnTeamComputer(uid: string, slug: string, on: unknown): Promise<Reply> {
+    if (typeof on !== "boolean") return { status: 400, json: { error: "bad_request", message: "Say on (true) or off (false)." } };
+    const team = await this.d.directory.freshMembership(uid, slug);
+    if (!team || team.status !== "active") return refused("not_a_member");
+    const out = await this.d.control.m(api.teams.setPersonalOnTeamComputer, { uid: uid as never, teamId: team.id as never, on });
+    this.d.directory.invalidate(uid);
     return out.ok ? DONE : refused(out.error);
   }
 

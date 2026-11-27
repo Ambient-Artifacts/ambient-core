@@ -118,12 +118,13 @@ describe("tools", () => {
       "update_routine",
       "use_claude_account",
       "use_openai_account",
+      "use_team_computer",
       "watch_github",
       "who_can_ask_bot",
       "write_amb_file",
       "write_bot_file",
     ]);
-    const writers = ["ambient_settings", "answer_decision", "bot_learning", "bot_thread", "bot_wake_ups", "change_preferences", "change_team_settings", "command_status", "connect_computer", "connect_github", "connect_microsoft", "connect_slack", "create_automation", "create_bot_from_template", "create_routine", "create_team", "delete_automation", "delete_routine", "forget_my_voice", "github_app_for_bot", "grant_mcp_connection", "join_team", "log_work", "mcp_connections", "message_bot", "propose_bot_change", "remove_computer", "run_automation", "run_on_computer", "run_routine", "save_note", "set_aside_decision", "set_computer_access", "set_computer_model", "set_routine_secret", "set_session_rules", "sign_in_chatgpt", "slack_for_bot", "team_people", "update_automation", "update_profile", "update_routine", "use_claude_account", "use_openai_account", "watch_github", "who_can_ask_bot", "write_amb_file", "write_bot_file"];
+    const writers = ["ambient_settings", "answer_decision", "bot_learning", "bot_thread", "bot_wake_ups", "change_preferences", "change_team_settings", "command_status", "connect_computer", "connect_github", "connect_microsoft", "connect_slack", "create_automation", "create_bot_from_template", "create_routine", "create_team", "delete_automation", "delete_routine", "forget_my_voice", "github_app_for_bot", "grant_mcp_connection", "join_team", "log_work", "mcp_connections", "message_bot", "propose_bot_change", "remove_computer", "run_automation", "run_on_computer", "run_routine", "save_note", "set_aside_decision", "set_computer_access", "set_computer_model", "set_routine_secret", "set_session_rules", "sign_in_chatgpt", "slack_for_bot", "team_people", "update_automation", "update_profile", "update_routine", "use_claude_account", "use_openai_account", "use_team_computer", "watch_github", "who_can_ask_bot", "write_amb_file", "write_bot_file"];
     for (const t of tools) expect(t.annotations?.readOnlyHint, t.name).toBe(!writers.includes(t.name));
     await client.close();
   });
