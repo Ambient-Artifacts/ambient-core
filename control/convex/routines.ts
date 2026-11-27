@@ -57,8 +57,8 @@ function hostShape(h: Doc<"routineHosts">) {
     /** The person whose computer it is; set on a person's computer also when it's their team's (null: a team's own). */
     ownerUid: h.userId ?? null,
     /**
-     * Who runs a team's own computer: whoever connected it, or the team's owner on rows from before
-     * (`list` fills that in). Their personal space runs there as on a computer of their own.
+     * Who runs a team's own computer: whoever connected it, while they're in the team (`list`
+     * checks that). Their personal space runs there as on a computer of their own.
      */
     runByUid: h.userId ? null : ((h.runBy as string | undefined) ?? null),
     name: h.name,
@@ -207,14 +207,13 @@ export const list = query({
 
 /**
  * Who runs a team's own computer (docs/bots.md, "Every computer has a person"): whoever connected
- * it, or the team's owner on rows from before. Null on a person's computer (its owner is `userId`).
+ * it, while they're in the team. Null on a person's computer (its owner is `userId`), on rows from
+ * before (nobody knows who has root there) and once that person left: nobody's personal space goes
+ * there then without saying yes, the owner's included, since whoever has root may not be them.
  */
 export async function runByOf(ctx: { db: QueryCtx["db"] }, h: Doc<"routineHosts">): Promise<string | null> {
-  if (h.userId || !h.teamId) return null;
-  // Someone who left the team no longer runs its computer: its owner does.
-  if (h.runBy && (await isMember(ctx, h.teamId, h.runBy))) return h.runBy;
-  const owner = (await ctx.db.query("members").withIndex("by_team", (q) => q.eq("teamId", h.teamId!)).take(200)).find((m) => m.role === "owner");
-  return owner?.userId ?? null;
+  if (h.userId || !h.teamId || !h.runBy) return null;
+  return (await isMember(ctx, h.teamId, h.runBy)) ? h.runBy : null;
 }
 
 /**

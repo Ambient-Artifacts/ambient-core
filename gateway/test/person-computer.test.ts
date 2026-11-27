@@ -86,12 +86,27 @@ describe("the team's own computer", () => {
   });
 });
 
-describe("a team computer from before it had a person", () => {
-  it("is its owner's", async () => {
+describe("a team computer nobody is known to run", () => {
+  it("isn't even the owner's until she says yes", async () => {
     const lea = (await signIn(s, "apple-lea-person", "Lea Brunner")).access_token;
     const team = ((await appCall(s, lea, "POST", "/v1/app/teams", { name: "Loft" })).json.team as { slug: string }).slug;
-    const codeHash = createHash("sha256").update("host-setup:LOFT-SRV1").digest("hex");
+    const code = "LOFT-SRV1";
+    const codeHash = createHash("sha256").update(`host-setup:${code}`).digest("hex");
     const { id } = await s.t.mutation(s.internal.routines.staffAddHost, { team, name: "Loft server", codeHash, expiresAt: Date.now() + 60_000 });
-    expect((await computers(lea)).find((c) => c.id === id)).toMatchObject({ yours: true, team: { slug: team } });
+    expect((await hostCall("POST", "/v1/host/setup", { code, info })).status).toBe(200);
+    expect((await computers(lea)).find((c) => c.id === id)).toMatchObject({ yours: false, team: { slug: team } });
+    expect(await upkeepComputer(lea)).toBeNull();
+    expect((await appCall(s, lea, "PUT", `/v1/app/teams/${team}/personal-on-computer`, { on: true })).status).toBe(204);
+    expect(await upkeepComputer(lea)).toBe("Loft server");
+  });
+
+  it("nor once the person who connected it has left", async () => {
+    const otto = (await signIn(s, "apple-otto-person", "Otto Frei")).access_token;
+    const invite = String((await appCall(s, mia, "POST", `/v1/app/teams/${slug}/invites`, { role: "admin" })).json.code);
+    expect((await appCall(s, otto, "POST", "/v1/app/teams/join", { code: invite })).status).toBe(200);
+    const id = await connect(otto, "Otto rack", slug);
+    expect((await computers(otto)).find((c) => c.id === id)).toMatchObject({ yours: true });
+    expect((await appCall(s, otto, "POST", `/v1/app/teams/${slug}/leave`)).status).toBe(204);
+    expect((await computers(mia)).find((c) => c.id === id)).toMatchObject({ yours: false });
   });
 });

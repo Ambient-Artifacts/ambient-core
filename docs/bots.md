@@ -315,8 +315,10 @@ their own. Others' personal space goes there only when they say so, since whoeve
 what runs there.
 
 - **A person's computer** is theirs (`userId`), also while it serves their team.
-- **A team's own computer** is run by whoever connected it (`runBy`, set by `addTeamHost`; on rows
-  from before, or once that person has left the team, the team's owner: `runByOf`). For them it is
+- **A team's own computer** is run by whoever connected it (`runBy`, set by `addTeamHost`, while
+  they're in the team: `runByOf`). Rows from before have nobody, and nor does one whose runner left:
+  whoever has root there may be someone else, so everyone's personal space, the owner's included,
+  goes there only after saying yes (below). For the person who runs it, it is
   `yours: true` in the app and `get_settings`, and their upkeep runs there. Its settings and stored
   keys stay the team's: changing its Claude sign-in still takes an owner or admin, and its keys stay
   sealed with the team's key.
@@ -330,8 +332,9 @@ what runs there.
   `POST /v1/app/teams { "name": "…", "shareComputer": false }` leaves it theirs alone (`create_team`
   takes `share_computer`). Absent, from apps and tools before it asked: shared, as before.
 - **Not built yet:** each person's own Claude sign-in for their runs on a shared computer (today a
-  run uses the computer's), handing a team's computer to another person, and moving a team's brain
-  between computers.
+  run uses the computer's), handing a team's computer to another person (and revoking its token when
+  the person who ran it leaves: they may still have root there), and moving a team's brain between
+  computers.
 
 ## Whose Claude a computer uses
 

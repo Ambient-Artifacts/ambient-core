@@ -384,7 +384,7 @@ export default defineSchema({
     teamId: v.optional(v.id("teams")),
     /**
      * On a team's own computer: the person who runs it (who connected it; absent on rows from
-     * before: the team's owner). It is their computer too: their personal space runs there
+     * before). While they're in the team it is their computer too: their personal space runs there
      * (docs/bots.md, "Every computer has a person"). Its stored keys stay sealed with the team's.
      */
     runBy: v.optional(v.id("users")),
