@@ -640,10 +640,10 @@ never stops a bot.
 
 | File | What | Who writes it |
 |---|---|---|
-| `SOUL.md` | How it talks and behaves: tone, length, language, style (up to 8 KB; in its system text every run) | the owner; Amb when the owner asked for another tone |
-| `AGENTS.md` | What the bot does and how: its instructions (a loop's prompt, up to 20,000 characters) | the owner; Amb |
-| `GOAL.md` | The outcome it owns, if any: metric, target, by when, limits (see "Outcomes, not tasks") | the owner; Amb |
-| `skills/<name>/SKILL.md` (and other text files in `skills/<name>/`) | Know-how it uses when it fits, as Claude Code skills | the owner; Amb |
+| `SOUL.md` | How it talks and behaves: tone, length, language, style (up to 8 KB; in its system text every run) | the owner; Amb when the owner asked for another tone; the bot itself (see "The brain for bots") |
+| `AGENTS.md` | What the bot does and how: its instructions (a loop's prompt, up to 20,000 characters) | the owner; Amb; the bot itself |
+| `GOAL.md` | The outcome it owns, if any: metric, target, by when, limits (see "Outcomes, not tasks") | the owner; Amb; the bot itself |
+| `skills/<name>/SKILL.md` (and other text files in `skills/<name>/`) | Know-how it uses when it fits, as Claude Code skills | the owner; Amb; the bot itself |
 | `memory.md` | What it has learned: the owner's preferences, corrections, lessons (up to 16 KB) | the bot, during its runs; the owner; Amb |
 
 Limits: text files only, 64 KB each, 60 files and 512 KB a bot. Paths: `AGENTS.md`, `memory.md`,
@@ -664,6 +664,9 @@ Code decides, every run:
 1. **It continues its session** when the run starts with the owner's answer or message (as
    before), or when its last handoff said `Status: continue`, that run ended less than 6 hours
    ago, and its session is known. It's told what's new in its thread since.
+   A bot moved to another computer has no session to continue (it was left on the old one), and
+   a run that fails with "No conversation found with session ID" clears it, so the next run
+   starts fresh.
 2. **Otherwise it starts fresh with a handoff:** its `AGENTS.md`, its `memory.md`, its last three
    handoffs, and every message in its thread since its last run (the owner's, and Amb's answers
    for them). Anything older it finds with `search_history`.
@@ -873,7 +876,7 @@ Codex bots keep the old way for now (a message starts the next run).
 Every bot's run reads the brain, the way an employee's AI app does (gateway/src/mcp/bot-principal.ts). Its MCP config has Ambient's MCP next to `ambient-bot` (ask_owner, search_history), signed in with the run's token, so it works only while the run goes (`mcp__ambient` in `--allowedTools`; for Codex `mcp_servers.ambient.url` with `bearer_token_env_var = "AMBIENT_RUN_TOKEN"`).
 
 - **What it reads:** what its owner may read. A personal bot gets the owner's wiki and their teams'; a team bot gets that team's only, never a member's personal wiki.
-- **What it may do:** `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items` and `transcript` to read; `suggest_correction` and `log_work` to write, as anyone may, and `update_my_file` for its own GOAL.md, AGENTS.md, SOUL.md and skills when its owner tells it in its thread that its goal, job or tone changed (a version the owner can undo; memory.md stays the run's out-folder file) (`BOT_TOOLS`). It can't change pages, save notes in someone's name or share them, and none of the settings, bots, computers, accounts or secrets tools exist for it. Amb keeps all of them; it acts for the person.
+- **What it may do:** `index`, `search`, `fetch`, `brief`, `get_entity`, `list_recent`, `list_decisions`, `list_action_items` and `transcript` to read; `suggest_correction` and `log_work` to write, as anyone may, `read_my_files` to read its own GOAL.md, AGENTS.md, SOUL.md and skills, `update_my_file` to change one when its owner asks outright in its thread, and `propose_my_change` to offer new versions when something the owner said changes its goal, job or tone for good: one question in its thread with **Update** / **Not now** and each file in full; Update saves exactly those files as the owner's change, anything else drops the offer (one offer at a time). Each change is a version the owner can undo; memory.md stays the run's out-folder file. A team bot changes its own files on its run token, whatever its maker's role in the team (`BOT_TOOLS`). It can't change pages, save notes in someone's name or share them, and none of the settings, bots, computers, accounts or secrets tools exist for it. Amb keeps all of them; it acts for the person.
 - **Who wrote it:** a correction says "the bot <name>", a work log's tool is "<name> (bot)"; both carry the owner as the person they're from.
 - **Its instructions** tell it to look in the brain before it answers or decides anything about people, projects, customers or earlier decisions.
 
