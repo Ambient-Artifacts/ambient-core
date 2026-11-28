@@ -13,7 +13,7 @@
     "@brain/spec": "*",
     "@brain/team": "*",
     "@brain/wiki": "*",
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "convex": "^1.46.0",
     "express": "^5.2.1",
     "heic-decode": "^2.1.0",
