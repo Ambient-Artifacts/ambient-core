@@ -677,6 +677,7 @@ export const ProposedSettings = z
         secrets: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]{0,63}$/)).max(30).nullable().optional(),
         report: z.enum(["news", "every_run"]).optional(),
         delegate: z.enum(["never", "brain", "most"]).optional(),
+        browser: z.boolean().optional(),
         model: z.unknown().optional(),
         runtime: z.string().max(40).optional(),
       })

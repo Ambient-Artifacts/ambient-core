@@ -21,6 +21,7 @@ events in Ambient's own shape, and a channel interface with the app as its first
 | `isolation` | `container`, `host` | `container`: its own Podman container and volume (its workspace, `HOME`), only its granted secrets. `host`: like a loop today, as the computer's routine user. |
 | `secrets` | names, or `null` | The secrets its runs get. `null` (loops from before): all of its owner's. |
 | `report` | `news`, `every_run` | `news`: the thread gets a run's result only when it failed, asked something or said something new; `every_run`: every result. |
+| `browser` | `true`, `false` | A headless Chromium in its runs, to open sites, click through them, fill forms and take screenshots (see "A browser"). Claude Code in its own container only. Default `false`. |
 
 State, worked out by the gateway (never stored). It shows only in the face and how it moves; the
 colour never changes:
@@ -72,6 +73,7 @@ routine is a bot):
   "isolation": "container",
   "secrets": ["GH_TOKEN"],
   "report": "news",
+  "browser": false,
   "state": "needs_you",
   "openQuestion": { "id": "…", "text": "Which repo?", "choices": ["ambient-core", "ambient-ios"], "askedAt": 1763380000000 },
   "lastMessage": { "text": "Opened PR #41 …", "kind": "result", "at": 1763380000000 }
@@ -79,7 +81,7 @@ routine is a bot):
 ```
 
 `POST /v1/app/routines` and `PATCH /v1/app/routines/:id` take `bot` as input:
-`{ "face"?, "color"?, "wear"?: [..], "isolation"?, "secrets"?: [names] | null, "report"? }` (all optional; `runtime` may be
+`{ "face"?, "color"?, "wear"?: [..], "isolation"?, "secrets"?: [names] | null, "report"?, "browser"? }` (all optional; `runtime` may be
 sent and must be `claude-code` or `codex`). Without it a new routine gets a bot's defaults;
 `"bot": null` on PATCH is refused (`bots_only`).
 
@@ -474,6 +476,35 @@ command line. The bot's secrets reach its commands; the run's token and the sign
 
 **For Amb:** `update_routine` with `bot.runtime: "codex"` (and an OpenAI model), `use_openai_account`,
 and `sign_in_chatgpt` (returns the link and code to give the person). Keys go in through the app only.
+
+## A browser
+
+A bot with `browser: true` gets a browser in its runs: a headless Chromium driven by
+[Playwright's MCP server](https://github.com/microsoft/playwright-mcp), the same kind of browser
+use as Claude Code driving a person's Chrome, without a screen. It opens pages, reads them as an
+accessibility snapshot (refs to click and type into), fills forms and takes screenshots: testing a
+web app by clicking through it, checking a page after a deploy, reading a site without an API.
+
+- **Where:** only a Claude Code bot in its own container (`isolation: container`). The setting can
+  be on for another bot, but its runs go without a browser and the runner logs why.
+- **Turn it on:** in the app, or `update_routine` / `create_routine` with `bot: { browser: true }`
+  over MCP; a bot can propose it for itself (`propose_bot_change`, `bot.browser`).
+- **The run** (runner 0.19.0): the container runs from `localhost/ambient-bot-browser:<image>-<mcp>`,
+  the bots' image plus `@playwright/mcp` (pinned) and the Chromium of the Playwright it ships with.
+  It's built on the computer the first time such a bot runs (a few minutes, about 800 MB more on
+  disk), or ahead of time with `ambient-runner image browser`; bots without a browser keep the
+  plain image. The run gets `--shm-size 1g` (Chromium keeps its pages in `/dev/shm`) and an MCP
+  server `browser` (`playwright-mcp --headless --isolated --no-sandbox`) next to its others, with
+  `mcp__browser` allowed. A granted connection named `browser` is left out of such a run.
+- **Sandbox:** Chromium's own sandbox needs user namespaces the container doesn't give
+  (`--cap-drop all`, `no-new-privileges`), so it runs with `--no-sandbox`; the container is the
+  boundary. The browser reaches what the container reaches: the internet, and the computer's own
+  services at `host.containers.internal`.
+- **Each run starts with a fresh profile:** no cookies from the last run. A bot signs in again with
+  the secrets it was given (a test account's password as a secret).
+- **What the owner sees:** the bot is told to save screenshots under `/home/bot` and send them
+  with `send_file`, the screenshot of what broke above all. There's no live view and no video in
+  the chat yet.
 
 ## Files in the chat
 

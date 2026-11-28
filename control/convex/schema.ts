@@ -32,6 +32,8 @@ export const botSettings = v.object({
   model: v.optional(v.object({ model: v.string(), effort: v.optional(v.string()), fallback: v.optional(v.string()) })),
   /** What Ambient may answer for its owner: never, brain (default), most. */
   delegate: v.optional(v.union(v.literal("never"), v.literal("brain"), v.literal("most"))),
+  /** A headless browser in its runs (Claude Code in its own container); absent: none. */
+  browser: v.optional(v.boolean()),
 });
 /** A model choice: the model, its effort, and a model to fall back to (docs/bots.md). */
 export const modelChoice = v.object({ model: v.string(), effort: v.optional(v.string()), fallback: v.optional(v.string()) });
