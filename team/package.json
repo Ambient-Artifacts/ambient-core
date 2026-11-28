@@ -15,7 +15,7 @@
     "@anthropic-ai/sdk": "^0.133.0",
     "@brain/spec": "*",
     "@brain/wiki": "*",
-    "express": "^5.2.1",
+    "express": "^5.3.0",
     "jose": "^6.2.12",
     "zod": "^4.6.7"
   },

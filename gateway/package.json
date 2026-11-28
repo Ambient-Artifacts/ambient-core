@@ -15,7 +15,7 @@
     "@brain/wiki": "*",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "convex": "^1.46.0",
-    "express": "^5.2.1",
+    "express": "^5.3.0",
     "heic-decode": "^2.1.0",
     "jose": "^6.2.12",
     "jpeg-js": "^0.4.4",
