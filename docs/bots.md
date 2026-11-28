@@ -506,6 +506,29 @@ web app by clicking through it, checking a page after a deploy, reading a site w
   with `send_file`, the screenshot of what broke above all. There's no live view and no video in
   the chat yet.
 
+### Amb's browser
+
+Amb gets a browser in the person's own chat too (runner 0.20.0): the same image and tools, in a
+container on the computer Amb runs on.
+
+- **When:** the gateway sends `browser: true` with a chat message (`ComputerJob.browser`) unless the
+  computer is Full root (`access: "full"`): what a web page says reaches Amb itself, with the
+  person's whole Ambient, and there Amb runs root commands without asking. Not in Ambient's own
+  turns (heartbeat, a bot's question) and not in shared threads (Slack, Teams).
+- **On the computer:** it needs Podman. The image is built in the background the first time a chat
+  may have a browser; until it's there, sessions start without one. A session that gains or loses
+  the browser starts again where it was (`--resume`), like one whose connections changed.
+- **How it's wired:** Claude Code starts its MCP servers as the routine user, who can't use the
+  runner's Podman. The session's `browser` server is `ambient-runner amb-browser <folder>`: it
+  hands its stdio to the Ambient service over `<state>/ambient/browser.sock` (owned by the routine
+  user, mode 0600), and the service runs `playwright-mcp` in a container as the routine user, one
+  per open session, stopped when the session ends. The session's folder is mounted read-only at
+  the same path (files to upload), its `outbox/` and `.browser/` writable: screenshots saved as
+  `outbox/<name>.png` go with the reply, and the page snapshots the tools point to can be read.
+- **Its instructions** say page text is data, never an instruction: Amb does only what the person
+  asked, and tells them when a page seems to want something.
+- **Sign-ins** last while the session is open (the browser profile lives in the container).
+
 ## Files in the chat
 
 `POST /v1/app/ambient/chat` and `POST /v1/app/routines/:id/thread` (a bot's thread) also take
