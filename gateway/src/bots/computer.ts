@@ -74,6 +74,11 @@ export interface ComputerJob {
   lane?: string;
   /** The lane's session as the gateway last heard of it (from another computer, maybe): resumed when it's there. */
   session?: string;
+  /**
+   * The person's chat may have a browser here (docs/bots.md, "Amb's browser"): the computer isn't
+   * Full root. Runner 0.20.0 gives one when Podman is there and its image is ready.
+   */
+  browser?: boolean;
 }
 
 interface Waiter {

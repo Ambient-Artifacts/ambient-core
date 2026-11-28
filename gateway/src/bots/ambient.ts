@@ -24,6 +24,17 @@ export interface AmbientComputer {
   name: string;
   /** A team's server (its team's name), or null for the person's own computer. */
   team: string | null;
+  /** What Ambient may do there (docs/bots.md, "Access"); absent counts as standard. */
+  access?: "standard" | "admin" | "full";
+}
+
+/**
+ * Whether Amb has a browser in this chat (docs/bots.md, "Amb's browser"): when the person turned
+ * it on (Amb's settings), and not where it runs root commands without asking, since what a web
+ * page says reaches Amb itself.
+ */
+export function ambBrowserAllowed(computer: AmbientComputer, on: boolean): boolean {
+  return on && computer.access !== "full";
 }
 
 export interface ChatMessage {
@@ -225,6 +236,8 @@ export function ambientInstructions(name: string, self: AmbSelf | string = ""): 
 
 export class AmbientChat {
   private pending = new Map<string, number>();
+  /** Whether the person turned Amb's browser on (Amb's settings; set once they exist). */
+  browserOn?: (uid: string) => Promise<boolean>;
 
   constructor(
     private d: {
@@ -521,6 +534,7 @@ export class AmbientChat {
             ...(await this.skills(uid)),
             ...(mcp.length ? { mcp: mcp.map(({ name: n, path }) => ({ name: n, path })) } : {}),
             mode: "chat",
+            ...(ambBrowserAllowed(computer, (await this.browserOn?.(uid).catch(() => false)) ?? false) ? { browser: true } : {}),
             // A new session once the chat was cleared, even if Ambient wrote in it since.
             fresh: !history.some((t) => t.role === "user"),
             history: trimHistory(history),

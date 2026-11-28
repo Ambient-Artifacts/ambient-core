@@ -524,7 +524,7 @@ export class RoutineService {
    * Where Ambient can run for a user, in order: their own computers, then their teams' servers
    * (Ambient's own machine for the team, one session per person there).
    */
-  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null; teamId: string | null; own: boolean; personal: boolean }[]> {
+  async computersOf(uid: string): Promise<{ id: string; uid: string; name: string; team: string | null; teamId: string | null; own: boolean; personal: boolean; access: Access }[]> {
     const teams = ((await this.d.teamsOf?.(uid).catch(() => [])) ?? []).filter((t) => t.status === "active");
     const out = (await this.d.control.q(api.routines.list, { uid: uid as never, teamIds: teams.map((t) => t.id) as never })) as unknown as { hosts: HostRow[] };
     const ready = out.hosts.filter((h) => h.ready);
@@ -534,7 +534,7 @@ export class RoutineService {
     const agreed = new Set(teams.filter((t) => t.personalOnTeamComputer).map((t) => String(t.id)));
     const shaped = ready.map((h) => {
       const own = isYours(h, uid);
-      return { id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null, teamId: h.teamId ? String(h.teamId) : null, own, personal: own || (!!h.teamId && agreed.has(String(h.teamId))) };
+      return { id: h.id, uid, name: h.name, team: teams.find((t) => t.id === h.teamId)?.name ?? null, teamId: h.teamId ? String(h.teamId) : null, own, personal: own || (!!h.teamId && agreed.has(String(h.teamId))), access: h.access ?? "standard" };
     });
     return [...shaped.filter((h) => h.own), ...shaped.filter((h) => !h.own)];
   }

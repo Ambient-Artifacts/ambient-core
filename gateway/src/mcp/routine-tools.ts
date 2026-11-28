@@ -1537,15 +1537,15 @@ function registerLearningTools(
       {
         title: "Ambient's settings",
         description:
-          'Two things about how Ambient reaches the user. notify: whether it tells them when one of their bots needs them ("important": a failed run, a decision waiting long, an approval; "never"). reach: where it writes first when it does ("app": a push; "imessage": a text, once they connected iMessage with connect_imessage; "slack" or "teams": a direct message from Ambient there, once they wrote to it there once). An answer always goes back where they asked, whatever reach is. Change either only when they ask.',
-        inputSchema: { notify: z.enum(["important", "never"]).optional(), reach: z.enum(["app", "imessage", "slack", "teams"]).optional() },
+          'Ambient\'s settings for the user. notify: whether it tells them when one of their bots needs them ("important": a failed run, a decision waiting long, an approval; "never"). reach: where it writes first when it does ("app": a push; "imessage": a text, once they connected iMessage with connect_imessage; "slack" or "teams": a direct message from Ambient there, once they wrote to it there once). An answer always goes back where they asked, whatever reach is. browser: whether Ambient has a browser in their chat (a headless Chromium in a container on its computer, never on a Full root computer; off by default); it takes effect from their next message. Change any of them only when they ask.',
+        inputSchema: { notify: z.enum(["important", "never"]).optional(), reach: z.enum(["app", "imessage", "slack", "teams"]).optional(), browser: z.boolean().optional() },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async ({ notify, reach }) =>
+      async ({ notify, reach, browser }) =>
         guard(async () => {
-          const v = notify || reach ? await settings.set(actor.uid, { ...(notify ? { notify } : {}), ...(reach ? { reach } : {}) }) : await settings.get(actor.uid);
+          const v = notify || reach || browser !== undefined ? await settings.set(actor.uid, { ...(notify ? { notify } : {}), ...(reach ? { reach } : {}), ...(browser !== undefined ? { browser } : {}) }) : await settings.get(actor.uid);
           const where = v.reach === "imessage" ? "It writes to them first on iMessage." : v.reach === "slack" ? "It writes to them first in Slack." : v.reach === "teams" ? "It writes to them first in Microsoft Teams." : "It writes to them first in the app (a push).";
-          return result(`${v.notify === "never" ? "Ambient doesn't tell them about their bots on its own." : "Ambient tells them when a bot needs them (failed runs, decisions waiting, approvals)."} ${where}`, { settings: v });
+          return result(`${v.notify === "never" ? "Ambient doesn't tell them about their bots on its own." : "Ambient tells them when a bot needs them (failed runs, decisions waiting, approvals)."} ${where} ${v.browser ? "It has a browser in their chat (not on a Full root computer)." : "It has no browser in their chat."}`, { settings: v });
         }),
     );
   }
