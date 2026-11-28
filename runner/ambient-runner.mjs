@@ -778,7 +778,13 @@ async function ambientService() {
    */
   const pod = podman();
   const browserSock = join(confDir, "browser.sock");
-  let browserImage = pod && spawnSync(pod, ["image", "exists", BROWSER_IMAGE]).status === 0 ? "ready" : "missing";
+  // Checked in the background: Podman's first call can take seconds, and the chat mustn't wait.
+  let browserImage = "checking";
+  if (pod) {
+    const check = spawn(pod, ["image", "exists", BROWSER_IMAGE], { stdio: "ignore", env: { PATH: SYSTEM_PATH.join(":"), HOME: "/root" } });
+    check.on("error", () => (browserImage = "missing"));
+    check.on("close", (code) => (browserImage = code === 0 ? "ready" : "missing"));
+  }
   let browserFailedAt = 0;
   /** The socket the sessions' browser servers reach the service on is open. */
   let browserListening = false;
