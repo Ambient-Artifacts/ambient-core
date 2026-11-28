@@ -98,6 +98,7 @@ ${result("Did it.")}
     `#!/bin/sh
 if [ "$1" = "image" ]; then exit 0; fi
 printf '%s\\n' "$@" > "${join(dir, "podman-args.txt")}"
+for a in "$@"; do case "$a" in *:/opt/ambient/mcp.json:ro) cp "\${a%%:*}" "${join(dir, "podman-mcp.json")}" ;; esac; done
 if echo "$@" | grep -q -- "--input-format"; then head -n 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).message.content[0].text)}catch{process.stdout.write(s)}})' > /dev/null; else cat > /dev/null; fi
 ${result("Boxed run done.")}
 `,
@@ -212,6 +213,24 @@ describe("a bot's folder on the computer", () => {
     expect(readFileSync(join(dir, "work", "prompt.txt"), "utf8")).toMatch(/Files that came with it \(open them with your file tools\):\n- \/.+\/runs\/run00000003\/out\/files\/notes\.md$/);
   });
 
+  it("gives no browser to a bot on the computer itself, and says why", async () => {
+    start = {
+      run: { id: "run00000006", trigger: "schedule" },
+      routine: { id: "bot00000006", name: "On the computer", prompt: "Wake up.", folder: join(dir, "work") },
+      env: {},
+      bot: { face: "classic", runtime: "claude-code", isolation: "host", report: "news", browser: true },
+      resume: null,
+      runToken: RUN_TOKEN,
+      workspace: { system: "You're a bot.", skills: [], memory: "" },
+    } as Start;
+    const out = await runner(["run", "bot00000006"]);
+    expect(out.code, out.out).toBe(0);
+    expect(out.out).toContain("a browser needs Claude Code in the bot's own container");
+    const args = lines(join(dir, "work", "args.txt"));
+    expect(after(args, "--allowedTools")).not.toContain("mcp__browser");
+    expect(after(args, "--append-system-prompt")).toBe("You're a bot.");
+  });
+
   it("runs as before when the gateway sends no workspace", async () => {
     start = {
       run: { id: "run00000002", trigger: "schedule" },
@@ -268,6 +287,55 @@ describe("a bot's folder in its container", () => {
     expect(after(args, "--append-system-prompt")).toBe("Your memory: /opt/ambient/out/memory.md. Your handoff: /opt/ambient/out/handoff.md.");
     // Nothing written in the container: memory as it was, an empty handoff.
     expect(finished).toMatchObject({ status: "succeeded", memory: "remember this", handoff: "" });
+  });
+
+  it("gives a bot with a browser its own image, room in /dev/shm, the browser's MCP server and a word about it", async () => {
+    start = {
+      run: { id: "run00000004", trigger: "manual" },
+      routine: { id: "bot00000004", name: "UI tester", prompt: "Click through the sign-up.", folder: null },
+      env: {},
+      bot: { face: "round", runtime: "claude-code", isolation: "container", report: "news", browser: true },
+      resume: null,
+      runToken: RUN_TOKEN,
+      // A connection named "browser" would shadow the run's own browser: it's left out.
+      mcp: [
+        { name: "browser", path: "/v1/bot/mcp/cccccccccccccccc" },
+        { name: "notion", path: "/v1/bot/mcp/0123456789abcdef" },
+      ],
+      workspace: { system: "You're a bot.", skills: [], memory: "" },
+    } as Start;
+    const out = await runner(["run", "bot00000004"]);
+    expect(out.code, out.out).toBe(0);
+    const args = lines(join(dir, "podman-args.txt"));
+    expect(args).toContain("localhost/ambient-bot-browser:3-0.0.86");
+    expect(args).not.toContain("localhost/ambient-bot:3");
+    expect(after(args, "--shm-size")).toBe("1g");
+    expect(after(args, "--allowedTools")!.endsWith(",mcp__ambient,mcp__notion,mcp__browser")).toBe(true);
+    expect(after(args, "--append-system-prompt")).toMatch(/^You're a bot\. You have a browser: /);
+    const config = JSON.parse(readFileSync(join(dir, "podman-mcp.json"), "utf8")) as { mcpServers: Record<string, { command?: string; args?: string[]; url?: string }> };
+    expect(Object.keys(config.mcpServers).sort()).toEqual(["ambient", "ambient-bot", "browser", "notion"]);
+    expect(config.mcpServers.browser!.command).toBe("playwright-mcp");
+    expect(config.mcpServers.browser!.args).toEqual(expect.arrayContaining(["--headless", "--isolated", "--no-sandbox"]));
+  });
+
+  it("runs a bot without a browser as before: the bots' image, no browser", async () => {
+    start = {
+      run: { id: "run00000005", trigger: "manual" },
+      routine: { id: "bot00000005", name: "Boxed", prompt: "Wake up.", folder: null },
+      env: {},
+      bot: { face: "round", runtime: "claude-code", isolation: "container", report: "news" },
+      resume: null,
+      runToken: RUN_TOKEN,
+      workspace: { system: "You're a bot.", skills: [], memory: "" },
+    };
+    const out = await runner(["run", "bot00000005"]);
+    expect(out.code, out.out).toBe(0);
+    const args = lines(join(dir, "podman-args.txt"));
+    expect(args).toContain("localhost/ambient-bot:3");
+    expect(args).not.toContain("--shm-size");
+    expect(after(args, "--allowedTools")).not.toContain("mcp__browser");
+    expect(after(args, "--append-system-prompt")).toBe("You're a bot.");
+    expect(Object.keys((JSON.parse(readFileSync(join(dir, "podman-mcp.json"), "utf8")) as { mcpServers: object }).mcpServers)).not.toContain("browser");
   });
 
   it("swaps the skills it put there last time, and leaves the bot's own", () => {

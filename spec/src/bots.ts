@@ -123,6 +123,8 @@ export const BotSettings = z.object({
   model: z.object({ model: z.string(), effort: z.string().optional(), fallback: z.string().optional() }).optional(),
   /** What Ambient may answer for the bot's owner (docs/bots.md, "Decisions"); absent: brain. */
   delegate: z.enum(["never", "brain", "most"]).optional(),
+  /** A headless browser in its runs (docs/bots.md, "A browser"); only stored when on. */
+  browser: z.boolean().optional(),
 });
 export type BotSettings = z.infer<typeof BotSettings>;
 
@@ -140,6 +142,8 @@ export const BotInput = z.object({
   /** null: the computer's default model. */
   model: ModelChoice.nullable().optional(),
   delegate: z.enum(["never", "brain", "most"]).optional(),
+  /** A headless browser in its runs: Claude Code in its own container only. */
+  browser: z.boolean().optional(),
 });
 export type BotInput = z.infer<typeof BotInput>;
 
@@ -165,6 +169,7 @@ export function botSettings(input: BotInput, current?: BotSettings): BotSettings
     report: input.report ?? base.report,
     ...(model ? { model } : {}),
     ...((input.delegate ?? base.delegate) ? { delegate: input.delegate ?? base.delegate } : {}),
+    ...((input.browser ?? base.browser) ? { browser: true } : {}),
   };
 }
 

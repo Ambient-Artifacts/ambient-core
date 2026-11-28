@@ -294,6 +294,30 @@ describe("bots over MCP", () => {
     await client.callTool({ name: "bot_thread", arguments: { id: r.id, mark_read: true } });
     expect((await one(r.id)).bot?.state).toBe("asleep");
     await client.close();
+  });
+
+  it("get a browser when asked, in the app or over MCP, and their runs are told", async () => {
+    // Off by default, and only stored when on.
+    const made = await appCall(s, lena.access_token, "POST", "/v1/app/routines", { name: "UI tester", prompt: "Click through the sign-up.", schedule: daily, computer: computerId, bot: {} });
+    const r = made.json.routine as R;
+    expect(r.bot).toMatchObject({ browser: false });
+    const on = await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${r.id}`, { bot: { browser: true } });
+    expect((on.json.routine as R).bot).toMatchObject({ browser: true, isolation: "container" });
+    expect((await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${r.id}`, { bot: { browser: "yes" } })).status).toBe(400);
+    await appCall(s, lena.access_token, "PATCH", `/v1/app/routines/${r.id}`, { enabled: true });
+    const start = await hostCall(host, "POST", `/v1/host/routines/${r.id}/runs`);
+    expect(start.json.bot).toMatchObject({ browser: true, isolation: "container", runtime: "claude-code" });
+    await hostCall(host, "POST", `/v1/host/runs/${(start.json.run as { id: string }).id}`, { status: "succeeded", summary: "Sign-up works." });
+    // Over MCP: turned off again, and a change to another setting keeps it as it is.
+    const pat = String((await appCall(s, lena.access_token, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
+    const client = await mcpClient(`${s.origin}/mcp`, pat);
+    expect(text(await client.callTool({ name: "list_routines", arguments: {} }))).toContain("has a browser");
+    const kept = await client.callTool({ name: "update_routine", arguments: { id: r.id, bot: { report: "every_run" } } });
+    expect(((kept.structuredContent as { routine: R }).routine).bot).toMatchObject({ browser: true, report: "every_run" });
+    const off = await client.callTool({ name: "update_routine", arguments: { id: r.id, bot: { browser: false } } });
+    expect(((off.structuredContent as { routine: R }).routine).bot).toMatchObject({ browser: false });
+    expect((await hostCall(host, "POST", `/v1/host/routines/${r.id}/runs`)).json.bot).not.toHaveProperty("browser");
+    await client.close();
 
   });
 });

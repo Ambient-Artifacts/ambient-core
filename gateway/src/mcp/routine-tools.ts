@@ -82,7 +82,7 @@ const LOOKS_LINE = Object.entries(BOT_LOOKS).map(([job, wear]) => `${job}: ${wea
 function botLine(r: Routine): string | null {
   if (!r.bot) return null;
   const b = r.bot;
-  const parts = [`Bot: ${STATE_WORDS[b.state] ?? b.state}`, `a ${b.color} ${b.face}${b.wear.length ? ` wearing ${b.wear.join(", ")}` : ""}`, b.runtime === "codex" ? "runs on Codex" : "runs on Claude Code", b.isolation === "container" ? "own container" : "runs on the computer itself", `secrets: ${b.secrets === null ? "all of its owner's" : b.secrets.join(", ") || "none"}`, `reports ${b.report === "news" ? "news only" : "every run"}`];
+  const parts = [`Bot: ${STATE_WORDS[b.state] ?? b.state}`, `a ${b.color} ${b.face}${b.wear.length ? ` wearing ${b.wear.join(", ")}` : ""}`, b.runtime === "codex" ? "runs on Codex" : "runs on Claude Code", b.isolation === "container" ? "own container" : "runs on the computer itself", ...(b.browser ? ["has a browser"] : []), `secrets: ${b.secrets === null ? "all of its owner's" : b.secrets.join(", ") || "none"}`, `reports ${b.report === "news" ? "news only" : "every run"}`];
   const q = b.openQuestion ? `\n  Asked ${new Date(b.openQuestion.askedAt).toISOString().slice(0, 16).replace("T", " ")} UTC: ${b.openQuestion.text}${b.openQuestion.choices ? ` (choices: ${b.openQuestion.choices.join(" / ")})` : ""}` : "";
   return `  ${parts.join(" · ")}${q}`;
 }
@@ -161,6 +161,7 @@ const BotArg = z
     report: z.enum(BOT_REPORTS).optional().describe('"news" (default): its thread gets a result only when it failed or says something new; "every_run".'),
     model: ModelArg.nullable().optional().describe("Its own model; null: the computer's default."),
     delegate: z.enum(["never", "brain", "most"]).optional().describe('What Ambient may answer for the user when this bot asks: "never", "brain" (default: when the brain makes it clear), "most" (all but spending, publishing, deleting).'),
+    browser: z.boolean().optional().describe("A headless browser (Chromium) in its runs, to open sites, click through them, fill forms and take screenshots: testing a web app, checking a page. Only for a Claude Code bot in its own container. Default false."),
   })
   .describe("Make it a bot: a loop with a face and a thread, that can ask the user while it runs.");
 
@@ -941,7 +942,7 @@ function registerAutomationTools(server: McpServer, actor: Actor, auto: import("
     {
       title: "Propose a change to a bot",
       description:
-        "Propose a change to one of the user's bots instead of making it: a new AGENTS.md (or other file), or settings (schedule, enabled, bot: isolation, secrets, report, delegate, model, runtime). The user gets it as a decision in the chat with Apply / Not now; it's made only when they say yes. Use it for anything beyond a bot's memory.md and skills when they didn't ask for the change themselves.",
+        "Propose a change to one of the user's bots instead of making it: a new AGENTS.md (or other file), or settings (schedule, enabled, bot: isolation, secrets, report, delegate, model, runtime, browser). The user gets it as a decision in the chat with Apply / Not now; it's made only when they say yes. Use it for anything beyond a bot's memory.md and skills when they didn't ask for the change themselves.",
       inputSchema: {
         id: z.string().max(64).describe("The bot's id."),
         path: z.string().max(200).optional().describe("The file to change, e.g. AGENTS.md."),

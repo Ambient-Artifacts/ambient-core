@@ -66,7 +66,7 @@ interface BotRow {
   promptCt: string;
   schedule: unknown;
   enabled: boolean;
-  bot: { face: string; color?: string; wear?: string[]; runtime: string; isolation: string; secrets?: string[]; report: string; model?: unknown; delegate?: string };
+  bot: { face: string; color?: string; wear?: string[]; runtime: string; isolation: string; secrets?: string[]; report: string; model?: unknown; delegate?: string; browser?: boolean };
   createdAt: number;
 }
 
@@ -232,6 +232,7 @@ export class BotMirror {
         secrets: b.bot.secrets ?? "all",
         model: b.bot.model ?? null,
         delegate: b.bot.delegate ?? "brain",
+        browser: b.bot.browser === true,
         mirroredFrom: "Ambient",
       };
       bots.push({

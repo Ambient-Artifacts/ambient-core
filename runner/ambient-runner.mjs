@@ -7,7 +7,8 @@
 //   ambient-runner run <routine-id>              what each routine's timer starts: claude -p (a bot
 //                                                with isolation "container": in its own Podman container)
 //   ambient-runner bot-mcp                       the ask_owner tool a bot's run gets (MCP over stdio)
-//   ambient-runner image                         build the bots' container image now
+//   ambient-runner image [browser]               build the bots' container image now (or the one
+//                                                with a browser, for bots with `browser` on)
 //   ambient-runner ambient                       Ambient on this computer: one Claude Code session that
 //                                                stays open, answering the person's chat (a service)
 //   ambient-runner claude-status                 "signed-in" or "missing": can Claude Code run here
@@ -28,7 +29,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.18.1";
+const VERSION = "0.19.0";
 const DEFAULT_SERVER = "https://mcp.ambientartifacts.si";
 
 // Tests point it elsewhere, so a runner installed on the same machine never leaks into them.
@@ -1500,7 +1501,7 @@ const ADAPTERS = {
       // --include-partial-messages: the text as it's written (stream_event deltas), for the live
       // text in the app (docs/bots.md, "Live text").
       const args = ["-p", ...(opts.streaming ? ["--input-format", "stream-json"] : []), "--output-format", "stream-json", "--include-partial-messages", "--verbose", ...cfg.claudeArgs, "--append-system-prompt", system || systemPrompt(routine, runInfo.trigger, bot)];
-      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", ["mcp__ambient-bot__ask_owner", "mcp__ambient-bot__send_file", "mcp__ambient-bot__search_history", "mcp__ambient-bot__wake_me", "mcp__ambient-bot__cancel_wake_up", "mcp__ambient", ...(opts.granted ?? []).map((c) => `mcp__${c.name}`)].join(","));
+      if (mcpConfig) args.push("--mcp-config", mcpConfig, "--strict-mcp-config", "--allowedTools", ["mcp__ambient-bot__ask_owner", "mcp__ambient-bot__send_file", "mcp__ambient-bot__search_history", "mcp__ambient-bot__wake_me", "mcp__ambient-bot__cancel_wake_up", "mcp__ambient", ...(opts.granted ?? []).map((c) => `mcp__${c.name}`), ...(opts.browser ? ["mcp__browser"] : [])].join(","));
       if (resume?.sessionId) args.push("--resume", resume.sessionId);
       const stdin = resume ? (resume.sessionId ? resume.message : `${routine.prompt}\n\n${resume.message}`) : routine.prompt;
       return { args, stdin };
@@ -1705,15 +1706,55 @@ function podman() {
   return existsSync(p) ? p : null;
 }
 
-/** Build the bots' image unless it's there. */
-function ensureImage(p) {
-  if (spawnSync(p, ["image", "exists", IMAGE]).status === 0) return null;
-  log(`Building the bots' image ${IMAGE} (once, a few minutes)…`);
-  const dir = join(STATE_DIR, "image");
+/**
+ * A bot with `browser` on (docs/bots.md, "A browser") runs in this image instead: the bots' image
+ * plus Chromium and the Playwright MCP server, pinned so every computer gets the same tools. Its
+ * own image, so bots without a browser don't carry Chromium's ~800 MB, and it's built only on
+ * computers that have such a bot.
+ */
+const PLAYWRIGHT_MCP = "0.0.86";
+const BROWSER_IMAGE = `localhost/ambient-bot-browser:${IMAGE_VERSION}-${PLAYWRIGHT_MCP}`;
+const BROWSER_CONTAINERFILE = `FROM ${IMAGE}
+USER root
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+# Chromium from the Playwright the MCP server ships with, so the two always match. /home/bot is left
+# empty and the bot's: once this layer has touched it, Podman's :U no longer hands a new bot's
+# volume to the bot's user (it takes the folder's owner from the image), and root's would leave
+# the bot's home unwritable.
+RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP} && npm cache clean --force \\
+ && node /usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js install --with-deps chromium \\
+ && rm -rf /var/lib/apt/lists/* /home/bot/.npm /home/bot/.cache && chmod -R a+rX /opt/ms-playwright \\
+ && chown node:node /home/bot
+USER node
+`;
+/** Where a run's browser writes what it isn't told a name for (snapshots, unnamed screenshots); gone with the container. */
+const CONTAINER_BROWSER_OUT = "/tmp/ambient-browser";
+
+/**
+ * The browser for a bot's run: Playwright's MCP server, headless (a server has no screen), with a
+ * fresh profile each run. Chromium's own sandbox needs user namespaces the container doesn't
+ * allow (--cap-drop all, no-new-privileges); the container is the sandbox.
+ */
+const BROWSER_MCP = { command: "playwright-mcp", args: ["--headless", "--browser", "chromium", "--isolated", "--no-sandbox", "--output-dir", CONTAINER_BROWSER_OUT] };
+
+/** What the bot is told about its browser (appended to its instructions). */
+const BROWSER_SYSTEM =
+  "You have a browser: the browser tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_take_screenshot, …) drive a headless Chromium in your container. Read pages with browser_snapshot (cheaper than screenshots) and act on the refs it gives you. It starts with a fresh profile every run: sign in again when a site needs it, with the secrets you were given. To show your owner what you saw, save screenshots under /home/bot (browser_take_screenshot with a filename) and send them with send_file; when something breaks, send the screenshot of it.";
+
+/** Build the bots' image (or the one with a browser) unless it's there. */
+function ensureImage(p, browser = false) {
+  if (browser) {
+    const base = ensureImage(p);
+    if (base) return base;
+  }
+  const [image, containerfile, what] = browser ? [BROWSER_IMAGE, BROWSER_CONTAINERFILE, "the bots' image with a browser"] : [IMAGE, CONTAINERFILE, "the bots' image"];
+  if (spawnSync(p, ["image", "exists", image]).status === 0) return null;
+  log(`Building ${what} ${image} (once, a few minutes)…`);
+  const dir = join(STATE_DIR, browser ? "image-browser" : "image");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "Containerfile"), CONTAINERFILE);
-  const r = spawnSync(p, ["build", "-t", IMAGE, "-f", join(dir, "Containerfile"), dir], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
-  if (r.status !== 0) return `Couldn't build the bots' image: ${(r.stderr || r.stdout || "").trim().split("\n").slice(-6).join("\n")}`;
+  writeFileSync(join(dir, "Containerfile"), containerfile);
+  const r = spawnSync(p, ["build", "-t", image, "-f", join(dir, "Containerfile"), dir], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) return `Couldn't build ${what}: ${(r.stderr || r.stdout || "").trim().split("\n").slice(-6).join("\n")}`;
   return null;
 }
 
@@ -2057,8 +2098,12 @@ async function run(id) {
   }
   // `env`: the owner's secrets (a bot: only those granted to it). They go to the run only.
   const { run: runInfo, routine, env: secrets = {}, bot = null, resume = null, runToken = null, workspace = null } = start;
+  // A browser (docs/bots.md, "A browser"): a Claude Code bot in its own container, with a run token for its MCP config.
+  const browser = bot?.browser === true && bot.isolation === "container" && (bot.runtime ?? "claude-code") === "claude-code" && Boolean(runToken);
+  if (bot?.browser === true && !browser) log("This bot has a browser turned on, but a browser needs Claude Code in the bot's own container: running without one.");
   // The services this bot was given (gateway with MCP connections on): reached at the gateway with the run's token.
-  const granted = bot && runToken ? grantedMcp(start.mcp) : [];
+  // With a browser, its own server is "browser": a connection of that name would shadow it.
+  const granted = bot && runToken ? grantedMcp(start.mcp).filter((c) => !(browser && c.name === "browser")) : [];
   // A bot's folder for this run (gateways from runner 0.8.0 on); without it, runs go as before.
   const ws = bot && workspace && typeof workspace === "object" ? workspace : null;
   const user = cfg.user;
@@ -2120,6 +2165,7 @@ async function run(id) {
           // The brain, with the run's token: what an employee's AI app may do there, while the run goes.
           ambient: { type: "http", url: `${cfg.server}/mcp`, headers: { Authorization: `Bearer ${runToken}` } },
           ...Object.fromEntries(granted.map((c) => [c.name, { type: "http", url: `${cfg.server}${c.path}`, headers: { Authorization: `Bearer ${runToken}` } }])),
+          ...(browser ? { browser: BROWSER_MCP } : {}),
         },
       }),
       { mode: 0o600 },
@@ -2169,7 +2215,9 @@ async function run(id) {
       }
     }
   }
-  const system = ws && typeof ws.system === "string" && ws.system.trim() ? ws.system.replaceAll("{{OUT}}", contained ? CONTAINER_OUT : outDir) : null;
+  const given = ws && typeof ws.system === "string" && ws.system.trim() ? ws.system.replaceAll("{{OUT}}", contained ? CONTAINER_OUT : outDir) : null;
+  // The browser is the runner's to give, so it says so itself (an older gateway's text or none).
+  const system = browser ? `${given ?? systemPrompt(routine, runInfo.trigger, bot)} ${BROWSER_SYSTEM}` : given;
   const cleanup = () => rmSync(runDir, { recursive: true, force: true });
 
   // Codex bots: the computer's ChatGPT sign-in goes into the container (and back out, refreshed)
@@ -2236,7 +2284,7 @@ async function run(id) {
   const mcpArg = codex ? mcpServer : mcpFile && (contained ? "/opt/ambient/mcp.json" : mcpFile);
   // A bot's Claude Code run stays open for messages that come in while it works (stream-json in).
   const streaming = Boolean(adapter.streams && bot && runToken);
-  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, carryOn, mcpArg, system, { contained, outDir: contained ? null : outDir, streaming, granted: granted.map((c) => ({ name: c.name, url: `${cfg.server}${c.path}` })) });
+  const { args, stdin } = adapter.start(runCfg, routine, runInfo, bot, carryOn, mcpArg, system, { contained, outDir: contained ? null : outDir, streaming, browser, granted: granted.map((c) => ({ name: c.name, url: `${cfg.server}${c.path}` })) });
   const codexEnv = codex ? { ...openaiKey, ...(mcpServer ? { AMBIENT_SERVER: cfg.server, AMBIENT_RUN_TOKEN: runToken } : {}) } : {};
   let child;
   let containerName = null;
@@ -2246,18 +2294,21 @@ async function run(id) {
       cleanup();
       await fail(`Podman isn't installed on ${hostname()}, and this bot runs in its own container. Install it (apt-get install -y podman), or switch the bot to run on the computer itself.`);
     }
-    const built = ensureImage(p);
+    const built = ensureImage(p, browser);
     if (built) {
       cleanup();
       await fail(built);
     }
     containerName = `ambient-run-${runInfo.id}`.slice(0, 60);
+    const image = browser ? BROWSER_IMAGE : IMAGE;
     // Values reach podman through its environment (never its command line); `-e NAME` passes one on.
     const secretEnv = Object.fromEntries(Object.entries(secrets).filter(([k]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !RESERVED_ENV.test(k)));
     // Claude Code gets its sign-in; Codex its OpenAI key (if one is chosen) and the run's token for its MCP server.
     const pass = codex ? { ...secretEnv, ...codexEnv } : { ...signInEnv(chosenClaude(pick(process.env, new RegExp(`^(${AUTH_ENV.join("|")})$`)))), ...secretEnv };
     const podArgs = [
       "run", "--rm", "-i", "--name", containerName, "--user", "node", "--security-opt", "no-new-privileges", "--cap-drop", "all", ...LIMITS,
+      // Chromium keeps its pages in /dev/shm: Podman's 64 MB crashes its tabs.
+      ...(browser ? ["--shm-size", "1g"] : []),
       "-v", `ambient-bot-${routine.id}:/home/bot:U`,
       "-v", `${fileURLToPath(import.meta.url)}:/opt/ambient/ambient-runner.mjs:ro`,
       ...(mcpFile ? ["-v", `${mcpFile}:/opt/ambient/mcp.json:ro`] : []),
@@ -2271,7 +2322,7 @@ async function run(id) {
       "-e", `AMBIENT_ROUTINE_ID=${routine.id}`, "-e", `AMBIENT_ROUTINE_NAME=${routine.name.replace(/[\r\n]/g, " ")}`, "-e", `AMBIENT_RUN_ID=${runInfo.id}`,
       ...Object.keys(pass).flatMap((k) => ["-e", k]),
       // With a workspace, a small shell puts the skills in place first, then becomes Claude Code.
-      ...(codex ? [IMAGE, "sh", "-c", CODEX_SCRIPT, "sh", ...args] : skillsDir ? [IMAGE, "sh", "-c", SKILLS_SCRIPT, "sh", ...args] : [IMAGE, "claude", ...args]),
+      ...(codex ? [IMAGE, "sh", "-c", CODEX_SCRIPT, "sh", ...args] : skillsDir ? [image, "sh", "-c", SKILLS_SCRIPT, "sh", ...args] : [image, "claude", ...args]),
     ];
     child = spawn(p, podArgs, { env: { PATH: SYSTEM_PATH.join(":"), HOME: "/root", ...pass }, stdio: ["pipe", "pipe", "pipe"] });
   } else {
@@ -2766,9 +2817,10 @@ switch (cmd) {
   case "image": {
     const p = podman();
     if (!p) die("Podman isn't installed. Install it first (apt-get install -y podman).");
-    const err = ensureImage(p);
+    const browser = rest[0] === "browser";
+    const err = ensureImage(p, browser);
     if (err) die(err);
-    log(`The bots' image ${IMAGE} is ready.`);
+    log(`The bots' image ${browser ? BROWSER_IMAGE : IMAGE} is ready.`);
     break;
   }
   case "status":

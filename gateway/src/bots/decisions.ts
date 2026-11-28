@@ -38,7 +38,7 @@ export interface ProposedChange {
   /** A new version of this file (AGENTS.md, say)… */
   path?: string;
   content?: string;
-  /** …or these settings (schedule, isolation, secrets, model, runtime, report, delegate). */
+  /** …or these settings (schedule, isolation, secrets, model, runtime, report, delegate, browser). */
   settings?: Record<string, unknown>;
   why: string;
 }
