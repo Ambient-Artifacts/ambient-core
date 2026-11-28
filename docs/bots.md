@@ -511,10 +511,14 @@ web app by clicking through it, checking a page after a deploy, reading a site w
 Amb gets a browser in the person's own chat too (runner 0.20.0): the same image and tools, in a
 container on the computer Amb runs on.
 
-- **When:** the gateway sends `browser: true` with a chat message (`ComputerJob.browser`) unless the
-  computer is Full root (`access: "full"`): what a web page says reaches Amb itself, with the
-  person's whole Ambient, and there Amb runs root commands without asking. Not in Ambient's own
-  turns (heartbeat, a bot's question) and not in shared threads (Slack, Teams).
+- **Off until the person turns it on:** Amb's settings carry `browser` (default `false`):
+  `GET`/`PUT /v1/app/ambient/settings` with `{ "browser": true }`, or `ambient_settings` with
+  `browser` over MCP. It's a choice because what a web page says reaches Amb itself, with the
+  person's whole Ambient (the bots' browser is a switch too).
+- **When:** with it on, the gateway sends `browser: true` with a chat message
+  (`ComputerJob.browser`), except on a Full root computer (`access: "full"`), where Amb runs root
+  commands without asking. Not in Ambient's own turns (heartbeat, a bot's question) and not in
+  shared threads (Slack, Teams). It takes effect from the next message.
 - **On the computer:** it needs Podman. The image is built in the background the first time a chat
   may have a browser; until it's there, sessions start without one. A session that gains or loses
   the browser starts again where it was (`--resume`), like one whose connections changed.
@@ -1571,10 +1575,11 @@ Per person, a sealed record:
   a day, none at night) or `"never"`.
 - `reach`: where Amb writes first: `"app"` (default: a push) or `"imessage"` (a text; only once
   iMessage is connected, 400 `not_connected` before). See [Channels](#channels).
+- `browser`: a browser in their chat with Amb, `false` by default. See "Amb's browser".
 
-`GET /v1/app/ambient/settings` → `{ "notify": "important", "reach": "app" }`; `PUT` with
-`{ "notify"?, "reach"? }` → the same. MCP tool `ambient_settings` (`{ notify?, reach? }`), changed
-only when the person asks.
+`GET /v1/app/ambient/settings` → `{ "notify": "important", "reach": "app", "browser": false }`;
+`PUT` with `{ "notify"?, "reach"?, "browser"? }` → the same. MCP tool `ambient_settings`
+(`{ notify?, reach?, browser? }`), changed only when the person asks.
 
 ## Channels
 

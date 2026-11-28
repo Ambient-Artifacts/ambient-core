@@ -851,9 +851,9 @@ export function botAppRoutes(
     const a = await actor(res);
     const st = d.ambSettings?.();
     if (!st) return notEnabled(res);
-    const body = z.object({ notify: z.enum(NOTIFY).optional(), reach: z.enum(REACH).optional() }).safeParse(req.body);
+    const body = z.object({ notify: z.enum(NOTIFY).optional(), reach: z.enum(REACH).optional(), browser: z.boolean().optional() }).safeParse(req.body);
     if (!body.success) {
-      res.status(400).json({ error: "bad_request", message: `Send notify: ${NOTIFY.join(" or ")}, or reach: ${REACH.join(" or ")}.` });
+      res.status(400).json({ error: "bad_request", message: `Send notify: ${NOTIFY.join(" or ")}, reach: ${REACH.join(" or ")}, or browser: true or false.` });
       return;
     }
     try {

@@ -386,6 +386,7 @@ export function createApp(deps: AppDeps) {
   };
   folders.ambSettings = ambSettings;
   heartbeat.watching = (uid) => ambSettings.notifies(uid);
+  ambient.browserOn = (uid) => ambSettings.browser(uid);
   // Every bot learns on its own (docs/bots.md, "How bots learn").
   const learning = new BotLearning({
     control,

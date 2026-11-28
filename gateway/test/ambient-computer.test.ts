@@ -234,10 +234,22 @@ describe("a browser for the chat", () => {
       await settled();
       return job;
     };
+    // Off until the person turns it on (Amb's settings).
+    expect((await appCall(s, lena.access_token, "GET", "/v1/app/ambient/settings")).json).toMatchObject({ browser: false });
+    expect(await ask()).not.toHaveProperty("browser");
+    expect((await appCall(s, lena.access_token, "PUT", "/v1/app/ambient/settings", { browser: true })).json).toMatchObject({ browser: true, notify: "important", reach: "app" });
     expect((await ask()).browser).toBe(true);
     expect((await appCall(s, lena.access_token, "PUT", `/v1/app/computers/${id}/access`, { access: "full" })).status).toBe(200);
     expect(await ask()).not.toHaveProperty("browser");
     await appCall(s, lena.access_token, "PUT", `/v1/app/computers/${id}/access`, { access: "standard" });
+    // Over MCP too: turned off, and said so.
+    const pat = String((await appCall(s, lena.access_token, "POST", "/v1/app/pats", { label: "Claude" })).json.token);
+    const client = await mcpClient(`${s.origin}/mcp`, pat);
+    const off = await client.callTool({ name: "ambient_settings", arguments: { browser: false } });
+    expect((off.content as { text: string }[])[0]!.text).toContain("It has no browser in their chat.");
+    expect(await ask()).not.toHaveProperty("browser");
+    await client.callTool({ name: "ambient_settings", arguments: { browser: true } });
+    await client.close();
   });
 });
 
@@ -431,6 +443,7 @@ describe("Amb's browser", () => {
 
   it("gives the chat a browser in a container, through the runner, and takes it away on Full root", async () => {
     await appCall(s, lena.access_token, "DELETE", "/v1/app/ambient/chat");
+    await appCall(s, lena.access_token, "PUT", "/v1/app/ambient/settings", { browser: true });
     const dir = mkdtempSync(join(tmpdir(), "ambient-browser-"));
     const bin = join(dir, "bin");
     mkdirSync(bin);

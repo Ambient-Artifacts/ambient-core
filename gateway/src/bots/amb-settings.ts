@@ -1,8 +1,9 @@
 // Amb's settings per person (docs/bots.md, "Amb's settings"). Watching the bots is part of Amb's
 // job, not an automation: "notify" says whether it tells the person when something needs them
 // (the heartbeat: a failed run, a decision waiting long, an approval) or never; "reach" says where
-// Amb writes first: the app (a push) or a channel they connected (docs/bots.md, "Channels").
-// A sealed record.
+// Amb writes first: the app (a push) or a channel they connected (docs/bots.md, "Channels");
+// "browser" whether Amb has a browser in their chat (docs/bots.md, "Amb's browser"), off until
+// they turn it on. A sealed record.
 import { api, type Control } from "../control.ts";
 import type { RoutineKeys } from "../routines/keys.ts";
 
@@ -15,6 +16,8 @@ export interface AmbSettingsView {
   notify: Notify;
   /** Where Amb writes first: "app" (a push), or a channel the person connected ("imessage"). */
   reach: string;
+  /** A browser in their chat with Amb (never on a Full root computer); off by default. */
+  browser: boolean;
 }
 
 export class AmbSettingsError extends Error {
@@ -48,12 +51,12 @@ export class AmbSettings {
       const raw = await this.d.keys.open({ kind: "user", uid }, `record:${KIND}`, r.iv, r.ct).catch(() => null);
       try {
         const v = raw ? (JSON.parse((JSON.parse(raw) as { c: string }).c) as Partial<AmbSettingsView>) : {};
-        if (v.notify && (NOTIFY as readonly string[]).includes(v.notify)) return { notify: v.notify, reach: typeof v.reach === "string" && v.reach ? v.reach : "app" };
+        if (v.notify && (NOTIFY as readonly string[]).includes(v.notify)) return { notify: v.notify, reach: typeof v.reach === "string" && v.reach ? v.reach : "app", browser: v.browser === true };
       } catch {
         // Unreadable: the defaults.
       }
     }
-    return { notify: (await this.d.legacyOff?.(uid).catch(() => false)) ? "never" : "important", reach: "app" };
+    return { notify: (await this.d.legacyOff?.(uid).catch(() => false)) ? "never" : "important", reach: "app", browser: false };
   }
 
   async set(uid: string, patch: Partial<AmbSettingsView>): Promise<AmbSettingsView> {
@@ -70,6 +73,11 @@ export class AmbSettings {
   /** Where Amb writes first for this person. */
   async reach(uid: string): Promise<string> {
     return (await this.get(uid)).reach;
+  }
+
+  /** Whether this person turned Amb's browser on. */
+  async browser(uid: string): Promise<boolean> {
+    return (await this.get(uid)).browser;
   }
 
   /** Whether the heartbeat tells this person anything. */
