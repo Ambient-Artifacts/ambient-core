@@ -432,7 +432,9 @@ export class GitHubEvents {
         if (st.comments.length) await this.write(owner, REVIEW, key, st);
       }
       if (a === "opened" || a === "reopened" || a === "ready_for_review" || a === "synchronize") {
-        if (p.pull_request?.draft) return "a draft";
+        // A person's draft is work in progress. A bot's own (ambient/<bot>/…) is a draft by its gate
+        // and waits for this review before it's marked ready: skipping it stalled both (2026-11-23).
+        if (p.pull_request?.draft && !pr.branch.startsWith("ambient/")) return "a draft";
         const who = p.pull_request?.user?.login ? ` by ${p.pull_request.user.login}` : "";
         const sha = p.pull_request?.head?.sha ? ` (head ${p.pull_request.head.sha.slice(0, 7)})` : "";
         this.add(owner, bot, repo, pr, `${a === "synchronize" ? "New commits on" : "To review:"} pull request #${pr.number}${p.pull_request?.title ? ` “${clip(p.pull_request.title, 120)}”` : ""}${who}${sha}`, "review");

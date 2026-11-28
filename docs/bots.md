@@ -1011,8 +1011,9 @@ stays what the run starts with; GitHub's comes along as new in its thread.
 MCP tools for Amb: `github_webhook` (the URL and the events to tick; the secret only in the app)
 and `watch_github` (`{ id, repos, on? }`).
 
-**Every pull request (`all_prs`).** Opened, reopened, marked ready or new commits (not drafts, not
-its own branch) wake the bot with the pull request's number, title, author and head, gathered and
+**Every pull request (`all_prs`).** Opened, reopened, marked ready or new commits (not a person's
+draft, but a bot's own draft from `ambient/<bot>/…`, which waits for this review before its gate
+marks it ready; not its own branch) wake the bot with the pull request's number, title, author and head, gathered and
 capped like the gate's wake-ups. Its instructions: comments only on real problems, inline, then one
 review (`gh pr review`); never approve with red checks, never push or merge; every comment ends
 with its signature line.
